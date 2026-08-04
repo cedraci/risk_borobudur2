@@ -230,3 +230,46 @@ pub async fn refs_upsert(pool: &PgPool, r: &InstrumentRef) -> anyhow::Result<()>
     .await?;
     Ok(())
 }
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct FuturesContract {
+    pub contract_root: String,
+    pub label: String,
+    pub category: String,
+    pub point_value: Option<f64>,
+    pub currency: String,
+    pub curve: Option<String>,
+    pub price_convention: String,
+    pub confirmed: bool,
+}
+
+const SELECT_CONTRACTS: &str = "SELECT contract_root, label, category,
+        point_value::float8 AS point_value, currency, curve, price_convention, confirmed
+     FROM futures_contracts ORDER BY contract_root";
+
+pub async fn contracts_all(pool: &PgPool) -> anyhow::Result<Vec<FuturesContract>> {
+    Ok(sqlx::query_as(SELECT_CONTRACTS).fetch_all(pool).await?)
+}
+
+/// Full-row replace, like `refs_upsert`: every field is written as given.
+pub async fn contracts_upsert(pool: &PgPool, c: &FuturesContract) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO futures_contracts
+           (contract_root, label, category, point_value, currency, curve, price_convention, confirmed, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+         ON CONFLICT (contract_root) DO UPDATE SET
+           label = EXCLUDED.label,
+           category = EXCLUDED.category,
+           point_value = EXCLUDED.point_value,
+           currency = EXCLUDED.currency,
+           curve = EXCLUDED.curve,
+           price_convention = EXCLUDED.price_convention,
+           confirmed = EXCLUDED.confirmed,
+           updated_at = now()",
+    )
+    .bind(&c.contract_root).bind(&c.label).bind(&c.category).bind(c.point_value)
+    .bind(&c.currency).bind(&c.curve).bind(&c.price_convention).bind(c.confirmed)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

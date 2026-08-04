@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "migrate", "macros"] }
 postgresql_embedded = "0.18"
 ingest = { path = "../ingest" }
+analytics = { path = "../analytics" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
