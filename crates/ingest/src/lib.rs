@@ -1,3 +1,6 @@
+pub mod futures_file;
+pub use futures_file::{CtdRow, parse_ctd_file};
+
 use calamine::{Data, Range, Reader, Xlsx};
 use chrono::{Days, NaiveDate};
 use std::io::Cursor;
