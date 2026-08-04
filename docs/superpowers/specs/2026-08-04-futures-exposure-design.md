@@ -233,12 +233,15 @@ silent zero.
 
 ## API
 
+Routes follow the existing convention in `routes.rs`: analytics live under
+`/api/metrics/`, reference data at the top level, axum 0.8 path syntax `{param}`.
+
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/limits/derivatives?date=` | Category table + per-contract detail + flags |
-| `GET /api/limits/rates?date=` | Extended: `futures[]` added, `total_dv01_eur` includes them |
+| `GET /api/metrics/derivatives?date=` | Category table + per-contract detail + flags |
+| `GET /api/metrics/rates?date=` | Extended: `futures[]` added, `total_dv01_eur` includes them |
 | `GET /api/futures-contracts` | Static specs for the grid |
-| `PUT /api/futures-contracts/:root` | Edit a spec; validation mirrors `refs.rs::put` |
+| `PUT /api/futures-contracts/{root}` | Edit a spec; validation mirrors `refs.rs::put` |
 | `POST /api/futures-analytics` | Multipart companion-file upload (field `file`) |
 | `GET /api/futures-analytics?date=` | Rows held for a date |
 
@@ -284,11 +287,20 @@ numbers pointing at a line in the sheet.
 | `server` | Endpoint shape; degradation when analytics are absent; `PUT` validation, in the style of `api_limits.rs` |
 | regression | Existing bond DV01 and `nav_sensitivity_100bp` values pinned across the restatement |
 
-**Fixtures are synthetic.** The real NAV Recap is confidential fund data and
-does not go into the repository. `sample.xlsx` is already a made-up workbook and
-gains futures rows of the same shape. The arithmetic in this document was
-validated against the real file during analysis; nothing derived from it is
-committed.
+**No fixture changes are needed.** `crates/ingest/tests/fixtures/sample.xlsx`
+already carries all eight futures — same tickers, quantities, prices and
+valorisations as the production workbook, including the TYU6 row that exercises
+the 32nds path — plus the same AUM (28,332,753.49) and NAV date (2026-07-24).
+Every assertion in this plan can be written against numbers the fixture
+already produces.
+
+**Confidentiality note (correction).** An earlier draft of this spec asserted
+the fixture was synthetic. It is not: its futures block and fund-level totals
+are a verbatim copy of the real NAV Recap, with only the bond line altered
+(`US105756CL22`, 1.125% 2035-11-15, in place of the real Brazil 6.625% 2035).
+The repository therefore contains real position data. It has no git remote
+today, so nothing has left the machine — but this should be a deliberate
+decision before any remote is added, not a surprise.
 
 ## Out of scope
 
