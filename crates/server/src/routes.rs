@@ -21,6 +21,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/metrics/backtest", get(handlers::metrics::backtest))
         .route("/api/refs", get(handlers::refs::list))
         .route("/api/refs/{code}", axum::routing::put(handlers::refs::put))
+        .route("/api/futures-contracts", get(handlers::futures::contracts))
+        .route("/api/futures-contracts/{root}", axum::routing::put(handlers::futures::put_contract))
+        .route(
+            "/api/futures-analytics",
+            get(handlers::futures::list_ctd).post(handlers::futures::upload_ctd),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .fallback(crate::static_assets::static_handler)
         .with_state(state)
