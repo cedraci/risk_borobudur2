@@ -11,6 +11,9 @@ pub struct ImportOutcome {
     pub dividends: usize,
     pub operations: usize,
     pub div_ops_replaced: bool,
+    /// Non-fatal futures spec problems. A new or mis-specified contract must
+    /// never block the weekly NAV import.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -57,6 +60,7 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         return Ok(ImportOutcome {
             import_id: id, duplicate: true, nav_rows: 0, positions: 0,
             dividends: 0, operations: 0, div_ops_replaced: false,
+            warnings: Vec::new(),
         });
     }
 
@@ -123,6 +127,94 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         .await?;
     }
 
+    // Futures: seed unknown contract roots and cross-check the point value
+    // implied by the workbook against the stored spec.
+    let mut warnings: Vec<String> = Vec::new();
+    let known: Vec<FuturesContract> = sqlx::query_as(SELECT_CONTRACTS).fetch_all(&mut *tx).await?;
+    let by_root: std::collections::HashMap<String, FuturesContract> =
+        known.into_iter().map(|c| (c.contract_root.clone(), c)).collect();
+
+    for p in wb.positions.iter().filter(|p| p.asset_type == "Future") {
+        let Some(ticker) = p.ticker.as_deref() else {
+            warnings.push(format!("{}: futures row has no ticker; contract not identified", p.isin));
+            continue;
+        };
+        let Some(root) = analytics::contract_root(ticker) else {
+            warnings.push(format!("{ticker}: cannot derive a contract root"));
+            continue;
+        };
+        let (Some(raw_price), Some(raw_pam), Some(qty), Some(val)) =
+            (p.price, p.avg_cost, p.quantity, p.valuation_ccy)
+        else {
+            warnings.push(format!("{ticker}: incomplete row; point value not verified"));
+            continue;
+        };
+
+        match by_root.get(&root) {
+            None => {
+                // Guess only what the ticker suffix states unambiguously.
+                // "Comdty" covers bond and commodity futures alike, so it is
+                // never guessed - the user confirms it.
+                let category = match ticker.split_whitespace().last() {
+                    Some("Index") => "equity",
+                    Some("Curncy") => "fx",
+                    _ => "other",
+                };
+                let pv = analytics::implied_point_value(raw_price, raw_pam, qty, val);
+                sqlx::query(
+                    "INSERT INTO futures_contracts
+                       (contract_root, label, category, point_value, currency, price_convention, confirmed)
+                     VALUES ($1, $2, $3, $4, $5, 'decimal', false)
+                     ON CONFLICT (contract_root) DO NOTHING",
+                )
+                .bind(&root)
+                .bind(p.name.clone().unwrap_or_else(|| root.clone()))
+                .bind(category)
+                .bind(pv)
+                .bind(p.currency.clone().unwrap_or_else(|| "EUR".into()))
+                .execute(&mut *tx)
+                .await?;
+                warnings.push(format!("{root}: new contract seeded from {ticker}; confirm its spec on the Data page"));
+            }
+            Some(spec) => {
+                let Some(stored) = spec.point_value else { continue };
+                let conv = analytics::PriceConvention::parse(&spec.price_convention)
+                    .unwrap_or(analytics::PriceConvention::Decimal);
+                let implied = analytics::implied_point_value(
+                    analytics::decode_price(raw_price, conv),
+                    analytics::decode_price(raw_pam, conv),
+                    qty,
+                    val,
+                );
+                let Some(implied) = implied else { continue }; // marked at cost: undeterminable
+                if (implied - stored).abs() <= 0.005 * stored {
+                    continue;
+                }
+                // Mismatch. If the opposite convention reconciles, say so.
+                let other = match conv {
+                    analytics::PriceConvention::Decimal => analytics::PriceConvention::Th32,
+                    analytics::PriceConvention::Th32 => analytics::PriceConvention::Decimal,
+                };
+                let alt = analytics::implied_point_value(
+                    analytics::decode_price(raw_price, other),
+                    analytics::decode_price(raw_pam, other),
+                    qty,
+                    val,
+                );
+                match alt {
+                    Some(a) if (a - stored).abs() <= 0.005 * stored => warnings.push(format!(
+                        "{root}: point value implies convention {}, stored {}",
+                        other.as_str(),
+                        conv.as_str()
+                    )),
+                    _ => warnings.push(format!(
+                        "{root}: point value mismatch - stored {stored}, implied {implied:.1}"
+                    )),
+                }
+            }
+        }
+    }
+
     if replace_div_ops {
         sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
         for r in &wb.dividends {
@@ -153,6 +245,7 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         dividends: if replace_div_ops { wb.dividends.len() } else { 0 },
         operations: if replace_div_ops { wb.operations.len() } else { 0 },
         div_ops_replaced: replace_div_ops,
+        warnings,
     })
 }
 
