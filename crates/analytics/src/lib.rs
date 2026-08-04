@@ -8,6 +8,7 @@ pub mod concentration;
 pub mod liquidity;
 pub mod rates;
 pub mod backtest;
+pub mod futures;
 
 pub use returns::*;
 pub use stats::*;
@@ -19,3 +20,4 @@ pub use concentration::*;
 pub use liquidity::*;
 pub use rates::*;
 pub use backtest::*;
+pub use futures::*;
