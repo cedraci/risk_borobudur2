@@ -366,3 +366,66 @@ pub async fn contracts_upsert(pool: &PgPool, c: &FuturesContract) -> anyhow::Res
     .await?;
     Ok(())
 }
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct CtdRecord {
+    pub nav_date: NaiveDate,
+    pub ticker: String,
+    pub ctd_isin: String,
+    pub ctd_mod_duration: f64,
+    pub ctd_clean_price: f64,
+    pub ctd_accrued: f64,
+    pub conversion_factor: f64,
+}
+
+/// Replace every analytics row for `date` in one transaction. Unlike the
+/// workbook import there is no content dedupe: the expected reason to
+/// re-upload is a corrected pull, which must win.
+pub async fn ctd_replace(
+    pool: &PgPool,
+    date: NaiveDate,
+    filename: &str,
+    rows: &[ingest::CtdRow],
+) -> anyhow::Result<usize> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM futures_analytics WHERE nav_date = $1")
+        .bind(date)
+        .execute(&mut *tx)
+        .await?;
+    for r in rows {
+        sqlx::query(
+            "INSERT INTO futures_analytics
+               (nav_date, ticker, ctd_isin, ctd_mod_duration, ctd_clean_price,
+                ctd_accrued, conversion_factor, source_file)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(date).bind(&r.ticker).bind(&r.ctd_isin).bind(r.ctd_mod_duration)
+        .bind(r.ctd_clean_price).bind(r.ctd_accrued).bind(r.conversion_factor).bind(filename)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(rows.len())
+}
+
+pub async fn ctd_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Vec<CtdRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT nav_date, ticker, ctd_isin,
+                ctd_mod_duration::float8 AS ctd_mod_duration,
+                ctd_clean_price::float8 AS ctd_clean_price,
+                ctd_accrued::float8 AS ctd_accrued,
+                conversion_factor::float8 AS conversion_factor
+         FROM futures_analytics WHERE nav_date = $1 ORDER BY ticker",
+    )
+    .bind(date)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// AUM recorded for a NAV date, used as the denominator for exposure.
+pub async fn aum_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Option<f64>> {
+    Ok(sqlx::query_scalar("SELECT aum::float8 FROM nav_history WHERE date = $1")
+        .bind(date)
+        .fetch_optional(pool)
+        .await?)
+}
