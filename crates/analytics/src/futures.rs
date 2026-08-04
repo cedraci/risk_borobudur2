@@ -230,6 +230,34 @@ pub fn exposure(positions: &[FuturePosition], aum: f64) -> ExposureReport {
     }
 }
 
+/// Cheapest-to-deliver analytics for one bond future on one NAV date.
+/// Supplied weekly; not derivable from the NAV Recap.
+#[derive(Debug, Clone)]
+pub struct CtdAnalytics {
+    pub mod_duration: f64,
+    pub clean_price: f64,
+    pub accrued: f64,
+    pub conversion_factor: f64,
+}
+
+/// DV01 of a single contract, in contract currency.
+///
+/// `mod_duration * dirty_price/100 * face * 1bp / conversion_factor`, where the
+/// deliverable face is `point_value * 100` and the price is quoted per 100 —
+/// so the two hundreds cancel and only `point_value` remains.
+pub fn dv01_contract(a: &CtdAnalytics, point_value: f64) -> Option<f64> {
+    if a.conversion_factor <= 0.0 || point_value <= 0.0 {
+        return None;
+    }
+    let dirty = a.clean_price + a.accrued;
+    Some(a.mod_duration * dirty * point_value * 1e-4 / a.conversion_factor)
+}
+
+/// DV01 of the held position, in EUR. Negative for a short.
+pub fn dv01_position(a: &CtdAnalytics, point_value: f64, qty: f64, fx_rate: f64) -> Option<f64> {
+    dv01_contract(a, point_value).map(|d| qty * d * fx_rate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +397,34 @@ mod tests {
         assert_eq!(rep.rows[0].pct_nav, None);
         assert_eq!(rep.excluded.len(), 1);
         assert!((rep.total.gross_pct - 0.0).abs() < 1e-12);
+    }
+
+    fn ctd() -> CtdAnalytics {
+        CtdAnalytics { mod_duration: 8.41, clean_price: 98.72, accrued: 0.63, conversion_factor: 0.782145 }
+    }
+
+    #[test]
+    fn dv01_per_contract_matches_hand_computation() {
+        // dirty = 99.35; 8.41 * 99.35 * 1000 * 1e-4 = 83.55335; / 0.782145 = 106.8259
+        let d = dv01_contract(&ctd(), 1000.0).unwrap();
+        assert!((d - 106.8259).abs() < 1e-3, "got {d}");
+    }
+
+    #[test]
+    fn dv01_position_scales_by_quantity_and_fx() {
+        let per = dv01_contract(&ctd(), 1000.0).unwrap();
+        let pos = dv01_position(&ctd(), 1000.0, -8.0, 1.0).unwrap();
+        assert!((pos - -8.0 * per).abs() < 1e-9, "a short is negative DV01");
+        let usd = dv01_position(&ctd(), 1000.0, -6.0, 0.87881185).unwrap();
+        assert!((usd - -6.0 * per * 0.87881185).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dv01_rejects_degenerate_inputs() {
+        let mut a = ctd();
+        a.conversion_factor = 0.0;
+        assert_eq!(dv01_contract(&a, 1000.0), None);
+        assert_eq!(dv01_contract(&ctd(), 0.0), None);
+        assert_eq!(dv01_position(&ctd(), 0.0, -8.0, 1.0), None);
     }
 }
