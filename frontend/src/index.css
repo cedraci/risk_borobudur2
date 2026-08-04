@@ -1,0 +1,27 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #f4f6f8; color: #1a2330; }
+.layout { display: flex; min-height: 100vh; }
+.sidebar { width: 200px; background: #12263a; color: #fff; padding: 20px 0; flex-shrink: 0; }
+.sidebar h1 { font-size: 18px; padding: 0 20px 16px; margin: 0; border-bottom: 1px solid #2a4562; }
+.sidebar a { display: block; color: #b9c9d8; padding: 10px 20px; text-decoration: none; }
+.sidebar a.active { color: #fff; background: #1d3952; border-left: 3px solid #4da3ff; }
+.content { flex: 1; padding: 24px; max-width: 1280px; }
+.card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(16, 30, 54, .08); margin-bottom: 16px; }
+.cards-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi-label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: .04em; }
+.kpi-value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+.kpi-sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th, .tbl td { padding: 6px 10px; text-align: right; border-bottom: 1px solid #e7ecf1; }
+.tbl th:first-child, .tbl td:first-child { text-align: left; }
+.tbl th { color: #64748b; font-weight: 600; }
+.pos { color: #0a7d33; }
+.neg { color: #c62828; }
+.warn-badge { display: inline-block; background: #fff4e0; color: #925b06; border: 1px solid #f0c36d; border-radius: 4px; padding: 2px 8px; font-size: 12px; margin: 2px 6px 2px 0; }
+h2 { margin: 0 0 16px; }
+select, input[type="number"], button { font: inherit; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
+button { cursor: pointer; background: #12263a; color: #fff; border: none; }
+button:disabled { opacity: .5; cursor: default; }
+.controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.drop { border: 2px dashed #cbd5e1; border-radius: 8px; padding: 32px; text-align: center; color: #64748b; }
+.drop.over { border-color: #4da3ff; background: #f0f7ff; }

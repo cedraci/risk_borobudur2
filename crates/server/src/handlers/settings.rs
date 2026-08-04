@@ -1,0 +1,37 @@
+use crate::error::AppError;
+use crate::state::AppState;
+use axum::extract::State;
+use axum::Json;
+use db::settings::AppSettings;
+
+pub async fn get(State(st): State<AppState>) -> Result<Json<AppSettings>, AppError> {
+    Ok(Json(db::settings::get_settings(&st.pool).await?))
+}
+
+pub async fn put(State(st): State<AppState>, Json(s): Json<AppSettings>) -> Result<Json<AppSettings>, AppError> {
+    validate(&s).map_err(AppError::BadRequest)?;
+    db::settings::put_settings(&st.pool, &s).await?;
+    Ok(Json(db::settings::get_settings(&st.pool).await?))
+}
+
+fn validate(s: &AppSettings) -> Result<(), String> {
+    if !(s.var_confidence > 0.5 && s.var_confidence < 1.0) { return Err("var_confidence must be in (0.5, 1)".into()); }
+    if s.var_horizon_days < 1 { return Err("var_horizon_days must be >= 1".into()); }
+    if s.var_window_days < 30 { return Err("var_window_days must be >= 30".into()); }
+    if !(0.0..=1.0).contains(&s.var_limit) || s.var_limit == 0.0 { return Err("var_limit must be in (0, 1]".into()); }
+    if s.short_dd_max_days < 1 { return Err("short_dd_max_days must be >= 1".into()); }
+    if !(-0.05..=0.2).contains(&s.risk_free_rate) { return Err("risk_free_rate must be in [-5%, 20%]".into()); }
+    if !(s.redemption_shock > 0.0 && s.redemption_shock < 1.0) {
+        return Err("redemption_shock must be in (0, 1)".into());
+    }
+    let Some(obj) = s.liquidity_defaults.as_object() else {
+        return Err("liquidity_defaults must be a JSON object".into());
+    };
+    for (k, v) in obj {
+        let ok = v.as_str().map(|b| ["d1", "d2_7", "d8_30", "d30p"].contains(&b)).unwrap_or(false);
+        if !ok {
+            return Err(format!("liquidity_defaults[{k}] must be one of d1, d2_7, d8_30, d30p"));
+        }
+    }
+    Ok(())
+}

@@ -1,0 +1,232 @@
+use chrono::NaiveDate;
+use ingest::ParsedWorkbook;
+use sqlx::PgPool;
+
+#[derive(Debug, serde::Serialize)]
+pub struct ImportOutcome {
+    pub import_id: i64,
+    pub duplicate: bool,
+    pub nav_rows: usize,
+    pub positions: usize,
+    pub dividends: usize,
+    pub operations: usize,
+    pub div_ops_replaced: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct NavRow {
+    pub date: NaiveDate,
+    pub aum: f64,
+    pub shares: f64,
+    pub nav: f64,
+}
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct PositionRecord {
+    pub nav_date: NaiveDate,
+    pub asset_type: String,
+    pub isin: String,
+    pub name: Option<String>,
+    pub currency: Option<String>,
+    pub quantity: Option<f64>,
+    pub avg_cost: Option<f64>,
+    pub price: Option<f64>,
+    pub valuation_ccy: Option<f64>,
+    pub accrued_interest: Option<f64>,
+    pub fx_rate: Option<f64>,
+    pub valuation_eur: Option<f64>,
+    pub weight: Option<f64>,
+    pub ticker: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct ImportRecord {
+    pub id: i64,
+    pub filename: String,
+    pub nav_date: NaiveDate,
+    pub imported_at: chrono::DateTime<chrono::Utc>,
+    pub row_counts: serde_json::Value,
+}
+
+pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &ParsedWorkbook) -> anyhow::Result<ImportOutcome> {
+    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM imports WHERE sha256 = $1")
+        .bind(sha256)
+        .fetch_optional(pool)
+        .await?
+    {
+        return Ok(ImportOutcome {
+            import_id: id, duplicate: true, nav_rows: 0, positions: 0,
+            dividends: 0, operations: 0, div_ops_replaced: false,
+        });
+    }
+
+    let mut tx = pool.begin().await?;
+
+    let prev_latest: Option<NaiveDate> =
+        sqlx::query_scalar("SELECT max(nav_date) FROM imports").fetch_one(&mut *tx).await?;
+    let replace_div_ops = prev_latest.is_none_or(|d| wb.nav_date >= d);
+
+    let nav_rows = wb.nav_history.len() + 1;
+    let row_counts = serde_json::json!({
+        "nav_rows": nav_rows, "positions": wb.positions.len(),
+        "dividends": if replace_div_ops { wb.dividends.len() } else { 0 },
+        "operations": if replace_div_ops { wb.operations.len() } else { 0 },
+    });
+    let (import_id,): (i64,) = sqlx::query_as(
+        "INSERT INTO imports (filename, sha256, nav_date, row_counts) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(filename).bind(sha256).bind(wb.nav_date).bind(&row_counts)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    const UPSERT_NAV: &str = "INSERT INTO nav_history (date, aum, shares, nav) VALUES ($1, $2, $3, $4)
+        ON CONFLICT (date) DO UPDATE SET aum = EXCLUDED.aum, shares = EXCLUDED.shares, nav = EXCLUDED.nav";
+    for r in &wb.nav_history {
+        sqlx::query(UPSERT_NAV).bind(r.date).bind(r.aum).bind(r.shares).bind(r.nav)
+            .execute(&mut *tx).await?;
+    }
+    // the recap's own NAV row (not yet in HISTO_NAV)
+    sqlx::query(UPSERT_NAV).bind(wb.nav_date).bind(wb.aum).bind(wb.shares).bind(wb.nav)
+        .execute(&mut *tx).await?;
+
+    sqlx::query("DELETE FROM position_snapshots WHERE nav_date = $1")
+        .bind(wb.nav_date).execute(&mut *tx).await?;
+    for p in &wb.positions {
+        sqlx::query(
+            "INSERT INTO position_snapshots (nav_date, import_id, asset_type, isin, name, currency, quantity, avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+        )
+        .bind(wb.nav_date).bind(import_id).bind(&p.asset_type).bind(&p.isin).bind(&p.name)
+        .bind(&p.currency).bind(p.quantity).bind(p.avg_cost).bind(p.price).bind(p.valuation_ccy)
+        .bind(p.accrued_interest).bind(p.fx_rate).bind(p.valuation_eur).bind(p.weight).bind(&p.ticker)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Seed bond reference data parsed from names; never overwrite user
+    // values (COALESCE keeps existing non-NULL columns).
+    for p in &wb.positions {
+        if p.asset_type != "Obligation" { continue; }
+        let Some(name) = &p.name else { continue };
+        let Some(b) = ingest::parse_bond_statics(name, p.currency.as_deref()) else { continue };
+        sqlx::query(
+            "INSERT INTO instrument_refs (code, bond_coupon_pct, bond_maturity, bond_coupon_freq)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (code) DO UPDATE SET
+               bond_coupon_pct = COALESCE(instrument_refs.bond_coupon_pct, EXCLUDED.bond_coupon_pct),
+               bond_maturity = COALESCE(instrument_refs.bond_maturity, EXCLUDED.bond_maturity),
+               bond_coupon_freq = COALESCE(instrument_refs.bond_coupon_freq, EXCLUDED.bond_coupon_freq),
+               updated_at = now()",
+        )
+        .bind(&p.isin).bind(b.coupon_pct).bind(b.maturity).bind(b.coupon_freq)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if replace_div_ops {
+        sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
+        for r in &wb.dividends {
+            sqlx::query("INSERT INTO dividends (provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5)")
+                .bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
+                .execute(&mut *tx).await?;
+        }
+        sqlx::query("DELETE FROM operations").execute(&mut *tx).await?;
+        for r in &wb.operations {
+            sqlx::query(
+                "INSERT INTO operations (trade_date, side, ticker, isin, name, currency, quantity, price, gross_amount, fees, net_price, net_amount)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            )
+            .bind(r.trade_date).bind(&r.side).bind(&r.ticker).bind(&r.isin).bind(&r.name)
+            .bind(&r.currency).bind(r.quantity).bind(r.price).bind(r.gross_amount).bind(r.fees)
+            .bind(r.net_price).bind(r.net_amount)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(ImportOutcome {
+        import_id,
+        duplicate: false,
+        nav_rows,
+        positions: wb.positions.len(),
+        dividends: if replace_div_ops { wb.dividends.len() } else { 0 },
+        operations: if replace_div_ops { wb.operations.len() } else { 0 },
+        div_ops_replaced: replace_div_ops,
+    })
+}
+
+pub async fn nav_rows(pool: &PgPool) -> anyhow::Result<Vec<NavRow>> {
+    Ok(sqlx::query_as(
+        "SELECT date, aum::float8 AS aum, shares::float8 AS shares, nav::float8 AS nav FROM nav_history ORDER BY date",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn position_dates(pool: &PgPool) -> anyhow::Result<Vec<NaiveDate>> {
+    Ok(sqlx::query_scalar("SELECT DISTINCT nav_date FROM position_snapshots ORDER BY nav_date DESC")
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn positions_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Vec<PositionRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT nav_date, asset_type, isin, name, currency,
+                quantity::float8 AS quantity, avg_cost::float8 AS avg_cost, price::float8 AS price,
+                valuation_ccy::float8 AS valuation_ccy, accrued_interest::float8 AS accrued_interest,
+                fx_rate::float8 AS fx_rate, valuation_eur::float8 AS valuation_eur,
+                weight::float8 AS weight, ticker
+         FROM position_snapshots WHERE nav_date = $1 ORDER BY id",
+    )
+    .bind(date)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn imports_list(pool: &PgPool) -> anyhow::Result<Vec<ImportRecord>> {
+    Ok(sqlx::query_as("SELECT id, filename, nav_date, imported_at, row_counts FROM imports ORDER BY imported_at DESC")
+        .fetch_all(pool)
+        .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct InstrumentRef {
+    pub code: String,
+    pub issuer_group: Option<String>,
+    pub liquidity_bucket: Option<String>,
+    pub bond_coupon_pct: Option<f64>,
+    pub bond_maturity: Option<NaiveDate>,
+    pub bond_coupon_freq: Option<i32>,
+}
+
+pub async fn refs_all(pool: &PgPool) -> anyhow::Result<Vec<InstrumentRef>> {
+    Ok(sqlx::query_as(
+        "SELECT code, issuer_group, liquidity_bucket,
+                bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq
+         FROM instrument_refs ORDER BY code",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Full-row replace: every field is written as given; None stores NULL,
+/// which means "use the derived default".
+pub async fn refs_upsert(pool: &PgPool, r: &InstrumentRef) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO instrument_refs (code, issuer_group, liquidity_bucket, bond_coupon_pct, bond_maturity, bond_coupon_freq, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now())
+         ON CONFLICT (code) DO UPDATE SET
+           issuer_group = EXCLUDED.issuer_group,
+           liquidity_bucket = EXCLUDED.liquidity_bucket,
+           bond_coupon_pct = EXCLUDED.bond_coupon_pct,
+           bond_maturity = EXCLUDED.bond_maturity,
+           bond_coupon_freq = EXCLUDED.bond_coupon_freq,
+           updated_at = now()",
+    )
+    .bind(&r.code).bind(&r.issuer_group).bind(&r.liquidity_bucket)
+    .bind(r.bond_coupon_pct).bind(r.bond_maturity).bind(r.bond_coupon_freq)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
