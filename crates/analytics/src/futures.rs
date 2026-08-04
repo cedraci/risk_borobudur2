@@ -70,6 +70,166 @@ pub fn implied_point_value(price: f64, avg_cost: f64, qty: f64, valuation_ccy: f
     (pv.is_finite() && pv > 0.0).then_some(pv)
 }
 
+use serde::Serialize;
+
+/// Derivative category for the exposure disclosure. The six standard
+/// regulatory categories; only three have holdings today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Category {
+    Equity,
+    InterestRate,
+    Fx,
+    Credit,
+    Commodity,
+    Other,
+}
+
+impl Category {
+    pub const ALL: [Category; 6] = [
+        Category::Equity,
+        Category::InterestRate,
+        Category::Fx,
+        Category::Credit,
+        Category::Commodity,
+        Category::Other,
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "equity" => Some(Self::Equity),
+            "interest_rate" => Some(Self::InterestRate),
+            "fx" => Some(Self::Fx),
+            "credit" => Some(Self::Credit),
+            "commodity" => Some(Self::Commodity),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Equity => "equity",
+            Self::InterestRate => "interest_rate",
+            Self::Fx => "fx",
+            Self::Credit => "credit",
+            Self::Commodity => "commodity",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// One futures position, with its price already decoded and its spec resolved.
+#[derive(Debug, Clone)]
+pub struct FuturePosition {
+    pub ticker: String,
+    pub name: String,
+    pub currency: String,
+    pub category: Category,
+    pub qty: f64,
+    pub price: f64,
+    pub point_value: Option<f64>,
+    pub fx_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExposureRow {
+    pub ticker: String,
+    pub name: String,
+    pub currency: String,
+    pub category: Category,
+    pub qty: f64,
+    pub price: f64,
+    pub point_value: Option<f64>,
+    pub notional_ccy: Option<f64>,
+    pub notional_eur: Option<f64>,
+    pub pct_nav: Option<f64>,
+    pub spec_missing: bool,
+}
+
+/// Long, short and gross for one category, each a fraction of net assets
+/// expressed in absolute value (shorts are positive numbers).
+#[derive(Debug, Clone, Serialize)]
+pub struct CategoryTotals {
+    pub category: Category,
+    pub long_pct: f64,
+    pub short_pct: f64,
+    pub gross_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExposureReport {
+    pub rows: Vec<ExposureRow>,
+    pub categories: Vec<CategoryTotals>,
+    /// Sum across categories; `category` is `Other` and carries no meaning.
+    pub total: CategoryTotals,
+    /// Tickers left out of the totals for want of a spec, an FX rate or an AUM.
+    pub excluded: Vec<String>,
+}
+
+/// Notional exposure by reference to the underlying, aggregated by category.
+///
+/// `notional = qty * point_value * price`, converted to EUR at the workbook's
+/// own FX rate, then expressed as a fraction of net assets. Long and short are
+/// summed separately, each in absolute value, without netting.
+pub fn exposure(positions: &[FuturePosition], aum: f64) -> ExposureReport {
+    let mut rows = Vec::with_capacity(positions.len());
+    let mut excluded = Vec::new();
+
+    for p in positions {
+        let notional_ccy = p.point_value.map(|pv| p.qty * pv * p.price);
+        let notional_eur = match (notional_ccy, p.fx_rate) {
+            (Some(n), Some(fx)) => Some(n * fx),
+            _ => None,
+        };
+        let pct_nav = match notional_eur {
+            Some(n) if aum > 0.0 => Some(n / aum),
+            _ => None,
+        };
+        if pct_nav.is_none() {
+            excluded.push(p.ticker.clone());
+        }
+        rows.push(ExposureRow {
+            ticker: p.ticker.clone(),
+            name: p.name.clone(),
+            currency: p.currency.clone(),
+            category: p.category,
+            qty: p.qty,
+            price: p.price,
+            point_value: p.point_value,
+            notional_ccy,
+            notional_eur,
+            pct_nav,
+            spec_missing: p.point_value.is_none(),
+        });
+    }
+
+    let categories: Vec<CategoryTotals> = Category::ALL
+        .iter()
+        .map(|cat| {
+            let mut long_pct = 0.0;
+            let mut short_pct = 0.0;
+            for r in rows.iter().filter(|r| r.category == *cat) {
+                match r.pct_nav {
+                    Some(p) if p > 0.0 => long_pct += p,
+                    Some(p) if p < 0.0 => short_pct += -p,
+                    _ => {}
+                }
+            }
+            CategoryTotals { category: *cat, long_pct, short_pct, gross_pct: long_pct + short_pct }
+        })
+        .collect();
+
+    let long_pct: f64 = categories.iter().map(|c| c.long_pct).sum();
+    let short_pct: f64 = categories.iter().map(|c| c.short_pct).sum();
+    ExposureReport {
+        rows,
+        categories,
+        total: CategoryTotals { category: Category::Other, long_pct, short_pct, gross_pct: long_pct + short_pct },
+        excluded,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +295,79 @@ mod tests {
         assert_eq!(implied_point_value(124.46, 125.83, 0.0, 0.0), None);
         // a negative implied value is nonsense, not a spec
         assert_eq!(implied_point_value(124.46, 125.83, -8.0, -10960.0), None);
+    }
+
+    fn fut(ticker: &str, cat: Category, qty: f64, price: f64, pv: Option<f64>, fx: Option<f64>) -> FuturePosition {
+        FuturePosition {
+            ticker: ticker.into(),
+            name: ticker.into(),
+            currency: "EUR".into(),
+            category: cat,
+            qty,
+            price,
+            point_value: pv,
+            fx_rate: fx,
+        }
+    }
+
+    #[test]
+    fn notional_is_qty_times_point_value_times_price() {
+        let rows = [fut("RXU6 Comdty", Category::InterestRate, -8.0, 124.46, Some(1000.0), Some(1.0))];
+        let rep = exposure(&rows, 28_332_753.49);
+        let r = &rep.rows[0];
+        assert!((r.notional_ccy.unwrap() - -995_680.0).abs() < 1e-6);
+        assert!((r.notional_eur.unwrap() - -995_680.0).abs() < 1e-6);
+        assert!((r.pct_nav.unwrap() - -0.035142).abs() < 1e-6);
+        assert!(!r.spec_missing);
+    }
+
+    #[test]
+    fn categories_report_long_and_short_in_absolute_value() {
+        let aum = 1000.0;
+        let rows = [
+            fut("A Index", Category::Equity, -1.0, 100.0, Some(1.0), Some(1.0)),   // -100 -> short 10%
+            fut("B Comdty", Category::InterestRate, 2.0, 100.0, Some(1.0), Some(1.0)), // +200 -> long 20%
+            fut("C Comdty", Category::InterestRate, -1.0, 50.0, Some(1.0), Some(1.0)), // -50 -> short 5%
+        ];
+        let rep = exposure(&rows, aum);
+        let ir = rep.categories.iter().find(|c| c.category == Category::InterestRate).unwrap();
+        assert!((ir.long_pct - 0.20).abs() < 1e-12);
+        assert!((ir.short_pct - 0.05).abs() < 1e-12, "shorts are reported positive");
+        assert!((ir.gross_pct - 0.25).abs() < 1e-12);
+
+        let eq = rep.categories.iter().find(|c| c.category == Category::Equity).unwrap();
+        assert!((eq.long_pct - 0.0).abs() < 1e-12);
+        assert!((eq.short_pct - 0.10).abs() < 1e-12);
+
+        // all six categories are always present, empty ones included
+        assert_eq!(rep.categories.len(), 6);
+        assert!((rep.total.long_pct - 0.20).abs() < 1e-12);
+        assert!((rep.total.short_pct - 0.15).abs() < 1e-12);
+        assert!((rep.total.gross_pct - 0.35).abs() < 1e-12);
+    }
+
+    #[test]
+    fn missing_spec_or_fx_excludes_from_totals_but_keeps_the_row() {
+        let rows = [
+            fut("A Comdty", Category::InterestRate, -8.0, 124.46, None, Some(1.0)),      // no point value
+            fut("B Comdty", Category::InterestRate, -8.0, 124.46, Some(1000.0), None),   // no fx rate
+        ];
+        let rep = exposure(&rows, 1000.0);
+        assert_eq!(rep.rows.len(), 2, "rows are always listed");
+        assert!(rep.rows[0].spec_missing);
+        assert_eq!(rep.rows[0].notional_ccy, None);
+        assert_eq!(rep.rows[1].notional_eur, None, "no fx rate -> no EUR notional");
+        assert!(rep.rows[1].notional_ccy.is_some(), "ccy notional still computable");
+        assert_eq!(rep.excluded.len(), 2);
+        assert!((rep.total.gross_pct - 0.0).abs() < 1e-12, "neither reaches the totals");
+    }
+
+    #[test]
+    fn zero_aum_excludes_everything_without_dividing_by_zero() {
+        let rows = [fut("A Index", Category::Equity, -1.0, 100.0, Some(1.0), Some(1.0))];
+        let rep = exposure(&rows, 0.0);
+        assert_eq!(rep.rows[0].pct_nav, None);
+        assert_eq!(rep.excluded.len(), 1);
+        assert!((rep.total.gross_pct - 0.0).abs() < 1e-12);
     }
 }
