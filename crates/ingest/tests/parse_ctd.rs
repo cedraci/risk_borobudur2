@@ -1,6 +1,9 @@
 use chrono::NaiveDate;
 
 const CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ctd_sample.csv");
+const XLSX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ctd_sample.xlsx");
+const XLSX_TEXT_DATE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ctd_text_date.xlsx");
 
 #[test]
 fn parses_the_sample_csv() {
@@ -12,6 +15,42 @@ fn parses_the_sample_csv() {
     assert_eq!(rows[0].ctd_isin, "DE0001102580");
     assert!((rows[0].ctd_mod_duration - 8.41).abs() < 1e-12);
     assert!((rows[0].conversion_factor - 0.782145).abs() < 1e-12);
+}
+
+#[test]
+fn parses_the_sample_xlsx() {
+    // Same four rows as ctd_sample.csv, on a sheet named "CTD", with nav_date
+    // written as a real Excel date value and the numerics as real numbers —
+    // the shape a Bloomberg export or hand-built workbook actually produces,
+    // and a code path (read_xlsx) the CSV tests above cannot exercise.
+    let bytes = std::fs::read(XLSX).unwrap();
+    let rows = ingest::parse_ctd_file(&bytes, "ctd_sample.xlsx").unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0].nav_date, NaiveDate::from_ymd_opt(2026, 7, 24).unwrap());
+    assert_eq!(rows[0].ticker, "RXU6 Comdty");
+    assert_eq!(rows[0].ctd_isin, "DE0001102580");
+    assert!((rows[0].ctd_mod_duration - 8.41).abs() < 1e-12);
+    assert!((rows[0].ctd_clean_price - 98.72).abs() < 1e-12);
+    assert!((rows[0].ctd_accrued - 0.63).abs() < 1e-12);
+    assert!((rows[0].conversion_factor - 0.782145).abs() < 1e-12);
+}
+
+#[test]
+fn xlsx_text_formatted_date_cell_still_parses() {
+    // Users retype nav_date cells constantly, which Excel is happy to store
+    // as plain text rather than a typed date. calamine hands that back as
+    // Data::String, and read_xlsx's fallback `other.to_string()` branch
+    // passes the literal text through unchanged, so the same
+    // "%Y-%m-%d" parse the CSV path relies on still applies. A text
+    // "2026-07-24" cell is expected to parse successfully, not fail the row.
+    let bytes = std::fs::read(XLSX_TEXT_DATE).unwrap();
+    let rows = ingest::parse_ctd_file(&bytes, "ctd_text_date.xlsx").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].nav_date, NaiveDate::from_ymd_opt(2026, 7, 24).unwrap());
+    assert_eq!(rows[0].ticker, "RXU6 Comdty");
+    assert_eq!(rows[0].ctd_isin, "DE0001102580");
+    assert!((rows[0].ctd_mod_duration - 8.41).abs() < 1e-12);
+    assert!((rows[0].ctd_clean_price - 98.72).abs() < 1e-12);
 }
 
 #[test]
