@@ -106,6 +106,44 @@ async fn derivatives_exposure_on_sample() {
     assert!((cat("commodity")["gross_pct"].as_f64().unwrap()).abs() < 1e-12);
     assert_eq!(d["categories"].as_array().unwrap().len(), 6);
 
+    // End-to-end degradation: a contract with no usable point value must
+    // still be listed, flagged, and dropped from the totals it contributed
+    // to - not silently absorbed as a zero. Null out CF's point value, the
+    // way a user would on the Data page, and recompute.
+    //
+    // CF's own contribution to equity short_pct was qty(-12) * point_value(10)
+    // * price(8388) / aum(28,332,753.49) = -1,006,560 / 28,332,753.49 =
+    // -0.0355264 (a short, reported positive). Before this step equity
+    // short_pct was 0.073086 (CF + VG + NQ); with CF excluded, only VG
+    // (0.020015) and NQ (0.017545) remain: 0.037560. The overall gross_pct
+    // must drop by CF's same 0.035526, from 0.255045 to 0.219519.
+    assert_eq!(
+        put_json(&app, "/api/futures-contracts/CF", serde_json::json!({
+            "label": "x", "category": "equity", "point_value": null, "currency": "EUR",
+            "curve": null, "price_convention": "decimal", "confirmed": true,
+        })).await,
+        StatusCode::OK,
+    );
+
+    let (_, d2) = get_json(&app, "/api/metrics/derivatives").await;
+    assert_eq!(d2["rows"].as_array().unwrap().len(), 8, "the row stays listed");
+    let cf_row = d2["rows"].as_array().unwrap().iter()
+        .find(|r| r["ticker"] == "CFQ6 Index").unwrap();
+    assert_eq!(cf_row["spec_missing"], true, "{cf_row}");
+    assert!(cf_row["notional_ccy"].is_null(), "{cf_row}");
+    assert!(
+        d2["excluded"].as_array().unwrap().iter().any(|t| t == "CFQ6 Index"),
+        "{}", d2["excluded"]
+    );
+
+    let eq2 = d2["categories"].as_array().unwrap().iter()
+        .find(|c| c["category"] == "equity").unwrap();
+    assert!((eq2["short_pct"].as_f64().unwrap() - 0.037560).abs() < 1e-5,
+        "totals must lose CF's exact contribution, not absorb a zero: {eq2}");
+
+    assert!((d2["total"]["gross_pct"].as_f64().unwrap() - 0.219519).abs() < 1e-5,
+        "{}", d2["total"]);
+
     // Bad date -> 400, consistent with the other limits endpoints.
     let (st, _) = get_json(&app, "/api/metrics/derivatives?date=notadate").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
