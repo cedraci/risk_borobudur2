@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/metrics/concentration", get(handlers::limits::concentration_h))
         .route("/api/metrics/liquidity", get(handlers::limits::liquidity_h))
         .route("/api/metrics/rates", get(handlers::limits::rates_h))
+        .route("/api/metrics/derivatives", get(handlers::limits::derivatives_h))
         .route("/api/metrics/backtest", get(handlers::metrics::backtest))
         .route("/api/refs", get(handlers::refs::list))
         .route("/api/refs/{code}", axum::routing::put(handlers::refs::put))

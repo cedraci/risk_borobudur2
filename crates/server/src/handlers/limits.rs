@@ -127,3 +127,67 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
         "missing_any": missing_any,
     })))
 }
+
+/// Futures positions for a snapshot, joined to their contract specs, with
+/// prices decoded. Also reports roots whose spec is still unconfirmed.
+fn future_positions(
+    rows: &[db::repo::PositionRecord],
+    specs: &[db::repo::FuturesContract],
+) -> (Vec<analytics::FuturePosition>, Vec<String>) {
+    let by_root: HashMap<&str, &db::repo::FuturesContract> =
+        specs.iter().map(|c| (c.contract_root.as_str(), c)).collect();
+    let mut out = Vec::new();
+    let mut unconfirmed = Vec::new();
+    for p in rows.iter().filter(|p| p.asset_type == "Future") {
+        let ticker = p.ticker.clone().unwrap_or_else(|| p.isin.clone());
+        let spec = analytics::contract_root(&ticker).and_then(|r| by_root.get(r.as_str()).copied());
+        if let Some(s) = spec {
+            if !s.confirmed {
+                unconfirmed.push(s.contract_root.clone());
+            }
+        }
+        let conv = spec
+            .and_then(|s| analytics::PriceConvention::parse(&s.price_convention))
+            .unwrap_or(analytics::PriceConvention::Decimal);
+        out.push(analytics::FuturePosition {
+            ticker,
+            name: p.name.clone().unwrap_or_default(),
+            currency: p.currency.clone().unwrap_or_default(),
+            category: spec
+                .and_then(|s| analytics::Category::parse(&s.category))
+                .unwrap_or(analytics::Category::Other),
+            qty: p.quantity.unwrap_or(0.0),
+            price: analytics::decode_price(p.price.unwrap_or(0.0), conv),
+            point_value: spec.and_then(|s| s.point_value),
+            fx_rate: p.fx_rate,
+        });
+    }
+    unconfirmed.sort();
+    unconfirmed.dedup();
+    (out, unconfirmed)
+}
+
+pub async fn derivatives_h(
+    State(st): State<AppState>,
+    Query(q): Query<DateQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let (dates, date, rows, _refs) = snapshot(&st, &q).await?;
+    let specs = db::repo::contracts_all(&st.pool).await?;
+    let aum = match date {
+        Some(d) => db::repo::aum_for(&st.pool, d).await?.unwrap_or(0.0),
+        None => 0.0,
+    };
+    let (positions, unconfirmed) = future_positions(&rows, &specs);
+    let rep = analytics::exposure(&positions, aum);
+    Ok(Json(serde_json::json!({
+        "dates": dates,
+        "date": date,
+        "aum": aum,
+        "categories": rep.categories,
+        "total": rep.total,
+        "rows": rep.rows,
+        "excluded": rep.excluded,
+        "unconfirmed": unconfirmed,
+        "note": "Notional by reference to the underlying; long and short each in absolute value as a percentage of net assets. No netting.",
+    })))
+}
