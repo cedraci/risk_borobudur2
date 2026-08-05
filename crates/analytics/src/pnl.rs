@@ -330,6 +330,10 @@ pub fn group_by(rows: Vec<InstrumentPnl>, dim: Dimension) -> Vec<GroupPnl> {
 /// Residual reads as reconciled at or below this fraction of gross P&L.
 pub const RESIDUAL_TOLERANCE: f64 = 0.001;
 
+/// Absolute residual, in EUR, still treated as reconciled when there are no
+/// P&L lines to scale a relative tolerance against.
+pub const ZERO_GROSS_ABS_TOLERANCE: f64 = 0.01;
+
 #[derive(Debug, Clone, Copy)]
 pub struct NavPoint { pub date: NaiveDate, pub aum: f64, pub shares: f64, pub nav: f64 }
 
@@ -380,7 +384,15 @@ pub fn reconcile(
     let residual = (aum_change - net_flows) - total_pnl;
     let gross = investment_pnl.abs() + cash_and_margin.abs() + accrued_fees.abs()
         + provisions.abs() + dividend_income.abs();
-    let within_tolerance = gross <= 0.0 || residual.abs() <= RESIDUAL_TOLERANCE * gross;
+    let within_tolerance = if gross > 0.0 {
+        residual.abs() <= RESIDUAL_TOLERANCE * gross
+    } else {
+        // No P&L lines at all, so there is nothing to scale a relative
+        // tolerance against. An unexplained AUM movement in this state is a
+        // breach, not a pass: reporting "reconciled" here would hide exactly
+        // the signal the residual exists to raise.
+        residual.abs() <= ZERO_GROSS_ABS_TOLERANCE
+    };
     Reconciliation {
         investment_pnl, cash_and_margin, accrued_fees, provisions, dividend_income,
         total_pnl, aum_change, net_flows, residual, gross, within_tolerance,
@@ -725,5 +737,27 @@ mod tests {
         let r = reconcile(5000.0, 0.0, 0.0, 0.0, -5000.0, 1.0, 0.0);
         assert!(r.gross >= 10000.0);
         assert!(r.within_tolerance);
+    }
+
+    #[test]
+    fn zero_gross_exact_aum_change_reads_as_reconciled() {
+        // All five P&L lines are zero; AUM change exactly equals net flows.
+        // Residual is zero, which must pass even with no relative tolerance to scale.
+        let r = reconcile(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1000.0);
+        assert_eq!(r.gross, 0.0);
+        assert!((r.residual - 0.0).abs() < 1e-9);
+        assert!(r.residual.is_finite());
+        assert!(r.within_tolerance);
+    }
+
+    #[test]
+    fn unexplained_aum_move_with_no_pnl_lines_is_a_breach_not_a_pass() {
+        // All five P&L lines are zero; AUM change minus net flows is a large
+        // unexplained movement. With no P&L to scale a relative tolerance,
+        // this must breach even though gross is zero.
+        let r = reconcile(0.0, 0.0, 0.0, 0.0, 0.0, 6000.0, 1000.0);
+        assert_eq!(r.gross, 0.0);
+        assert!((r.residual - 5000.0).abs() < 1e-9);
+        assert!(!r.within_tolerance);
     }
 }
