@@ -4,26 +4,18 @@ import {
   ApiError, type FuturesContract, type CtdRecord, type Category,
 } from "../api";
 import { useFetch } from "../hooks";
-import { num } from "../fmt";
+import { CATEGORY_LABELS as LABELS, num } from "../fmt";
 
 const CATEGORIES: Category[] = ["equity", "interest_rate", "fx", "credit", "commodity", "other"];
 
-const LABELS: Record<Category, string> = {
-  equity: "Equity",
-  interest_rate: "Interest rate",
-  fx: "Foreign exchange",
-  credit: "Credit",
-  commodity: "Commodity",
-  other: "Other",
-};
-
-type Draft = Partial<Omit<FuturesContract, "contract_root">>;
+type Draft = Partial<Omit<FuturesContract, "contract_root" | "confirmed">>;
 
 export default function FuturesContracts() {
   const contracts = useFetch(() => getFuturesContracts(), []);
   const ctd = useFetch(() => getCtd(), []);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [msg, setMsg] = useState<string | null>(null);
+  const [savingRoot, setSavingRoot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<{ msg: string; rows?: { sheet: string; row: number; message: string }[] } | null>(null);
@@ -37,7 +29,7 @@ export default function FuturesContracts() {
   const clearDraft = (root: string) =>
     setDrafts((prev) => { const rest = { ...prev }; delete rest[root]; return rest; });
 
-  function effective(r: FuturesContract): Omit<FuturesContract, "contract_root"> {
+  function effective(r: FuturesContract): Omit<FuturesContract, "contract_root" | "confirmed"> {
     const d = draftFor(r.contract_root);
     return {
       label: d.label !== undefined ? d.label : r.label,
@@ -46,21 +38,35 @@ export default function FuturesContracts() {
       currency: d.currency !== undefined ? d.currency : r.currency,
       curve: d.curve !== undefined ? d.curve : r.curve,
       price_convention: d.price_convention !== undefined ? d.price_convention : r.price_convention,
-      confirmed: r.confirmed,
     };
   }
 
-  async function save(r: FuturesContract, extra?: Draft) {
+  // confirmedOverride is only ever passed by the explicit Confirm/Unconfirm actions below —
+  // a plain field-edit Save always keeps the row's existing confirmed value untouched.
+  async function save(r: FuturesContract, confirmedOverride?: boolean) {
     setMsg(null);
+    setSavingRoot(r.contract_root);
     try {
-      await putFuturesContract(r.contract_root, { ...effective(r), ...extra });
+      const body = { ...effective(r), confirmed: confirmedOverride ?? r.confirmed };
+      await putFuturesContract(r.contract_root, body);
       clearDraft(r.contract_root);
       setMsg(`Saved ${r.contract_root}.`);
       contracts.reload();
     } catch (e) {
       const ae = e as ApiError;
       setMsg(`Error: ${ae.detail ?? ae.message}`);
+    } finally {
+      setSavingRoot((cur) => (cur === r.contract_root ? null : cur));
     }
+  }
+
+  function unconfirm(r: FuturesContract) {
+    const ok = window.confirm(
+      `Un-confirm ${r.contract_root}? It goes back to being treated as an unverified spec — if its ` +
+      `category isn't interest_rate, this pulls it back into the rates DV01 section until someone ` +
+      `confirms it again.`,
+    );
+    if (ok) void save(r, false);
   }
 
   async function doUploadCtd(f: File) {
@@ -151,10 +157,19 @@ export default function FuturesContracts() {
                   {r.confirmed ? <span className="pos">confirmed</span> : <span className="warn-badge">unconfirmed</span>}
                 </td>
                 <td>
-                  <button disabled={!dirty} onClick={() => void save(r)}>Save</button>
-                  {!r.confirmed && (
-                    <button onClick={() => void save(r, { confirmed: true })}>Confirm</button>
-                  )}
+                  {(() => {
+                    const rowBusy = savingRoot === r.contract_root;
+                    return (
+                      <>
+                        <button disabled={!dirty || rowBusy} onClick={() => void save(r)}>Save</button>
+                        {r.confirmed ? (
+                          <button disabled={rowBusy} onClick={() => unconfirm(r)}>Unconfirm</button>
+                        ) : (
+                          <button disabled={rowBusy} onClick={() => void save(r, true)}>Confirm</button>
+                        )}
+                      </>
+                    );
+                  })()}
                 </td>
               </tr>
             );

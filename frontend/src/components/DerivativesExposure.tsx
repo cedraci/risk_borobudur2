@@ -1,15 +1,6 @@
-import { getDerivatives, type Category } from "../api";
-import { eur, num, pct } from "../fmt";
+import { getDerivatives } from "../api";
+import { CATEGORY_LABELS as LABELS, eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
-
-const LABELS: Record<Category, string> = {
-  equity: "Equity",
-  interest_rate: "Interest rate",
-  fx: "Foreign exchange",
-  credit: "Credit",
-  commodity: "Commodity",
-  other: "Other",
-};
 
 export default function DerivativesExposure({ date }: { date?: string }) {
   const d = useFetch(() => getDerivatives(date), [date]);
