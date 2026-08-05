@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = { workspace = true }
 calamine = { version = "0.26", features = ["dates"] }
 chrono = { workspace = true }
 csv = "1"
 regex = "1"
+rust_xlsxwriter = "0.97"
 serde = { workspace = true }
 thiserror = { workspace = true }
