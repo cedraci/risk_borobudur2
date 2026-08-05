@@ -44,19 +44,22 @@ pub fn build_request(
     }
 
     // ---- FX ----
+    // One BDH per currency, each owning a two-column block: the formula spills
+    // dates into its anchor column and values into the next. Blocks are two
+    // columns apart so no spill lands inside its neighbour.
+    //
+    // Dates are inlined as YYYYMMDD rather than referenced from cells, and
+    // Dts=S / Sort=A are passed explicitly: the add-in's default spill shape
+    // varies with user settings, and this parser depends on it.
     let f = wb.add_worksheet();
     f.set_name("FX")?;
-    f.write_string_with_format(0, 0, "start", &bold)?;
-    f.write_string(1, 0, from.to_string())?;
-    f.write_string_with_format(2, 0, "end", &bold)?;
-    // Dates are written as text and read back as text: Excel locale settings
-    // otherwise reinterpret them, and BDH accepts the ISO form.
-    f.write_string(3, 0, to.to_string())?;
     for (i, ccy) in currencies.iter().enumerate() {
-        let c = (i + 1) as u16;
-        f.write_string_with_format(0, c, ccy, &bold)?;
-        f.write_formula(1, c, Formula::new(format!(
-            "=BDH(\"EUR{ccy} Curncy\",\"PX_LAST\",$A$2,$A$4)"
+        let a = (i * 2) as u16;
+        f.write_string_with_format(0, a, ccy, &bold)?;
+        f.write_string_with_format(0, a + 1, "rate", &bold)?;
+        f.write_formula(1, a, Formula::new(format!(
+            "=BDH(\"EUR{ccy} Curncy\",\"PX_LAST\",\"{}\",\"{}\",\"Dts=S\",\"Sort=A\")",
+            from.format("%Y%m%d"), to.format("%Y%m%d")
         )))?;
     }
 
@@ -133,7 +136,15 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
         .map_err(|e| ParseFailure::Workbook(e.to_string()))?;
     let mut out = ParsedResponse::default();
 
-    if let Ok(refs) = wb.worksheet_range("REFS") {
+    let refs_sheet = wb.worksheet_range("REFS");
+    let fx_sheet = wb.worksheet_range("FX");
+    if refs_sheet.is_err() && fx_sheet.is_err() {
+        return Err(ParseFailure::Workbook(
+            "workbook has neither a REFS nor an FX sheet; not a Bloomberg response file".into(),
+        ));
+    }
+
+    if let Ok(refs) = refs_sheet {
         let end = refs.end().map(|(r, _)| r).unwrap_or(0);
         for row in 1..=end {
             let Some(isin) = text(&refs, row, 0) else { continue };
@@ -155,24 +166,28 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
         }
     }
 
-    if let Ok(fx) = wb.worksheet_range("FX") {
+    if let Ok(fx) = fx_sheet {
         let end = fx.end().map(|(r, _)| r).unwrap_or(0);
         let width = fx.end().map(|(_, c)| c).unwrap_or(0);
-        let currencies: Vec<(u32, String)> = (1..=width)
+        // Each currency owns a two-column block: the anchor column (even
+        // offset) carries the BDH-spilled date, the next column its rate.
+        let currencies: Vec<(u32, String)> = (0..=width)
+            .step_by(2)
             .filter_map(|c| text(&fx, 0, c).map(|n| (c, n)))
             .collect();
 
-        for row in 1..=end {
-            let Some(dtxt) = text(&fx, row, 0) else { continue };
-            let Some(date) = parse_any_date(&dtxt) else {
-                out.skipped.push(RowError {
-                    sheet: "FX".into(), row: row + 1,
-                    message: format!("date: expected YYYY-MM-DD, got {dtxt:?}"),
-                });
-                continue;
-            };
-            for (col, ccy) in &currencies {
-                let Some(v) = fx.get_value((row, *col)) else { continue };
+        for (a, ccy) in &currencies {
+            let rate_col = a + 1;
+            for row in 1..=end {
+                let Some(dtxt) = text(&fx, row, *a) else { break }; // series ended
+                let Some(date) = parse_any_date(&dtxt) else {
+                    out.skipped.push(RowError {
+                        sheet: "FX".into(), row: row + 1,
+                        message: format!("{ccy}: date expected YYYY-MM-DD, got {dtxt:?}"),
+                    });
+                    continue;
+                };
+                let Some(v) = fx.get_value((row, rate_col)) else { continue };
                 if unresolved(Some(v)) { continue; }
                 let raw = match v {
                     Data::Float(f) => *f,
