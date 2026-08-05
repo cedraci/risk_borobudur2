@@ -143,10 +143,18 @@ impl Decomp {
 /// ```
 ///
 /// The four sum to `v1·f1 - v0·f0 + Σ CF·F(trade)` exactly, so period
-/// additivity — and therefore the reconciliation to ΔNAV — is preserved.
+/// additivity — and therefore the reconciliation to ΔNAV — is preserved. If a
+/// flow's trade date has no rate in `fx`, that flow is translated at `f0`
+/// instead (and its date is listed in `fx_missing`), so the identity above
+/// holds with `f0` substituted for the missing `F(trade)`.
 ///
 /// When the position is closed at `t1`, purchase-flow FX moves to realized:
-/// reporting unrealized FX on a holding of nothing is meaningless.
+/// reporting unrealized FX on a holding of nothing is meaningless. Whether the
+/// position is closed is decided by the snapshot (`v1_local`), not by the
+/// walk's own `basis_end.qty`: a walk built from a trade history missing this
+/// instrument (ISIN mismatch, truncated history) reports zero quantity even
+/// though the fund still holds it, and that must not misroute its
+/// translation FX to realized.
 pub fn decompose(w: &Walk, v0_local: f64, v1_local: f64, fx: &FxLookup) -> Decomp {
     let mut out = Decomp::default();
 
@@ -170,12 +178,18 @@ pub fn decompose(w: &Walk, v0_local: f64, v1_local: f64, fx: &FxLookup) -> Decom
     out.realized_fx = sells_fx;
     out.unrealized_fx = v1_local * (fx.f1 - fx.f0) + buys_fx;
 
-    if w.basis_end.qty <= 0.0 {
-        // Position closed: nothing is left to carry an unrealized figure.
+    if v1_local.abs() <= 1e-9 {
+        // "Closed" means the snapshot shows nothing held at t1. The walk's own
+        // quantity is not authoritative here: an instrument with no trades in
+        // the file (ISIN mismatch, truncated history) leaves basis_end.qty at
+        // zero while the position is still held, and routing its translation
+        // FX to realized would misstate the split without moving the total.
         out.realized_fx += out.unrealized_fx;
         out.unrealized_fx = 0.0;
-    } else if !w.buys.is_empty() && !w.sells.is_empty() {
-        out.fx_split_imprecise = true;
+    } else if let (Some(first_buy), Some(last_sell)) = (w.buys.first(), w.sells.last()) {
+        // Only a sale drawing on a basis that includes a mid-period purchase is
+        // ambiguous. A sale that precedes every purchase is attributed exactly.
+        out.fx_split_imprecise = last_sell.date >= first_buy.date;
     }
 
     out
@@ -291,6 +305,33 @@ mod tests {
     }
 
     #[test]
+    fn held_throughout_with_no_trades_reports_translation_fx_as_unrealized() {
+        // ISIN mismatch or truncated history: no trades in the file for an
+        // instrument the fund still holds. basis_end.qty is zero, but the
+        // snapshot (v1) says the position is very much still held, so the
+        // translation FX must land in unrealized, not realized.
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: BTreeMap::new() };
+        let w = walk_instrument(&[], d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 1000.0, 1150.0, &fx);
+        assert!(dec.unrealized_fx.abs() > 0.0);
+        assert_eq!(dec.realized_fx, 0.0);
+    }
+
+    #[test]
+    fn sell_then_rebuy_is_not_flagged_as_imprecise() {
+        // A sale that precedes every purchase draws only on the opening basis
+        // at the opening average cost: no weighted-average ambiguity.
+        let mut at = BTreeMap::new();
+        at.insert(d(2026, 6, 12), 0.89);
+        at.insert(d(2026, 6, 20), 0.93);
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: at };
+        let all = vec![trade(1, true, 100.0, 10.0), trade(12, false, 30.0, 11.0), trade(20, true, 50.0, 12.0)];
+        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 1000.0, 1400.0, &fx);
+        assert!(!dec.fx_split_imprecise);
+    }
+
+    #[test]
     fn opened_and_closed_inside_the_period_reports_no_unrealized_fx() {
         let mut at = BTreeMap::new();
         at.insert(d(2026, 6, 12), 0.89);
@@ -322,6 +363,12 @@ mod tests {
         let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
         let dec = decompose(&w, 1000.0, 700.0, &fx);
         assert_eq!(dec.fx_missing, vec![d(2026, 6, 15)]);
+
+        // The flow with no rate is translated at f0, so the identity holds
+        // with f0 substituted for the missing F(trade).
+        let cf = 40.0 * 12.0;
+        let expected_total = 700.0 * 0.92 - 1000.0 * 0.88 + cf * 0.88;
+        assert!((dec.total() - expected_total).abs() < 1e-9);
     }
 
     /// Exhaustive small-grid check that the four components always sum to the
@@ -331,10 +378,12 @@ mod tests {
         for &f0 in &[0.5, 0.88, 1.0, 1.4] {
             for &f1 in &[0.5, 0.92, 1.0, 1.4] {
                 for &ft in &[0.5, 0.90, 1.0, 1.4] {
-                    for &(qty_buy, qty_sell) in &[(100.0, 0.0), (100.0, 40.0), (100.0, 100.0), (0.0, 0.0)] {
+                    for &(qty_buy, qty_sell) in &[(100.0, 0.0), (100.0, 40.0), (100.0, 100.0), (0.0, 0.0), (0.0, 200.0)] {
+                        let ft_buy = ft;
+                        let ft_sell = ft * 1.05;
                         let mut at = BTreeMap::new();
-                        at.insert(d(2026, 6, 15), ft);
-                        at.insert(d(2026, 6, 16), ft);
+                        at.insert(d(2026, 6, 15), ft_buy);
+                        at.insert(d(2026, 6, 16), ft_sell);
                         let fx = FxLookup { f0, f1, at_trade: at };
 
                         let mut all = vec![trade(1, true, 200.0, 10.0)];
@@ -346,13 +395,16 @@ mod tests {
                         let v1 = w.basis_end.qty * 12.5;
                         let dec = decompose(&w, v0, v1, &fx);
 
-                        let flows: f64 = w.buys.iter().chain(w.sells.iter())
-                            .map(|f| f.amount_local * ft).sum();
+                        let flows: f64 = w.buys.iter().map(|f| f.amount_local * ft_buy).sum::<f64>()
+                            + w.sells.iter().map(|f| f.amount_local * ft_sell).sum::<f64>();
                         let expected = v1 * f1 - v0 * f0 + flows;
                         assert!((dec.total() - expected).abs() < 1e-6,
                             "f0={f0} f1={f1} ft={ft} buy={qty_buy} sell={qty_sell}: {} vs {}",
                             dec.total(), expected);
-                        assert!((dec.realized_fx + dec.unrealized_fx - dec.fx()).abs() < 1e-9);
+                        if v1.abs() <= 1e-9 {
+                            assert_eq!(dec.unrealized_fx, 0.0,
+                                "f0={f0} f1={f1} ft={ft} buy={qty_buy} sell={qty_sell}: closed position must have zero unrealized FX");
+                        }
                     }
                 }
             }
