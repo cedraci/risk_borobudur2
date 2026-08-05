@@ -25,6 +25,9 @@ automatically; go to the Data page and upload the NAV Recap workbook.
    point value derived from the file and flagged unconfirmed; confirm each one
    once, setting its category, curve and price convention. US Treasury futures are
    quoted in 32nds on the portfolio sheet — set their convention to `th32`.
+   Re-uploading a workbook already on record does not re-import it, but it does
+   seed any contract specs that are still missing, so it is the repair for a
+   futures contract table that is unexpectedly empty.
 2. Upload the CTD companion file for the same NAV date. Re-uploading replaces that
    date's rows, so a corrected pull simply overwrites.
 
@@ -58,6 +61,11 @@ re-uploaded — nothing is stored until every row passes.
   (equity / interest rate / FX / credit / commodity / other), long and short each
   shown in absolute value as a percentage of net assets. Contract point values are
   derived from the workbook on import and confirmed on the Data page.
+- **NAV sensitivity per +100bp**: signed as profit and loss, `-100 × Σ DV01 ÷ AUM`
+  at the snapshot's own NAV date. Negative means net assets fall if yields rise
+  100bp (the book is long rates); positive means they rise. It covers the cash
+  bonds plus every bond future for which CTD analytics exist on that exact date,
+  and shows `–` rather than a zero when the AUM is unknown.
 - **Bond-future DV01**: computed from cheapest-to-deliver analytics uploaded weekly
   as a companion file (`nav_date, ticker, ctd_isin, ctd_mod_duration,
   ctd_clean_price, ctd_accrued, conversion_factor`). A NAV date without analytics

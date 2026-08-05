@@ -97,14 +97,18 @@ export interface BondRow {
   ytm?: number; mod_duration?: number; dv01_eur?: number; weight?: number;
 }
 export interface FutureRow {
-  ticker: string; name: string; missing: boolean; qty: number; price: number;
+  ticker: string; name: string; missing: boolean; qty: number | null; price: number | null;
   point_value: number | null; ctd_isin?: string; ctd_mod_duration?: number;
   conversion_factor?: number; dv01_eur?: number; curve?: string | null;
 }
 export interface Rates {
   dates: string[]; date: string | null; bonds: BondRow[]; futures: FutureRow[];
-  total_dv01_eur: number; nav_sensitivity_100bp: number;
+  // Signed: negative means a +100bp move costs NAV (a book long rates),
+  // positive means it gains. Null when the snapshot's AUM is unknown.
+  total_dv01_eur: number; nav_sensitivity_100bp: number | null;
   missing_any: boolean; futures_missing_any: boolean;
+  // Tickers of futures held with no contract spec at all, so excluded from the DV01.
+  futures_no_spec: string[];
 }
 export interface MethodSummary {
   exceptions: number; n: number; zone: "green" | "yellow" | "red";
@@ -135,9 +139,14 @@ export type Category = "equity" | "interest_rate" | "fx" | "credit" | "commodity
 export interface CategoryTotals { category: Category; long_pct: number; short_pct: number; gross_pct: number }
 export interface ExposureRow {
   ticker: string; name: string; currency: string; category: Category;
-  qty: number; price: number; point_value: number | null;
+  qty: number | null; price: number | null; point_value: number | null;
   notional_ccy: number | null; notional_eur: number | null;
   pct_nav: number | null; spec_missing: boolean;
+  // The workbook row itself was incomplete (no quantity or no price), as
+  // distinct from spec_missing, which is about the contract spec.
+  inputs_missing: boolean;
+  // The contract spec exists but is unconfirmed, so this row's figures are provisional.
+  unconfirmed: boolean;
 }
 export interface Derivatives {
   dates: string[]; date: string | null; aum: number;

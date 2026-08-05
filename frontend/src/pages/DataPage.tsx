@@ -61,7 +61,9 @@ export default function DataPage() {
           <>
             <p className="pos">
               {outcome.duplicate
-                ? "Already imported (identical file) — nothing changed."
+                ? outcome.warnings.length > 0
+                  ? "Already imported (identical file) — nothing re-imported, but futures contract specs were checked and any missing ones seeded (see below)."
+                  : "Already imported (identical file) — nothing changed."
                 : `Imported: ${outcome.nav_rows} NAV rows, ${outcome.positions} positions, ${outcome.dividends} dividends, ${outcome.operations} operations${outcome.div_ops_replaced ? "" : " (older file: dividends/operations left untouched)"}.`}
             </p>
             {outcome.warnings.map((w, i) => <p key={i} className="warn-badge">{w}</p>)}

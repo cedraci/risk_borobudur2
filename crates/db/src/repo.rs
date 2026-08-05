@@ -57,10 +57,20 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         .fetch_optional(pool)
         .await?
     {
+        // Nothing is re-ingested for a duplicate - but the futures spec seeding
+        // is deliberately NOT skipped. A database populated before futures
+        // support shipped holds the workbook and no contract specs at all, and
+        // re-dropping the same file is the user's only repair path; skipping it
+        // here left the whole feature inert on every existing installation.
+        // `seed_futures_contracts` only ever INSERTs roots it does not already
+        // know, so running it again is a no-op once the specs are in place.
+        let mut tx = pool.begin().await?;
+        let warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+        tx.commit().await?;
         return Ok(ImportOutcome {
             import_id: id, duplicate: true, nav_rows: 0, positions: 0,
             dividends: 0, operations: 0, div_ops_replaced: false,
-            warnings: Vec::new(),
+            warnings,
         });
     }
 
@@ -127,14 +137,61 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         .await?;
     }
 
-    // Futures: seed unknown contract roots and cross-check the point value
-    // implied by the workbook against the stored spec.
+    let warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+
+    if replace_div_ops {
+        sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
+        for r in &wb.dividends {
+            sqlx::query("INSERT INTO dividends (provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5)")
+                .bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
+                .execute(&mut *tx).await?;
+        }
+        sqlx::query("DELETE FROM operations").execute(&mut *tx).await?;
+        for r in &wb.operations {
+            sqlx::query(
+                "INSERT INTO operations (trade_date, side, ticker, isin, name, currency, quantity, price, gross_amount, fees, net_price, net_amount)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            )
+            .bind(r.trade_date).bind(&r.side).bind(&r.ticker).bind(&r.isin).bind(&r.name)
+            .bind(&r.currency).bind(r.quantity).bind(r.price).bind(r.gross_amount).bind(r.fees)
+            .bind(r.net_price).bind(r.net_amount)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(ImportOutcome {
+        import_id,
+        duplicate: false,
+        nav_rows,
+        positions: wb.positions.len(),
+        dividends: if replace_div_ops { wb.dividends.len() } else { 0 },
+        operations: if replace_div_ops { wb.operations.len() } else { 0 },
+        div_ops_replaced: replace_div_ops,
+        warnings,
+    })
+}
+
+/// Seed a contract spec for every futures root the database does not know yet,
+/// and cross-check the point value implied by the workbook against the spec
+/// already stored for a root it does know. Returns the non-fatal warnings.
+///
+/// **Idempotent by construction, and that is load-bearing:** an unknown root is
+/// inserted with `ON CONFLICT (contract_root) DO NOTHING`, and a known root is
+/// only ever read - no branch here issues an `UPDATE` - so re-running this over
+/// the same positions can never overwrite a value the user has edited. That is
+/// what makes it safe to call on a duplicate import as well as a fresh one.
+async fn seed_futures_contracts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    positions: &[ingest::PositionRow],
+) -> anyhow::Result<Vec<String>> {
     let mut warnings: Vec<String> = Vec::new();
-    let known: Vec<FuturesContract> = sqlx::query_as(SELECT_CONTRACTS).fetch_all(&mut *tx).await?;
+    let known: Vec<FuturesContract> = sqlx::query_as(SELECT_CONTRACTS).fetch_all(&mut **tx).await?;
     let by_root: std::collections::HashMap<String, FuturesContract> =
         known.into_iter().map(|c| (c.contract_root.clone(), c)).collect();
 
-    for p in wb.positions.iter().filter(|p| p.asset_type == "Future") {
+    for p in positions.iter().filter(|p| p.asset_type == "Future") {
         let Some(ticker) = p.ticker.as_deref() else {
             warnings.push(format!("{}: futures row has no ticker; contract not identified", p.isin));
             continue;
@@ -172,7 +229,7 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
                 .bind(category)
                 .bind(pv)
                 .bind(p.currency.clone().unwrap_or_else(|| "EUR".into()))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
                 warnings.push(format!("{root}: new contract seeded from {ticker}; confirm its spec on the Data page"));
             }
@@ -214,39 +271,7 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
             }
         }
     }
-
-    if replace_div_ops {
-        sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
-        for r in &wb.dividends {
-            sqlx::query("INSERT INTO dividends (provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5)")
-                .bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
-                .execute(&mut *tx).await?;
-        }
-        sqlx::query("DELETE FROM operations").execute(&mut *tx).await?;
-        for r in &wb.operations {
-            sqlx::query(
-                "INSERT INTO operations (trade_date, side, ticker, isin, name, currency, quantity, price, gross_amount, fees, net_price, net_amount)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-            )
-            .bind(r.trade_date).bind(&r.side).bind(&r.ticker).bind(&r.isin).bind(&r.name)
-            .bind(&r.currency).bind(r.quantity).bind(r.price).bind(r.gross_amount).bind(r.fees)
-            .bind(r.net_price).bind(r.net_amount)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
-    tx.commit().await?;
-    Ok(ImportOutcome {
-        import_id,
-        duplicate: false,
-        nav_rows,
-        positions: wb.positions.len(),
-        dividends: if replace_div_ops { wb.dividends.len() } else { 0 },
-        operations: if replace_div_ops { wb.operations.len() } else { 0 },
-        div_ops_replaced: replace_div_ops,
-        warnings,
-    })
+    Ok(warnings)
 }
 
 pub async fn nav_rows(pool: &PgPool) -> anyhow::Result<Vec<NavRow>> {

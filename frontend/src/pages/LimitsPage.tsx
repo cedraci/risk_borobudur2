@@ -132,8 +132,20 @@ export default function LimitsPage() {
             Portfolio DV01: <strong>{eur(rates.data.total_dv01_eur)}</strong> · NAV sensitivity per +100bp:{" "}
             <strong>{pct(rates.data.nav_sensitivity_100bp)}</strong>
           </p>
+          <p className="kpi-sub">
+            Signed as profit and loss: a negative sensitivity means net assets fall if yields rise 100bp
+            (the book is long rates); a positive one means they rise. Shown as “–” when the snapshot’s AUM
+            is unknown.
+          </p>
 
           <h4>Bond futures</h4>
+          {rates.data.futures_no_spec.length > 0 && (
+            <p className="warn-badge">
+              {rates.data.futures_no_spec.length} future(s) held with no contract spec at all, so excluded
+              from the DV01 above: {rates.data.futures_no_spec.join(", ")}. Re-upload the NAV Recap on the
+              Data page to seed their specs, then confirm them.
+            </p>
+          )}
           {rates.data.futures_missing_any && (
             <p className="warn-badge">
               Some bond futures are missing CTD analytics for this snapshot date and are excluded from DV01 —
@@ -141,7 +153,13 @@ export default function LimitsPage() {
             </p>
           )}
           {rates.data.futures.length === 0 ? (
-            <p className="kpi-sub">No interest-rate futures in this snapshot.</p>
+            // Never claim absence when the reason is that nothing could be
+            // evaluated: the fund may hold bond futures that simply have no spec.
+            <p className="kpi-sub">
+              {rates.data.futures_no_spec.length > 0
+                ? "No bond-future DV01 could be computed for this snapshot — see the note above."
+                : "No interest-rate futures in this snapshot."}
+            </p>
           ) : (
             <table className="tbl">
               <thead>

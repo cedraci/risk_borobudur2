@@ -120,16 +120,24 @@ impl Category {
 }
 
 /// One futures position, with its price already decoded and its spec resolved.
+///
+/// `qty` and `price` are optional because the source workbook tolerates an
+/// empty or `#VALUE!` cell without raising a row error (see `ingest::cell_f64`),
+/// and a missing input must never be absorbed into a zero: a zero quantity or a
+/// zero price is a real, computable position, whereas an absent one is not.
 #[derive(Debug, Clone)]
 pub struct FuturePosition {
     pub ticker: String,
     pub name: String,
     pub currency: String,
     pub category: Category,
-    pub qty: f64,
-    pub price: f64,
+    pub qty: Option<f64>,
+    pub price: Option<f64>,
     pub point_value: Option<f64>,
     pub fx_rate: Option<f64>,
+    /// The contract spec exists but the user has not yet verified it, so every
+    /// figure derived from it is provisional.
+    pub unconfirmed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,13 +146,19 @@ pub struct ExposureRow {
     pub name: String,
     pub currency: String,
     pub category: Category,
-    pub qty: f64,
-    pub price: f64,
+    pub qty: Option<f64>,
+    pub price: Option<f64>,
     pub point_value: Option<f64>,
     pub notional_ccy: Option<f64>,
     pub notional_eur: Option<f64>,
     pub pct_nav: Option<f64>,
     pub spec_missing: bool,
+    /// True when the row's own quantity or price was absent from the workbook,
+    /// as opposed to its contract spec being absent (`spec_missing`).
+    pub inputs_missing: bool,
+    /// True when the contract spec behind this row is still unconfirmed, so the
+    /// notional is provisional. Marks the number itself, not just the page.
+    pub unconfirmed: bool,
 }
 
 /// Long, short and gross for one category, each a fraction of net assets
@@ -177,7 +191,10 @@ pub fn exposure(positions: &[FuturePosition], aum: f64) -> ExposureReport {
     let mut excluded = Vec::new();
 
     for p in positions {
-        let notional_ccy = p.point_value.map(|pv| p.qty * pv * p.price);
+        let notional_ccy = match (p.point_value, p.qty, p.price) {
+            (Some(pv), Some(qty), Some(price)) => Some(qty * pv * price),
+            _ => None,
+        };
         let notional_eur = match (notional_ccy, p.fx_rate) {
             (Some(n), Some(fx)) => Some(n * fx),
             _ => None,
@@ -201,6 +218,8 @@ pub fn exposure(positions: &[FuturePosition], aum: f64) -> ExposureReport {
             notional_eur,
             pct_nav,
             spec_missing: p.point_value.is_none(),
+            inputs_missing: p.qty.is_none() || p.price.is_none(),
+            unconfirmed: p.unconfirmed,
         });
     }
 
@@ -331,10 +350,11 @@ mod tests {
             name: ticker.into(),
             currency: "EUR".into(),
             category: cat,
-            qty,
-            price,
+            qty: Some(qty),
+            price: Some(price),
             point_value: pv,
             fx_rate: fx,
+            unconfirmed: false,
         }
     }
 
@@ -388,6 +408,49 @@ mod tests {
         assert!(rep.rows[1].notional_ccy.is_some(), "ccy notional still computable");
         assert_eq!(rep.excluded.len(), 2);
         assert!((rep.total.gross_pct - 0.0).abs() < 1e-12, "neither reaches the totals");
+    }
+
+    // A missing price or quantity is not a zero. `ingest::cell_f64` returns
+    // `None` with no row error for an empty cell and for a `#VALUE!`/`#N/A`
+    // formula artifact, which is an ordinary state for a Bloomberg-linked price
+    // cell - so this input is reachable, and treating it as 0.0 produced a
+    // populated, confident, wrong row: `Qty 0 - Price 0,00 - % NAV 0,00%`, not
+    // excluded from any total and flagged nowhere.
+    #[test]
+    fn missing_price_or_quantity_is_excluded_not_zeroed() {
+        let mut no_price = fut("A Comdty", Category::InterestRate, -8.0, 0.0, Some(1000.0), Some(1.0));
+        no_price.price = None;
+        let mut no_qty = fut("B Comdty", Category::InterestRate, 0.0, 124.46, Some(1000.0), Some(1.0));
+        no_qty.qty = None;
+        let rep = exposure(&[no_price, no_qty], 1000.0);
+
+        assert_eq!(rep.rows.len(), 2, "rows are always listed");
+        for r in &rep.rows {
+            assert_eq!(r.notional_ccy, None, "{}", r.ticker);
+            assert_eq!(r.pct_nav, None, "{}", r.ticker);
+            assert!(r.inputs_missing, "{}", r.ticker);
+            assert!(!r.spec_missing, "the spec is fine - the workbook row is not: {}", r.ticker);
+        }
+        assert_eq!(rep.excluded.len(), 2, "both must surface in `excluded`");
+        assert!((rep.total.gross_pct - 0.0).abs() < 1e-12);
+    }
+
+    // The other half of the same invariant: a genuine zero must still compute.
+    // Together these pin `pct_nav == Some(0.0)` to mean "this position really is
+    // flat", never "an input was missing" - the boundary case whose absence let
+    // the bug above through.
+    #[test]
+    fn genuinely_zero_position_reports_zero_rather_than_missing() {
+        let rows = [
+            fut("A Comdty", Category::InterestRate, 0.0, 124.46, Some(1000.0), Some(1.0)),
+            fut("B Comdty", Category::InterestRate, -8.0, 0.0, Some(1000.0), Some(1.0)),
+        ];
+        let rep = exposure(&rows, 1000.0);
+        for r in &rep.rows {
+            assert_eq!(r.pct_nav, Some(0.0), "a real zero is Some(0.0): {}", r.ticker);
+            assert!(!r.inputs_missing, "{}", r.ticker);
+        }
+        assert!(rep.excluded.is_empty(), "a computable zero is not an exclusion");
     }
 
     #[test]

@@ -5,6 +5,11 @@ import { useFetch } from "../hooks";
 export default function DerivativesExposure({ date }: { date?: string }) {
   const d = useFetch(() => getDerivatives(date), [date]);
   const data = d.data;
+  // Any excluded contract is a position whose notional could not be computed,
+  // so every figure below is a lower bound, not a total. Say so on the number
+  // itself rather than only in the banner above it.
+  const partial = (data?.excluded.length ?? 0) > 0;
+  const atLeast = (x: number) => (partial ? `≥ ${pct(x)}` : pct(x));
 
   return (
     <div className="card">
@@ -21,7 +26,8 @@ export default function DerivativesExposure({ date }: { date?: string }) {
           )}
           {data.excluded.length > 0 && (
             <p className="warn-badge">
-              Excluded from the totals for want of a spec or FX rate: {data.excluded.join(", ")}.
+              {data.excluded.length} contract(s) excluded from the totals for want of a spec, a price,
+              a quantity or an FX rate: {data.excluded.join(", ")}. The totals below are partial.
             </p>
           )}
 
@@ -43,10 +49,10 @@ export default function DerivativesExposure({ date }: { date?: string }) {
                     </tr>
                   ))}
                   <tr>
-                    <td><strong>Total notional</strong></td>
-                    <td><strong>{pct(data.total.long_pct)}</strong></td>
-                    <td><strong>{pct(data.total.short_pct)}</strong></td>
-                    <td><strong>{pct(data.total.gross_pct)}</strong></td>
+                    <td><strong>{partial ? "Total notional (partial)" : "Total notional"}</strong></td>
+                    <td><strong>{atLeast(data.total.long_pct)}</strong></td>
+                    <td><strong>{atLeast(data.total.short_pct)}</strong></td>
+                    <td><strong>{atLeast(data.total.gross_pct)}</strong></td>
                   </tr>
                 </tbody>
               </table>
@@ -60,13 +66,16 @@ export default function DerivativesExposure({ date }: { date?: string }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.rows.map((r) => (
-                    <tr key={r.ticker}>
-                      <td>{r.ticker}</td>
+                  {data.rows.map((r, i) => (
+                    <tr key={`${r.ticker}-${i}`}>
+                      <td>
+                        {r.ticker}
+                        {r.unconfirmed && <> <span className="warn-badge" title="Contract spec not confirmed — this notional is provisional.">unconfirmed</span></>}
+                      </td>
                       <td>{r.name}</td>
                       <td>{LABELS[r.category]}</td>
-                      <td>{num(r.qty, 0)}</td>
-                      <td>{num(r.price)}</td>
+                      <td>{r.qty === null ? <span className="neg">missing</span> : num(r.qty, 0)}</td>
+                      <td>{r.price === null ? <span className="neg">missing</span> : num(r.price)}</td>
                       <td>{r.spec_missing ? <span className="neg">spec missing</span> : num(r.point_value, 0)}</td>
                       <td>{eur(r.notional_eur)}</td>
                       <td>{r.pct_nav === null ? "—" : pct(r.pct_nav)}</td>

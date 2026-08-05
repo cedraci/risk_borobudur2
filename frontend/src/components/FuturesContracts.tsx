@@ -10,6 +10,12 @@ const CATEGORIES: Category[] = ["equity", "interest_rate", "fx", "credit", "comm
 
 type Draft = Partial<Omit<FuturesContract, "contract_root" | "confirmed">>;
 
+type NewSpec = { contract_root: string } & Omit<FuturesContract, "contract_root" | "confirmed">;
+const BLANK_SPEC: NewSpec = {
+  contract_root: "", label: "", category: "other", point_value: null,
+  currency: "EUR", curve: null, price_convention: "decimal",
+};
+
 export default function FuturesContracts() {
   const contracts = useFetch(() => getFuturesContracts(), []);
   const ctd = useFetch(() => getCtd(), []);
@@ -19,6 +25,7 @@ export default function FuturesContracts() {
   const [busy, setBusy] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState<{ msg: string; rows?: { sheet: string; row: number; message: string }[] } | null>(null);
+  const [adding, setAdding] = useState<NewSpec | null>(null);
 
   const rows = contracts.data ?? [];
   const unconfirmedCount = rows.filter((r) => !r.confirmed).length;
@@ -60,6 +67,35 @@ export default function FuturesContracts() {
     }
   }
 
+  // Escape hatch, not the main road. Specs are normally seeded from the NAV
+  // Recap on import, with the point value derived from the workbook's own
+  // identity and cross-checked — hand-typing one discards that check. It exists
+  // for the root the importer legitimately could not derive: a futures row with
+  // no ticker, an unparseable root, or a row too incomplete to imply a point
+  // value. New rows land unconfirmed, like seeded ones.
+  async function saveNew(s: NewSpec) {
+    const root = s.contract_root.trim();
+    if (!root) { setMsg("Error: a contract root is required."); return; }
+    if (rows.some((r) => r.contract_root === root)) {
+      setMsg(`Error: ${root} already exists — edit it in the table instead.`);
+      return;
+    }
+    setMsg(null);
+    setSavingRoot(root);
+    try {
+      const { contract_root: _root, ...body } = s;
+      await putFuturesContract(root, { ...body, label: body.label.trim() || root, confirmed: false });
+      setAdding(null);
+      setMsg(`Added ${root}. Check its point value, then confirm it.`);
+      contracts.reload();
+    } catch (e) {
+      const ae = e as ApiError;
+      setMsg(`Error: ${ae.detail ?? ae.message}`);
+    } finally {
+      setSavingRoot((cur) => (cur === root ? null : cur));
+    }
+  }
+
   function unconfirm(r: FuturesContract) {
     const ok = window.confirm(
       `Un-confirm ${r.contract_root}? It goes back to being treated as an unverified spec — if its ` +
@@ -96,6 +132,15 @@ export default function FuturesContracts() {
         </p>
       )}
       {msg && <p className="kpi-sub">{msg}</p>}
+
+      {contracts.data !== null && rows.length === 0 && (
+        <p className="kpi-sub">
+          No contract specs yet. They are seeded automatically from the NAV Recap when you upload it
+          above — one per contract root held, with the point value derived from the file. If this list is
+          empty while the fund holds futures, re-upload the same NAV Recap workbook: re-uploading a file
+          already on record seeds any missing specs without re-importing anything else.
+        </p>
+      )}
 
       <table className="tbl">
         <thead>
@@ -176,6 +221,84 @@ export default function FuturesContracts() {
           })}
         </tbody>
       </table>
+
+      {adding === null ? (
+        <button onClick={() => setAdding({ ...BLANK_SPEC })}>Add a contract root manually</button>
+      ) : (
+        <div>
+          <p className="kpi-sub">
+            Only for a root the importer could not derive from the workbook — normally you should
+            re-upload the NAV Recap instead and let it seed the spec, so the point value stays
+            cross-checked against the file.
+          </p>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Root</th><th>Label</th><th>Category</th><th>Point value</th>
+                <th>Ccy</th><th>Curve</th><th>Price convention</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <input
+                    placeholder="e.g. RX" value={adding.contract_root}
+                    onChange={(e) => setAdding({ ...adding, contract_root: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    value={adding.label}
+                    onChange={(e) => setAdding({ ...adding, label: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <select
+                    value={adding.category}
+                    onChange={(e) => setAdding({ ...adding, category: e.target.value as Category })}
+                  >
+                    {CATEGORIES.map((c) => <option key={c} value={c}>{LABELS[c]}</option>)}
+                  </select>
+                </td>
+                <td>
+                  <input
+                    type="number" step="any" value={adding.point_value ?? ""}
+                    onChange={(e) => setAdding({ ...adding, point_value: e.target.value === "" ? null : Number(e.target.value) })}
+                  />
+                </td>
+                <td>
+                  <input
+                    value={adding.currency}
+                    onChange={(e) => setAdding({ ...adding, currency: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    value={adding.curve ?? ""}
+                    onChange={(e) => setAdding({ ...adding, curve: e.target.value === "" ? null : e.target.value })}
+                  />
+                </td>
+                <td>
+                  <select
+                    value={adding.price_convention}
+                    onChange={(e) => setAdding({ ...adding, price_convention: e.target.value as "decimal" | "th32" })}
+                  >
+                    <option value="decimal">decimal</option>
+                    <option value="th32">th32 (32nds)</option>
+                  </select>
+                </td>
+                <td>
+                  <button
+                    disabled={savingRoot === adding.contract_root.trim()}
+                    onClick={() => void saveNew(adding)}
+                  >Add</button>
+                  <button onClick={() => { setAdding(null); setMsg(null); }}>Cancel</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <h4>Weekly CTD analytics</h4>
       <p className="kpi-sub">

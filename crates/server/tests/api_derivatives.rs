@@ -38,6 +38,76 @@ fn spec(cat: &str, pv: f64, ccy: &str, conv: &str) -> serde_json::Value {
     })
 }
 
+/// The eight real specs, as a user would confirm them on the Data page.
+const TRUE_SPECS: [(&str, &str, f64, &str, &str); 8] = [
+    ("CF", "equity", 10.0, "EUR", "decimal"),
+    ("VG", "equity", 10.0, "EUR", "decimal"),
+    ("NQ", "equity", 20.0, "USD", "decimal"),
+    ("RX", "interest_rate", 1000.0, "EUR", "decimal"),
+    ("OAT", "interest_rate", 1000.0, "EUR", "decimal"),
+    ("KOA", "interest_rate", 1000.0, "EUR", "decimal"),
+    ("TY", "interest_rate", 1000.0, "USD", "th32"),
+    ("RY", "fx", 125000.0, "JPY", "decimal"),
+];
+
+// Every other test in this branch starts from an empty database and a fresh
+// import, which is precisely the shape that hid this: the sha256 short-circuit
+// in `import_workbook` returned before the futures seeding ran, so a database
+// populated before futures support shipped had the positions and no specs, and
+// re-uploading the workbook - the only repair a user can perform - was itself
+// the duplicate that skipped the repair. On that database the feature was inert
+// while reporting itself complete.
+#[tokio::test]
+async fn duplicate_import_restores_exposure_on_a_pre_existing_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    assert_eq!(app.clone().oneshot(upload_req(&bytes)).await.unwrap().status(), StatusCode::OK);
+
+    // Rewind to an upgraded installation: positions on record, specs absent.
+    sqlx::query("DELETE FROM futures_contracts").execute(&pool).await.unwrap();
+
+    let (_, broken) = get_json(&app, "/api/metrics/derivatives").await;
+    assert_eq!(broken["rows"].as_array().unwrap().len(), 8);
+    assert_eq!(broken["excluded"].as_array().unwrap().len(), 8, "nothing is computable");
+    assert!((broken["total"]["gross_pct"].as_f64().unwrap()).abs() < 1e-12);
+    // The rates section must not claim completeness in this state (I1).
+    let (_, broken_rates) = get_json(&app, "/api/metrics/rates").await;
+    assert_eq!(broken_rates["futures"].as_array().unwrap().len(), 0);
+    assert_eq!(broken_rates["futures_missing_any"], true,
+               "four bond futures are held and none was evaluated");
+    assert_eq!(broken_rates["futures_no_spec"].as_array().unwrap().len(), 8);
+
+    // The repair: re-drop the exact same file. Same bytes, same sha256, so this
+    // is a duplicate import that re-ingests nothing - and must still seed.
+    let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let out: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(out["duplicate"], true, "still recognised as a duplicate: {out}");
+    assert_eq!(out["positions"], 0, "and nothing is re-ingested");
+    assert_eq!(out["warnings"].as_array().unwrap().len(), 8, "eight roots re-seeded: {out}");
+
+    let (_, seeded) = get_json(&app, "/api/metrics/derivatives").await;
+    assert_eq!(seeded["unconfirmed"].as_array().unwrap().len(), 8, "seeded, needing confirmation");
+    assert!(seeded["excluded"].as_array().unwrap().is_empty(), "every row is computable again");
+
+    // Confirm the eight true specs and the independently verified total is back.
+    for (root, cat, pv, ccy, conv) in TRUE_SPECS {
+        assert_eq!(put_json(&app, &format!("/api/futures-contracts/{root}"), spec(cat, pv, ccy, conv)).await,
+                   StatusCode::OK, "{root}");
+    }
+    let (_, d) = get_json(&app, "/api/metrics/derivatives").await;
+    assert!((d["total"]["gross_pct"].as_f64().unwrap() - 0.255045).abs() < 1e-5,
+            "25.5045% of net assets, as verified from the workbook: {}", d["total"]);
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 #[tokio::test]
 async fn derivatives_exposure_on_sample() {
     let dir = tempfile::tempdir().unwrap();
@@ -58,24 +128,21 @@ async fn derivatives_exposure_on_sample() {
     // inserts all 8 with confirmed = false. See task-9-report.md for the
     // deviation from the brief, which expected 7.
     assert_eq!(d["unconfirmed"].as_array().unwrap().len(), 8);
+    // The unconfirmed state is marked on each row, not only in the page-level
+    // banner: an unconfirmed spec is still fully counted in the totals, and the
+    // banner lists roots (`TY`) while the table lists tickers (`TYU6 Comdty`),
+    // leaving the reader to make the join.
+    assert!(d["rows"].as_array().unwrap().iter().all(|r| r["unconfirmed"] == true), "{}", d["rows"]);
 
     // Confirm every contract with its true spec. TY is the 32nds one.
-    for (root, cat, pv, ccy, conv) in [
-        ("CF", "equity", 10.0, "EUR", "decimal"),
-        ("VG", "equity", 10.0, "EUR", "decimal"),
-        ("NQ", "equity", 20.0, "USD", "decimal"),
-        ("RX", "interest_rate", 1000.0, "EUR", "decimal"),
-        ("OAT", "interest_rate", 1000.0, "EUR", "decimal"),
-        ("KOA", "interest_rate", 1000.0, "EUR", "decimal"),
-        ("TY", "interest_rate", 1000.0, "USD", "th32"),
-        ("RY", "fx", 125000.0, "JPY", "decimal"),
-    ] {
+    for (root, cat, pv, ccy, conv) in TRUE_SPECS {
         assert_eq!(put_json(&app, &format!("/api/futures-contracts/{root}"), spec(cat, pv, ccy, conv)).await,
                    StatusCode::OK, "{root}");
     }
 
     let (_, d) = get_json(&app, "/api/metrics/derivatives").await;
     assert!(d["unconfirmed"].as_array().unwrap().is_empty());
+    assert!(d["rows"].as_array().unwrap().iter().all(|r| r["unconfirmed"] == false), "{}", d["rows"]);
     assert!(d["excluded"].as_array().unwrap().is_empty());
     assert!((d["aum"].as_f64().unwrap() - 28_332_753.49).abs() < 1e-6);
 

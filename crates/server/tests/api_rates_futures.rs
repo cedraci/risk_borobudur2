@@ -59,9 +59,14 @@ async fn rates_includes_bond_futures_when_ctd_present() {
             "no CTD analytics uploaded yet");
     assert_eq!(r0["futures_missing_any"], true);
 
-    // The restatement is self-consistent: 100bp sensitivity is 100 x DV01 / AUM.
+    // The restatement is self-consistent: 100bp sensitivity is -100 x DV01 / AUM.
+    // The minus sign is the point. `dP = -D_mod x P x dy`, so a book that is
+    // long rates loses on a +100bp move and must print a NEGATIVE sensitivity.
     let aum = 28_332_753.49f64;
-    assert!((r0["nav_sensitivity_100bp"].as_f64().unwrap() - 100.0 * total0 / aum).abs() < 1e-12);
+    let sens0 = r0["nav_sensitivity_100bp"].as_f64().unwrap();
+    assert!((sens0 - -100.0 * total0 / aum).abs() < 1e-12);
+    assert!(total0 > 0.0, "the cash bond alone is long rates");
+    assert!(sens0 < 0.0, "long rates -> +100bp costs NAV, so the figure is negative: {sens0}");
 
     // Confirm the four bond-future specs, then upload CTD analytics.
     for (root, ccy, conv) in [
@@ -96,8 +101,79 @@ async fn rates_includes_bond_futures_when_ctd_present() {
     let total = r["total_dv01_eur"].as_f64().unwrap();
     let fut_sum: f64 = futs.iter().map(|f| f["dv01_eur"].as_f64().unwrap()).sum();
     assert!((total - (bond_dv01 + fut_sum)).abs() < 1e-6);
-    assert!((r["nav_sensitivity_100bp"].as_f64().unwrap() - 100.0 * total / aum).abs() < 1e-12);
+    let sens = r["nav_sensitivity_100bp"].as_f64().unwrap();
+    assert!((sens - -100.0 * total / aum).abs() < 1e-12);
     assert!(total < 0.0, "the book is net short rates once futures are counted");
+    // The regression this pins: a net-short-rates book GAINS on a rate rise, so
+    // its "NAV sensitivity per +100bp" must be positive. The unsigned figure
+    // printed a negative number here, which reads as "rates up 100bp, NAV down"
+    // - exactly backwards - and the sign only became load-bearing once futures
+    // could push the total DV01 negative.
+    assert!(sens > 0.0, "net short rates -> +100bp gains NAV, so the figure is positive: {sens}");
+    assert!(sens0 < 0.0 && sens > 0.0, "and the sign genuinely flips with the book");
+
+    // An unknown AUM is a gap, not a zero: with no NAV row for the snapshot
+    // date the sensitivity is null while the DV01 beside it stays populated.
+    sqlx::query("DELETE FROM nav_history WHERE date = '2026-07-24'").execute(&pool).await.unwrap();
+    let (_, r2) = get_json(&app, "/api/metrics/rates").await;
+    assert!(r2["nav_sensitivity_100bp"].is_null(), "{}", r2["nav_sensitivity_100bp"]);
+    assert!((r2["total_dv01_eur"].as_f64().unwrap() - total).abs() < 1e-9,
+            "the DV01 itself does not depend on AUM");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+// I1: a futures row whose contract root has no spec at all cannot pass the
+// rates candidate filter (it is neither `interest_rate` nor `unconfirmed`), so
+// it is dropped from the futures array - and its DV01 is dropped from
+// `total_dv01_eur` with it. `futures_missing_any: false` is a positive
+// assertion of completeness and must not be emitted in that state.
+#[tokio::test]
+async fn a_future_with_no_spec_at_all_blocks_the_completeness_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let wb = std::fs::read(SAMPLE).unwrap();
+    assert_eq!(app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
+
+    // Confirm every root properly and supply CTD analytics, so the only thing
+    // left that could be incomplete is the spec we are about to remove.
+    for (root, cat, ccy, conv) in [
+        ("RX", "interest_rate", "EUR", "decimal"), ("OAT", "interest_rate", "EUR", "decimal"),
+        ("KOA", "interest_rate", "EUR", "decimal"), ("TY", "interest_rate", "USD", "th32"),
+        ("CF", "equity", "EUR", "decimal"), ("VG", "equity", "EUR", "decimal"),
+        ("NQ", "equity", "USD", "decimal"), ("RY", "fx", "JPY", "decimal"),
+    ] {
+        assert_eq!(put_json(&app, &format!("/api/futures-contracts/{root}"),
+                            spec(cat, 1000.0, ccy, conv)).await, StatusCode::OK);
+    }
+    let ctd = std::fs::read(CTD).unwrap();
+    assert_eq!(app.clone().oneshot(upload_req("/api/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
+               StatusCode::OK);
+
+    let (_, ok) = get_json(&app, "/api/metrics/rates").await;
+    assert_eq!(ok["futures_missing_any"], false, "baseline: everything resolves");
+    assert!(ok["futures_no_spec"].as_array().unwrap().is_empty());
+    let total_ok = ok["total_dv01_eur"].as_f64().unwrap();
+
+    // Now drop OAT's spec, the way a row too incomplete for the importer to
+    // seed would leave it: the position is still held, nothing identifies it.
+    sqlx::query("DELETE FROM futures_contracts WHERE contract_root = 'OAT'")
+        .execute(&pool).await.unwrap();
+
+    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let futs = r["futures"].as_array().unwrap();
+    assert!(futs.iter().all(|f| !f["ticker"].as_str().unwrap().starts_with("OAT")),
+            "the spec-less root is still dropped from the table: {futs:?}");
+    assert!((r["total_dv01_eur"].as_f64().unwrap() - total_ok).abs() > 1.0,
+            "and its DV01 really has gone missing from the total");
+    assert_eq!(r["futures_missing_any"], true,
+               "so completeness must not be claimed");
+    assert_eq!(r["futures_no_spec"].as_array().unwrap(), &vec![serde_json::json!("OATU6 Comdty")],
+               "and the reason is named: {}", r["futures_no_spec"]);
 
     pool.close().await;
     edb.stop().await;
