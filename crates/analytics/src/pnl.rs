@@ -5,6 +5,8 @@
 //! currency unless a name says `_eur`.
 
 use chrono::NaiveDate;
+use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// A trade as the engine needs it. `net_price` includes fees, matching the
 /// administrator's PAM convention; `net_amount` is signed, negative for a buy.
@@ -86,6 +88,99 @@ pub fn walk_instrument(trades: &[Trade], t0: NaiveDate, t1: NaiveDate) -> Walk {
     }
 }
 
+/// FX rates for one currency over one period. `f0`/`f1` are the snapshot rates
+/// at the period endpoints; `at_trade` carries daily rates for trade dates.
+/// For EUR, every rate is 1.0 and the map is empty.
+#[derive(Debug, Clone)]
+pub struct FxLookup {
+    pub f0: f64,
+    pub f1: f64,
+    pub at_trade: BTreeMap<NaiveDate, f64>,
+}
+
+impl FxLookup {
+    pub fn eur() -> Self { Self { f0: 1.0, f1: 1.0, at_trade: BTreeMap::new() } }
+
+    /// Exact-date lookup. No nearest-date fallback: a silently approximated
+    /// rate is precisely the error the reconciliation exists to catch.
+    pub fn rate(&self, d: NaiveDate) -> Option<f64> {
+        if self.f0 == 1.0 && self.f1 == 1.0 && self.at_trade.is_empty() {
+            return Some(1.0); // EUR
+        }
+        self.at_trade.get(&d).copied()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Decomp {
+    pub realized_price: f64,
+    pub unrealized_price: f64,
+    pub realized_fx: f64,
+    pub unrealized_fx: f64,
+    /// A partial sale followed a mid-period purchase: weighted-average costing
+    /// cannot attribute the purchase's FX exactly. Disclosed, never smoothed.
+    pub fx_split_imprecise: bool,
+    /// Trade dates with no FX rate available.
+    pub fx_missing: Vec<NaiveDate>,
+}
+
+impl Decomp {
+    pub fn realized(&self) -> f64 { self.realized_price + self.realized_fx }
+    pub fn unrealized(&self) -> f64 { self.unrealized_price + self.unrealized_fx }
+    pub fn fx(&self) -> f64 { self.realized_fx + self.unrealized_fx }
+    pub fn total(&self) -> f64 { self.realized() + self.unrealized() }
+}
+
+/// Decompose one instrument's period P&L into price and FX, each split into
+/// realized and unrealized.
+///
+/// ```text
+/// LocalP&L      = (v1 - v0) + Σ flows
+/// Price         = LocalP&L × f0                       (split realized/unrealized
+///                                                      by the walk's realized figure)
+/// RealizedFX    = Σ_sells     CF × [F(trade) - f0]
+/// UnrealizedFX  = v1 × [f1 - f0] + Σ_buys CF × [F(trade) - f0]
+/// ```
+///
+/// The four sum to `v1·f1 - v0·f0 + Σ CF·F(trade)` exactly, so period
+/// additivity — and therefore the reconciliation to ΔNAV — is preserved.
+///
+/// When the position is closed at `t1`, purchase-flow FX moves to realized:
+/// reporting unrealized FX on a holding of nothing is meaningless.
+pub fn decompose(w: &Walk, v0_local: f64, v1_local: f64, fx: &FxLookup) -> Decomp {
+    let mut out = Decomp::default();
+
+    let flow_sum: f64 = w.buys.iter().chain(w.sells.iter()).map(|f| f.amount_local).sum();
+    let local_pnl = (v1_local - v0_local) + flow_sum;
+    out.realized_price = w.realized_local * fx.f0;
+    out.unrealized_price = (local_pnl - w.realized_local) * fx.f0;
+
+    let mut missing: Vec<NaiveDate> = Vec::new();
+    let fx_on = |flows: &[Flow], missing: &mut Vec<NaiveDate>| -> f64 {
+        flows.iter().map(|f| match fx.rate(f.date) {
+            Some(r) => f.amount_local * (r - fx.f0),
+            None => { if !missing.contains(&f.date) { missing.push(f.date); } 0.0 }
+        }).sum()
+    };
+    let sells_fx = fx_on(&w.sells, &mut missing);
+    let buys_fx = fx_on(&w.buys, &mut missing);
+    missing.sort();
+    out.fx_missing = missing;
+
+    out.realized_fx = sells_fx;
+    out.unrealized_fx = v1_local * (fx.f1 - fx.f0) + buys_fx;
+
+    if w.basis_end.qty <= 0.0 {
+        // Position closed: nothing is left to carry an unrealized figure.
+        out.realized_fx += out.unrealized_fx;
+        out.unrealized_fx = 0.0;
+    } else if !w.buys.is_empty() && !w.sells.is_empty() {
+        out.fx_split_imprecise = true;
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +245,117 @@ mod tests {
         assert_eq!(is_buy("VENTE"), Some(false));
         assert_eq!(is_buy("  achat "), Some(true));
         assert_eq!(is_buy("Nonsense"), None);
+    }
+
+    fn eur_fx() -> FxLookup { FxLookup { f0: 1.0, f1: 1.0, at_trade: BTreeMap::new() } }
+
+    #[test]
+    fn eur_position_has_no_fx_effect_and_totals_correctly() {
+        // Held throughout, no trades: value 1000 -> 1150.
+        let w = walk_instrument(&[], d(2026, 6, 1), d(2026, 6, 30));
+        let dec = decompose(&w, 1000.0, 1150.0, &eur_fx());
+        assert!((dec.total() - 150.0).abs() < 1e-9);
+        assert!(dec.fx().abs() < 1e-12);
+        assert!((dec.unrealized() - 150.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn price_plus_fx_equals_total_exactly() {
+        let t = vec![trade(15, false, 100.0, 12.0)];
+        let mut at = BTreeMap::new();
+        at.insert(d(2026, 6, 15), 0.90);
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: at };
+        // Opening basis needs a prior buy.
+        let mut all = vec![trade(1, true, 300.0, 10.0)];
+        all.extend(t);
+        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 3000.0, 2400.0, &fx);
+
+        let expected_total = 2400.0 * 0.92 - 3000.0 * 0.88 + (100.0 * 12.0) * 0.90;
+        assert!((dec.total() - expected_total).abs() < 1e-9);
+        assert!((dec.realized_price + dec.unrealized_price + dec.realized_fx + dec.unrealized_fx
+                 - expected_total).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fully_exited_position_puts_all_fx_in_realized() {
+        let mut at = BTreeMap::new();
+        at.insert(d(2026, 6, 15), 0.90);
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: at };
+        let all = vec![trade(1, true, 100.0, 10.0), trade(15, false, 100.0, 12.0)];
+        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 1000.0, 0.0, &fx);
+        assert_eq!(w.basis_end.qty, 0.0);
+        assert!(dec.unrealized_fx.abs() < 1e-12, "unrealized FX on an empty holding is nonsense");
+        assert!(dec.realized_fx.abs() > 0.0);
+    }
+
+    #[test]
+    fn opened_and_closed_inside_the_period_reports_no_unrealized_fx() {
+        let mut at = BTreeMap::new();
+        at.insert(d(2026, 6, 12), 0.89);
+        at.insert(d(2026, 6, 20), 0.93);
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: at };
+        let all = vec![trade(12, true, 50.0, 20.0), trade(20, false, 50.0, 22.0)];
+        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 0.0, 0.0, &fx);
+        assert!(dec.unrealized_fx.abs() < 1e-12);
+        assert!(!dec.fx_split_imprecise, "a closed round trip is exact, not imprecise");
+    }
+
+    #[test]
+    fn partial_sale_after_a_mid_period_purchase_is_flagged() {
+        let mut at = BTreeMap::new();
+        at.insert(d(2026, 6, 12), 0.89);
+        at.insert(d(2026, 6, 20), 0.93);
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: at };
+        let all = vec![trade(1, true, 100.0, 10.0), trade(12, true, 50.0, 11.0), trade(20, false, 30.0, 12.0)];
+        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 1000.0, 1400.0, &fx);
+        assert!(dec.fx_split_imprecise);
+    }
+
+    #[test]
+    fn a_trade_date_with_no_fx_rate_is_reported() {
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: BTreeMap::new() };
+        let all = vec![trade(1, true, 100.0, 10.0), trade(15, false, 40.0, 12.0)];
+        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+        let dec = decompose(&w, 1000.0, 700.0, &fx);
+        assert_eq!(dec.fx_missing, vec![d(2026, 6, 15)]);
+    }
+
+    /// Exhaustive small-grid check that the four components always sum to the
+    /// EUR total. This is the identity the whole reconciliation rests on.
+    #[test]
+    fn decomposition_is_exact_across_a_grid() {
+        for &f0 in &[0.5, 0.88, 1.0, 1.4] {
+            for &f1 in &[0.5, 0.92, 1.0, 1.4] {
+                for &ft in &[0.5, 0.90, 1.0, 1.4] {
+                    for &(qty_buy, qty_sell) in &[(100.0, 0.0), (100.0, 40.0), (100.0, 100.0), (0.0, 0.0)] {
+                        let mut at = BTreeMap::new();
+                        at.insert(d(2026, 6, 15), ft);
+                        at.insert(d(2026, 6, 16), ft);
+                        let fx = FxLookup { f0, f1, at_trade: at };
+
+                        let mut all = vec![trade(1, true, 200.0, 10.0)];
+                        if qty_buy > 0.0 { all.push(trade(15, true, qty_buy, 11.0)); }
+                        if qty_sell > 0.0 { all.push(trade(16, false, qty_sell, 12.0)); }
+
+                        let w = walk_instrument(&all, d(2026, 6, 10), d(2026, 6, 30));
+                        let v0 = 2000.0;
+                        let v1 = w.basis_end.qty * 12.5;
+                        let dec = decompose(&w, v0, v1, &fx);
+
+                        let flows: f64 = w.buys.iter().chain(w.sells.iter())
+                            .map(|f| f.amount_local * ft).sum();
+                        let expected = v1 * f1 - v0 * f0 + flows;
+                        assert!((dec.total() - expected).abs() < 1e-6,
+                            "f0={f0} f1={f1} ft={ft} buy={qty_buy} sell={qty_sell}: {} vs {}",
+                            dec.total(), expected);
+                        assert!((dec.realized_fx + dec.unrealized_fx - dec.fx()).abs() < 1e-9);
+                    }
+                }
+            }
+        }
     }
 }
