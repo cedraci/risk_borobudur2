@@ -5,8 +5,11 @@
 //! writes a workbook of formulas, the user opens and saves it, and uploads it
 //! back. Same shape as the weekly CTD companion file.
 
+use crate::{ParseFailure, RowError};
+use calamine::{Data, Range, Reader, Xlsx};
 use chrono::NaiveDate;
 use rust_xlsxwriter::{Format, Formula, Workbook};
+use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub struct RequestItem { pub isin: String, pub ticker: String }
@@ -79,4 +82,148 @@ pub fn build_request(
     }
 
     Ok(wb.save_to_buffer()?)
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassificationRow {
+    pub isin: String,
+    pub country: Option<String>,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FxObservation {
+    pub date: NaiveDate,
+    pub currency: String,
+    pub rate_to_eur: f64,
+}
+
+#[derive(Debug, Default)]
+pub struct ParsedResponse {
+    pub classifications: Vec<ClassificationRow>,
+    pub fx: Vec<FxObservation>,
+    /// Cells that did not resolve, reported so the user can fix and re-upload.
+    pub skipped: Vec<RowError>,
+}
+
+/// True for a cell Bloomberg did not resolve.
+fn unresolved(d: Option<&Data>) -> bool {
+    match d {
+        None | Some(Data::Empty) => true,
+        Some(Data::Error(_)) => true,
+        Some(Data::String(s)) => {
+            let t = s.trim();
+            t.is_empty() || t.starts_with("#N/A") || t == "#VALUE!" || t == "#NAME?"
+        }
+        _ => false,
+    }
+}
+
+fn text(r: &Range<Data>, row: u32, col: u32) -> Option<String> {
+    let v = r.get_value((row, col));
+    if unresolved(v) { return None; }
+    v.map(|d| d.to_string().trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Parse the workbook the user saved out of Excel. Values only — a file still
+/// holding formulas has not been resolved and its cells read as unresolved.
+pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
+    let mut wb: Xlsx<_> = Xlsx::new(Cursor::new(bytes.to_vec()))
+        .map_err(|e| ParseFailure::Workbook(e.to_string()))?;
+    let mut out = ParsedResponse::default();
+
+    if let Ok(refs) = wb.worksheet_range("REFS") {
+        let end = refs.end().map(|(r, _)| r).unwrap_or(0);
+        for row in 1..=end {
+            let Some(isin) = text(&refs, row, 0) else { continue };
+            let country = text(&refs, row, 2);
+            let sector = text(&refs, row, 3);
+            let industry = text(&refs, row, 4);
+            for (col, name) in [(2u32, "country_of_risk"), (3, "gics_sector"), (4, "gics_industry")] {
+                if unresolved(refs.get_value((row, col))) {
+                    out.skipped.push(RowError {
+                        sheet: "REFS".into(),
+                        row: row + 1,
+                        message: format!("{isin}: {name} did not resolve; not stored"),
+                    });
+                }
+            }
+            if country.is_some() || sector.is_some() || industry.is_some() {
+                out.classifications.push(ClassificationRow { isin, country, sector, industry });
+            }
+        }
+    }
+
+    if let Ok(fx) = wb.worksheet_range("FX") {
+        let end = fx.end().map(|(r, _)| r).unwrap_or(0);
+        let width = fx.end().map(|(_, c)| c).unwrap_or(0);
+        let currencies: Vec<(u32, String)> = (1..=width)
+            .filter_map(|c| text(&fx, 0, c).map(|n| (c, n)))
+            .collect();
+
+        for row in 1..=end {
+            let Some(dtxt) = text(&fx, row, 0) else { continue };
+            let Some(date) = parse_any_date(&dtxt) else {
+                out.skipped.push(RowError {
+                    sheet: "FX".into(), row: row + 1,
+                    message: format!("date: expected YYYY-MM-DD, got {dtxt:?}"),
+                });
+                continue;
+            };
+            for (col, ccy) in &currencies {
+                let Some(v) = fx.get_value((row, *col)) else { continue };
+                if unresolved(Some(v)) { continue; }
+                let raw = match v {
+                    Data::Float(f) => *f,
+                    Data::Int(i) => *i as f64,
+                    _ => continue,
+                };
+                if !(raw.is_finite() && raw > 0.0) {
+                    out.skipped.push(RowError {
+                        sheet: "FX".into(), row: row + 1,
+                        message: format!("{ccy}: rate must be positive, got {raw}"),
+                    });
+                    continue;
+                }
+                // Bloomberg quotes EURXXX as units of XXX per EUR; the tool
+                // needs EUR per unit, so invert.
+                out.fx.push(FxObservation { date, currency: ccy.clone(), rate_to_eur: 1.0 / raw });
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn parse_any_date(s: &str) -> Option<NaiveDate> {
+    let t = s.trim();
+    NaiveDate::parse_from_str(t, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(t, "%d/%m/%Y"))
+        .ok()
+        .or_else(|| {
+            // Excel serial left with its formatting stripped.
+            let f: f64 = t.parse().ok()?;
+            NaiveDate::from_ymd_opt(1899, 12, 30)?
+                .checked_add_days(chrono::Days::new(f as u64))
+        })
+}
+
+/// Region from country of risk. A fixed table, not fetched: it is reporting
+/// policy, not market data. Unknown countries return None and group as
+/// "Unclassified" rather than being forced into a wrong bucket.
+pub fn region_for(country: &str) -> Option<&'static str> {
+    let c = country.trim().to_ascii_uppercase();
+    Some(match c.as_str() {
+        "FRANCE" | "GERMANY" | "ITALY" | "SPAIN" | "NETHERLANDS" | "BELGIUM" | "AUSTRIA"
+        | "PORTUGAL" | "IRELAND" | "LUXEMBOURG" | "FINLAND" | "GREECE" | "UNITED KINGDOM"
+        | "SWITZERLAND" | "SWEDEN" | "NORWAY" | "DENMARK" | "POLAND" | "CZECH REPUBLIC" => "Europe",
+        "UNITED STATES" | "CANADA" => "North America",
+        "BRAZIL" | "MEXICO" | "CHILE" | "ARGENTINA" | "COLOMBIA" | "PERU" => "Latin America",
+        "JAPAN" | "CHINA" | "HONG KONG" | "SOUTH KOREA" | "TAIWAN" | "SINGAPORE" | "INDIA"
+        | "AUSTRALIA" | "NEW ZEALAND" | "INDONESIA" | "THAILAND" | "MALAYSIA" => "Asia Pacific",
+        "SOUTH AFRICA" | "UNITED ARAB EMIRATES" | "SAUDI ARABIA" | "ISRAEL" | "TURKEY"
+        | "QATAR" | "EGYPT" | "NIGERIA" | "MOROCCO" => "Middle East & Africa",
+        _ => return None,
+    })
 }
