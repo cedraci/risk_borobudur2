@@ -195,6 +195,27 @@ pub fn decompose(w: &Walk, v0_local: f64, v1_local: f64, fx: &FxLookup) -> Decom
     out
 }
 
+/// P&L for one futures contract over a period.
+///
+/// `v0_ccy`/`v1_ccy` are the contract's `Valorisation Dev` at each snapshot,
+/// which is variation margin — accumulated unrealized P&L — not market value.
+/// `realized_ccy` is the result of contracts closed inside the period, which
+/// the caller derives from `OPERATIONS`; pass 0.0 when none were closed.
+///
+/// There is no cost basis here: a future has no acquisition cost to average,
+/// and the fund holds short futures, for which an average cost is meaningless.
+pub fn futures_pnl(v0_ccy: f64, v1_ccy: f64, realized_ccy: f64, fx: &FxLookup) -> Decomp {
+    let total_local = (v1_ccy - v0_ccy) + realized_ccy;
+    Decomp {
+        realized_price: realized_ccy * fx.f0,
+        unrealized_price: (total_local - realized_ccy) * fx.f0,
+        realized_fx: 0.0,
+        unrealized_fx: v1_ccy * (fx.f1 - fx.f0),
+        fx_split_imprecise: false,
+        fx_missing: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +430,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn futures_pnl_is_the_change_in_variation_margin() {
+        let dec = futures_pnl(6750.0, 9100.0, 0.0, &eur_fx());
+        assert!((dec.total() - 2350.0).abs() < 1e-9);
+        assert!((dec.unrealized() - 2350.0).abs() < 1e-9);
+        assert!(dec.realized().abs() < 1e-12);
+    }
+
+    #[test]
+    fn closed_futures_contract_reports_its_result_as_realized() {
+        // Margin ran to zero because the contract was closed for +1200.
+        let dec = futures_pnl(800.0, 0.0, 1200.0, &eur_fx());
+        assert!((dec.realized() - 1200.0).abs() < 1e-9);
+        assert!((dec.total() - (1200.0 - 800.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn futures_fx_uses_the_closing_margin_balance() {
+        let fx = FxLookup { f0: 0.88, f1: 0.92, at_trade: BTreeMap::new() };
+        let dec = futures_pnl(1000.0, 1500.0, 0.0, &fx);
+        // price effect at f0, FX on the closing balance
+        assert!((dec.unrealized_price - 500.0 * 0.88).abs() < 1e-9);
+        assert!((dec.unrealized_fx - 1500.0 * (0.92 - 0.88)).abs() < 1e-9);
     }
 }
