@@ -29,7 +29,10 @@ export interface PositionRecord {
 }
 export interface Positions { dates: string[]; date: string | null; rows: PositionRecord[] }
 export interface ImportRec { id: number; filename: string; nav_date: string; imported_at: string; row_counts: Record<string, number> }
-export interface ImportOutcome { import_id: number; duplicate: boolean; nav_rows: number; positions: number; dividends: number; operations: number; div_ops_replaced: boolean }
+export interface ImportOutcome {
+  import_id: number; duplicate: boolean; nav_rows: number; positions: number; dividends: number;
+  operations: number; div_ops_replaced: boolean; warnings: string[];
+}
 export interface Settings {
   risk_free_rate: number; var_confidence: number; var_horizon_days: number;
   var_window_days: number; var_limit: number; short_dd_max_days: number;
@@ -93,9 +96,15 @@ export interface BondRow {
   coupon_pct?: number; maturity?: string; freq?: number; price?: number;
   ytm?: number; mod_duration?: number; dv01_eur?: number; weight?: number;
 }
+export interface FutureRow {
+  ticker: string; name: string; missing: boolean; qty: number; price: number;
+  point_value: number | null; ctd_isin?: string; ctd_mod_duration?: number;
+  conversion_factor?: number; dv01_eur?: number; curve?: string | null;
+}
 export interface Rates {
-  dates: string[]; date: string | null; bonds: BondRow[];
-  total_dv01_eur: number; nav_sensitivity_100bp: number; futures_note: string[]; missing_any: boolean;
+  dates: string[]; date: string | null; bonds: BondRow[]; futures: FutureRow[];
+  total_dv01_eur: number; nav_sensitivity_100bp: number;
+  missing_any: boolean; futures_missing_any: boolean;
 }
 export interface MethodSummary {
   exceptions: number; n: number; zone: "green" | "yellow" | "red";
@@ -121,6 +130,43 @@ export interface RefBody {
   issuer_group: string | null; liquidity_bucket: Bucket | null;
   bond_coupon_pct: number | null; bond_maturity: string | null; bond_coupon_freq: number | null;
 }
+
+export type Category = "equity" | "interest_rate" | "fx" | "credit" | "commodity" | "other";
+export interface CategoryTotals { category: Category; long_pct: number; short_pct: number; gross_pct: number }
+export interface ExposureRow {
+  ticker: string; name: string; currency: string; category: Category;
+  qty: number; price: number; point_value: number | null;
+  notional_ccy: number | null; notional_eur: number | null;
+  pct_nav: number | null; spec_missing: boolean;
+}
+export interface Derivatives {
+  dates: string[]; date: string | null; aum: number;
+  categories: CategoryTotals[]; total: CategoryTotals;
+  rows: ExposureRow[]; excluded: string[]; unconfirmed: string[]; note: string;
+}
+export interface FuturesContract {
+  contract_root: string; label: string; category: Category; point_value: number | null;
+  currency: string; curve: string | null; price_convention: "decimal" | "th32"; confirmed: boolean;
+}
+export interface CtdRecord {
+  nav_date: string; ticker: string; ctd_isin: string; ctd_mod_duration: number;
+  ctd_clean_price: number; ctd_accrued: number; conversion_factor: number;
+}
+export interface CtdUploadOutcome { nav_date: string; rows: number; replaced: boolean }
+
+export const getDerivatives = (date?: string) =>
+  req<Derivatives>(`/api/metrics/derivatives${date ? `?date=${date}` : ""}`);
+export const getFuturesContracts = () => req<FuturesContract[]>("/api/futures-contracts");
+export const putFuturesContract = (root: string, body: Omit<FuturesContract, "contract_root">) =>
+  req<FuturesContract>(`/api/futures-contracts/${root}`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+export const getCtd = (date?: string) => req<CtdRecord[]>(`/api/futures-analytics${date ? `?date=${date}` : ""}`);
+export const uploadCtd = (f: File) => {
+  const fd = new FormData();
+  fd.append("file", f);
+  return req<CtdUploadOutcome>("/api/futures-analytics", { method: "POST", body: fd });
+};
 
 export const getConcentration = (date?: string) =>
   req<Concentration>(`/api/metrics/concentration${date ? `?date=${date}` : ""}`);

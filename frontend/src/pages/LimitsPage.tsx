@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { getConcentration, getLiquidity, getRates, type Check, type CheckStatus } from "../api";
+import DerivativesExposure from "../components/DerivativesExposure";
 import EChart from "../components/EChart";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
@@ -68,6 +69,8 @@ export default function LimitsPage() {
       {(conc.data?.checks ?? []).map((c) => <CheckCard key={c.check} c={c} />)}
       {conc.data && <p className="kpi-sub">{conc.data.excluded_note}</p>}
 
+      <DerivativesExposure date={date} />
+
       <h3>Liquidity</h3>
       {liq.error && <p className="neg">{liq.error}</p>}
       {liq.data && (
@@ -129,9 +132,39 @@ export default function LimitsPage() {
             Portfolio DV01: <strong>{eur(rates.data.total_dv01_eur)}</strong> · NAV sensitivity per +100bp:{" "}
             <strong>{pct(rates.data.nav_sensitivity_100bp)}</strong>
           </p>
-          <p className="kpi-sub">
-            Not included (no notional/CTD data in the source file): {rates.data.futures_note.join(", ") || "—"}
-          </p>
+
+          <h4>Bond futures</h4>
+          {rates.data.futures_missing_any && (
+            <p className="warn-badge">
+              Some bond futures are missing CTD analytics for this snapshot date and are excluded from DV01 —
+              upload the weekly CTD companion file on the Data page to include them.
+            </p>
+          )}
+          {rates.data.futures.length === 0 ? (
+            <p className="kpi-sub">No interest-rate futures in this snapshot.</p>
+          ) : (
+            <table className="tbl">
+              <thead>
+                <tr><th>Future</th><th>Qty</th><th>Price</th><th>Point value</th><th>CTD ISIN</th><th>Mod. duration</th><th>Conv. factor</th><th>DV01 €</th></tr>
+              </thead>
+              <tbody>
+                {rates.data.futures.map((f, i) => f.missing ? (
+                  <tr key={i}><td>{f.name || f.ticker}</td><td colSpan={7} className="neg">missing CTD analytics for this date</td></tr>
+                ) : (
+                  <tr key={i}>
+                    <td>{f.name || f.ticker}</td>
+                    <td>{num(f.qty, 0)}</td>
+                    <td>{num(f.price)}</td>
+                    <td>{num(f.point_value)}</td>
+                    <td>{f.ctd_isin}</td>
+                    <td>{num(f.ctd_mod_duration)}</td>
+                    <td>{num(f.conversion_factor)}</td>
+                    <td>{eur(f.dv01_eur ?? null)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
     </div>

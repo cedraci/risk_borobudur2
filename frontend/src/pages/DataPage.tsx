@@ -57,11 +57,14 @@ export default function DataPage() {
           onChange={(e) => { const f = e.target.files?.[0]; if (f) void doUpload(f); }}
         />
         {outcome && (
-          <p className="pos">
-            {outcome.duplicate
-              ? "Already imported (identical file) — nothing changed."
-              : `Imported: ${outcome.nav_rows} NAV rows, ${outcome.positions} positions, ${outcome.dividends} dividends, ${outcome.operations} operations${outcome.div_ops_replaced ? "" : " (older file: dividends/operations left untouched)"}.`}
-          </p>
+          <>
+            <p className="pos">
+              {outcome.duplicate
+                ? "Already imported (identical file) — nothing changed."
+                : `Imported: ${outcome.nav_rows} NAV rows, ${outcome.positions} positions, ${outcome.dividends} dividends, ${outcome.operations} operations${outcome.div_ops_replaced ? "" : " (older file: dividends/operations left untouched)"}.`}
+            </p>
+            {outcome.warnings.map((w, i) => <p key={i} className="warn-badge">{w}</p>)}
+          </>
         )}
         {uploadErr && (
           <div className="neg">
