@@ -86,7 +86,10 @@ async fn limits_and_backtest_on_sample() {
     let md = bonds[0]["mod_duration"].as_f64().unwrap();
     assert!(md > 4.0 && md < 9.0); // 2035 bullet
     assert!(r["total_dv01_eur"].as_f64().unwrap() > 0.0);
-    assert!(!r["futures_note"].as_array().unwrap().is_empty());
+    // Futures now carry real DV01 rows rather than a text note; without CTD
+    // analytics uploaded they are listed as missing.
+    assert_eq!(r["futures"].as_array().unwrap().len(), 4);
+    assert_eq!(r["futures_missing_any"], true);
 
     // backtest: 343 returns, window 252 -> 91 points
     let (_, b) = get_json(&app, "/api/metrics/backtest").await;

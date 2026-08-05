@@ -83,7 +83,6 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
     let by = ref_map(&refs);
     let mut bonds = Vec::new();
     let mut total_dv01 = 0.0f64;
-    let mut md_weight_sum = 0.0f64;
     let mut missing_any = false;
     for p in rows.iter().filter(|p| p.asset_type == "Obligation") {
         let r = by.get(p.isin.as_str());
@@ -100,7 +99,6 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
             Some((m, price, mv, w, r)) => {
                 let dv01 = m.modified * mv * 1e-4;
                 total_dv01 += dv01;
-                md_weight_sum += m.modified * w;
                 bonds.push(serde_json::json!({
                     "code": p.isin, "name": p.name, "missing": false,
                     "coupon_pct": r.bond_coupon_pct, "maturity": r.bond_maturity, "freq": r.bond_coupon_freq,
@@ -113,18 +111,80 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
             }
         }
     }
-    let futures_note: Vec<String> = rows.iter()
-        .filter(|p| p.asset_type == "Future")
-        .map(|p| p.name.clone().unwrap_or_else(|| p.isin.clone()))
-        .collect();
+    // Bond futures: only contracts classified interest_rate, and only where
+    // CTD analytics exist for this exact NAV date. No carry-forward.
+    let specs = db::repo::contracts_all(&st.pool).await?;
+    let (fut_positions, _) = future_positions(&rows, &specs);
+    let ctd = match date {
+        Some(d) => db::repo::ctd_for(&st.pool, d).await?,
+        None => Vec::new(),
+    };
+    let mut futures = Vec::new();
+    let mut futures_missing_any = false;
+    // Candidate bond futures: contracts confirmed `interest_rate`, plus
+    // contracts still sitting at `other` - the import-time seed's default for
+    // any `Comdty`-suffixed ticker, since a bare ticker can't distinguish a
+    // bond future from a commodity future (see db::repo::import_workbook).
+    // Once the user confirms a spec as `equity`/`fx`/`commodity`/`credit`
+    // it drops out here; until then it stays visible, `missing: true` if no
+    // CTD analytics resolve it, rather than disappearing silently.
+    for f in fut_positions.iter().filter(|f| {
+        matches!(f.category, analytics::Category::InterestRate | analytics::Category::Other)
+    }) {
+        let a = ctd.iter().find(|c| c.ticker == f.ticker);
+        let dv01 = match (a, f.point_value, f.fx_rate) {
+            (Some(a), Some(pv), Some(fx)) => analytics::dv01_position(
+                &analytics::CtdAnalytics {
+                    mod_duration: a.ctd_mod_duration,
+                    clean_price: a.ctd_clean_price,
+                    accrued: a.ctd_accrued,
+                    conversion_factor: a.conversion_factor,
+                },
+                pv,
+                f.qty,
+                fx,
+            ),
+            _ => None,
+        };
+        match dv01 {
+            Some(d) => {
+                total_dv01 += d;
+                let a = a.unwrap();
+                futures.push(serde_json::json!({
+                    "ticker": f.ticker, "name": f.name, "missing": false,
+                    "qty": f.qty, "price": f.price, "point_value": f.point_value,
+                    "ctd_isin": a.ctd_isin, "ctd_mod_duration": a.ctd_mod_duration,
+                    "conversion_factor": a.conversion_factor, "dv01_eur": d,
+                    "curve": specs.iter()
+                        .find(|s| Some(&s.contract_root) == analytics::contract_root(&f.ticker).as_ref())
+                        .and_then(|s| s.curve.clone()),
+                }));
+            }
+            None => {
+                futures_missing_any = true;
+                futures.push(serde_json::json!({
+                    "ticker": f.ticker, "name": f.name, "missing": true,
+                    "qty": f.qty, "price": f.price, "point_value": f.point_value,
+                }));
+            }
+        }
+    }
+    let aum = match date {
+        Some(d) => db::repo::aum_for(&st.pool, d).await?.unwrap_or(0.0),
+        None => 0.0,
+    };
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
         "bonds": bonds,
+        "futures": futures,
         "total_dv01_eur": total_dv01,
-        "nav_sensitivity_100bp": md_weight_sum * 0.01,
-        "futures_note": futures_note,
+        // 100bp in EUR as a fraction of net assets. Algebraically identical to
+        // the previous sum(modified x weight) x 0.01 for cash bonds, and it
+        // also accepts futures, which have no market-value weight.
+        "nav_sensitivity_100bp": if aum > 0.0 { 100.0 * total_dv01 / aum } else { 0.0 },
         "missing_any": missing_any,
+        "futures_missing_any": futures_missing_any,
     })))
 }
 
