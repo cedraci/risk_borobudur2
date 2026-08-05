@@ -355,9 +355,9 @@ mod tests {
         // sell 2000 @ 46.00 -> realized 7900, avg unchanged.
         let t = vec![trade(1, true, 5000.0, 40.76), trade(2, true, 3000.0, 44.20), trade(3, false, 2000.0, 46.00)];
         let w = walk_instrument(&t, d(2026, 5, 31), d(2026, 6, 30));
-        assert!((w.basis_end.avg_cost - 42.055).abs() < 1e-9);
+        assert!((w.basis_end.avg_cost - 42.05).abs() < 1e-9);
         assert!((w.basis_end.qty - 6000.0).abs() < 1e-9);
-        assert!((w.realized_local - 2000.0 * (46.00 - 42.055)).abs() < 1e-6);
+        assert!((w.realized_local - 2000.0 * (46.00 - 42.05)).abs() < 1e-6);
     }
 
     #[test]
