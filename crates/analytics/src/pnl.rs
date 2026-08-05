@@ -216,6 +216,117 @@ pub fn futures_pnl(v0_ccy: f64, v1_ccy: f64, realized_ccy: f64, fx: &FxLookup) -
     }
 }
 
+pub const UNCLASSIFIED: &str = "Unclassified";
+
+/// Map the workbook's French `Type d'actif` values onto reporting classes.
+/// Unknown types fall through to "Other" rather than being dropped, so a new
+/// asset type in a future workbook is visible instead of silently missing.
+pub fn asset_class_of(asset_type: &str) -> &'static str {
+    match asset_type {
+        "Action" => "Equities",
+        "Obligation" => "Bonds",
+        "Fonds" => "Funds",
+        "Future" => "Futures",
+        "Cash Acc" | "Margin Acc" => "Cash",
+        "Frais provisionnés" => "Fees",
+        "Provisions ordres" => "Provisions",
+        "Dividendes" => "Income",
+        _ => "Other",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dimension { AssetClass, Country, Region, Sector, Industry, Currency, IssuerGroup }
+
+impl Dimension {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "asset_class" => Self::AssetClass,
+            "country" => Self::Country,
+            "region" => Self::Region,
+            "sector" => Self::Sector,
+            "industry" => Self::Industry,
+            "currency" => Self::Currency,
+            "issuer_group" => Self::IssuerGroup,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstrumentPnl {
+    pub isin: String,
+    pub name: String,
+    pub asset_class: String,
+    pub country: Option<String>,
+    pub region: Option<String>,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub currency: String,
+    pub issuer_group: Option<String>,
+    #[serde(flatten)]
+    pub decomp: Decomp,
+}
+
+impl InstrumentPnl {
+    fn key(&self, dim: Dimension) -> String {
+        let v = match dim {
+            Dimension::AssetClass => Some(self.asset_class.clone()),
+            Dimension::Country => self.country.clone(),
+            Dimension::Region => self.region.clone(),
+            Dimension::Sector => self.sector.clone(),
+            Dimension::Industry => self.industry.clone(),
+            Dimension::Currency => Some(self.currency.clone()),
+            Dimension::IssuerGroup => self.issuer_group.clone(),
+        };
+        v.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| UNCLASSIFIED.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupPnl {
+    pub key: String,
+    pub realized_price: f64,
+    pub unrealized_price: f64,
+    pub realized_fx: f64,
+    pub unrealized_fx: f64,
+    pub realized: f64,
+    pub unrealized: f64,
+    pub fx: f64,
+    pub total: f64,
+    pub instruments: Vec<InstrumentPnl>,
+}
+
+/// Group instruments by `dim`, sorted by absolute total descending so the
+/// biggest movers lead regardless of sign.
+pub fn group_by(rows: Vec<InstrumentPnl>, dim: Dimension) -> Vec<GroupPnl> {
+    let mut m: BTreeMap<String, Vec<InstrumentPnl>> = BTreeMap::new();
+    for r in rows { m.entry(r.key(dim)).or_default().push(r); }
+
+    let mut out: Vec<GroupPnl> = m.into_iter().map(|(key, instruments)| {
+        let mut g = GroupPnl {
+            key, realized_price: 0.0, unrealized_price: 0.0, realized_fx: 0.0,
+            unrealized_fx: 0.0, realized: 0.0, unrealized: 0.0, fx: 0.0, total: 0.0,
+            instruments,
+        };
+        for i in &g.instruments {
+            g.realized_price += i.decomp.realized_price;
+            g.unrealized_price += i.decomp.unrealized_price;
+            g.realized_fx += i.decomp.realized_fx;
+            g.unrealized_fx += i.decomp.unrealized_fx;
+        }
+        g.realized = g.realized_price + g.realized_fx;
+        g.unrealized = g.unrealized_price + g.unrealized_fx;
+        g.fx = g.realized_fx + g.unrealized_fx;
+        g.total = g.realized + g.unrealized;
+        g.instruments.sort_by(|a, b| b.decomp.total().abs().total_cmp(&a.decomp.total().abs()));
+        g
+    }).collect();
+
+    out.sort_by(|a, b| b.total.abs().total_cmp(&a.total.abs()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +566,57 @@ mod tests {
         // price effect at f0, FX on the closing balance
         assert!((dec.unrealized_price - 500.0 * 0.88).abs() < 1e-9);
         assert!((dec.unrealized_fx - 1500.0 * (0.92 - 0.88)).abs() < 1e-9);
+    }
+
+    fn inst(isin: &str, sector: Option<&str>, total: f64) -> InstrumentPnl {
+        InstrumentPnl {
+            isin: isin.into(), name: isin.into(),
+            asset_class: "Equities".into(),
+            country: Some("France".into()), region: Some("Europe".into()),
+            sector: sector.map(|s| s.to_string()), industry: None,
+            currency: "EUR".into(), issuer_group: Some("G".into()),
+            decomp: Decomp { unrealized_price: total, ..Default::default() },
+        }
+    }
+
+    #[test]
+    fn groups_sum_their_instruments_and_sort_by_absolute_total() {
+        let rows = vec![
+            inst("A", Some("Industrials"), 100.0),
+            inst("B", Some("Industrials"), 50.0),
+            inst("C", Some("Utilities"), -400.0),
+        ];
+        let g = group_by(rows, Dimension::Sector);
+        assert_eq!(g[0].key, "Utilities", "largest absolute mover leads");
+        assert!((g[0].total + 400.0).abs() < 1e-9);
+        assert_eq!(g[1].key, "Industrials");
+        assert!((g[1].total - 150.0).abs() < 1e-9);
+        assert_eq!(g[1].instruments.len(), 2);
+    }
+
+    #[test]
+    fn missing_classification_groups_as_unclassified() {
+        let g = group_by(vec![inst("A", None, 10.0)], Dimension::Sector);
+        assert_eq!(g[0].key, UNCLASSIFIED);
+    }
+
+    #[test]
+    fn dimension_parsing_accepts_the_documented_names() {
+        assert!(matches!(Dimension::parse("asset_class"), Some(Dimension::AssetClass)));
+        assert!(matches!(Dimension::parse("issuer_group"), Some(Dimension::IssuerGroup)));
+        assert!(Dimension::parse("nonsense").is_none());
+    }
+
+    #[test]
+    fn asset_class_maps_the_workbook_french_labels() {
+        assert_eq!(asset_class_of("Action"), "Equities");
+        assert_eq!(asset_class_of("Obligation"), "Bonds");
+        assert_eq!(asset_class_of("Fonds"), "Funds");
+        assert_eq!(asset_class_of("Future"), "Futures");
+        assert_eq!(asset_class_of("Cash Acc"), "Cash");
+        assert_eq!(asset_class_of("Margin Acc"), "Cash");
+        assert_eq!(asset_class_of("Frais provisionnés"), "Fees");
+        assert_eq!(asset_class_of("Provisions ordres"), "Provisions");
+        assert_eq!(asset_class_of("Dividendes"), "Income");
     }
 }
