@@ -54,7 +54,8 @@ Established by analysis of `crates/ingest/tests/fixtures/sample.xlsx` (NAV date
 ## Key decisions (user-confirmed)
 
 1. **Full decomposition.** Total P&L splits into realized, unrealized, price
-   effect and FX effect, with income and fees handled as described below.
+   effect and FX effect, with income and fees handled as described below. The
+   FX effect is itself split into realized and unrealized by flow direction.
 2. **Periods snap to snapshot dates.** The user picks any two dates; the tool
    strikes P&L between the nearest imported NAV dates and states plainly which
    dates it used and how many snapshots the period spans. No interpolation.
@@ -77,16 +78,17 @@ Established by analysis of `crates/ingest/tests/fixtures/sample.xlsx` (NAV date
    P&L tables. At 2,050 trades and ~60 instruments the cost-basis walk is
    sub-millisecond; a cache would be speculative complexity.
 
-## Deviation from the approved options
+## Residual handling
 
-The user selected full reconciliation with a zero residual. A zero residual
-cannot be honestly guaranteed: rounding in the administrator's workbook, fees
-accruing between snapshots, and FX on cash balances all leave a small gap.
+A zero reconciliation residual cannot be honestly guaranteed: rounding in the
+administrator's workbook, fees accruing between snapshots, and FX on cash
+balances all leave a small gap.
 
-The design therefore computes the residual always, hides it while it is within
-**0.10% of gross P&L**, and surfaces it as a warning above that. This behaves as
-the chosen option in normal operation and as a data-quality alarm when something
-is genuinely wrong.
+The residual is therefore **always computed and always displayed**, on the
+user's instruction to signal data quality rather than conceal it. The 0.10%
+tolerance governs presentation only — within it the line reads as reconciled,
+above it as a warning — never visibility. There is no state in which the tool
+shows a reconciliation without showing its residual.
 
 ## Architecture
 
@@ -188,11 +190,38 @@ The identity is exact by construction: expanding gives
 move on the closing position plus the currency move on each flow since period
 start.
 
-**The realized/unrealized split lives on the price axis only.** FX effect is
-reported per instrument but not carved between realized and unrealized, because
-translating a moving cost basis at differing rates makes that split arbitrary.
-The table shows four columns — realized, unrealized, FX, total — rather than six
-with two of them fictional.
+### Splitting the FX effect between realized and unrealized
+
+The FX effect is carved into realized and unrealized by **flow direction**,
+which is exact and requires no translation of a moving cost basis:
+
+```
+Realized FX    = Σ_sales     CF × [F(trade) − F(t₀)]
+Unrealized FX  = V(t₁) × [F(t₁) − F(t₀)]  +  Σ_purchases CF × [F(trade) − F(t₀)]
+```
+
+The two sum to the total FX effect by construction, so period additivity and the
+reconciliation to ΔNAV are preserved.
+
+**Exception for closed positions.** When quantity at `t₁` is zero, purchase-flow
+FX is assigned to realized rather than unrealized. Without this, a position
+opened and closed inside one period would report a non-zero *unrealized* FX
+figure while holding nothing — which is nonsense. With it, a fully exited
+position puts all of its FX in realized, as it should.
+
+**The tension this navigates, stated plainly.** A rule referencing each lot's
+original acquisition FX rate would handle round trips correctly in every case,
+but it would import FX accrued in earlier periods and so break additivity with
+ΔNAV. Period additivity is non-negotiable here because the page must reconcile,
+so the flow-direction rule is used instead.
+
+**The one imprecise case** is a partial sale following a mid-period purchase in
+the same instrument: that purchase's FX lands wholly in unrealized even though
+some of the quantity has since been sold. Weighted-average costing does not
+track lots, so no exact attribution exists without adopting lot accounting. The
+error is bounded by the FX move across the period on the purchased amount, and
+is disclosed rather than hidden — instruments meeting this condition are flagged
+in the response so the figure is never presented as more precise than it is.
 
 ### Fees
 
@@ -238,10 +267,11 @@ Subscriptions and redemptions are not recorded directly. They are derived from
 at that day's NAV. The derivation is shown in the reconciliation panel rather
 than applied silently.
 
-Residual is hidden within **0.10% of gross P&L**, where gross P&L is the sum of
-the absolute values of the reconciliation lines above. Absolute values, not the
-net total, so that a period in which large offsetting gains and losses net to
-near zero does not make every residual look like a breach.
+The residual is always shown. It reads as reconciled within **0.10% of gross
+P&L** — gross P&L being the sum of the absolute values of the reconciliation
+lines above — and as a warning beyond it. Absolute values, not the net total, so
+that a period in which large offsetting gains and losses net to near zero does
+not make every residual look like a breach.
 
 ### Missing data
 
@@ -290,9 +320,14 @@ GET /api/pnl?from=2026-06-30&to=2026-07-24&dimension=sector
 { "period": { "requested_from", "requested_to",
               "actual_from", "actual_to", "snapshots": 4 },
   "groups": [ { "key": "Consumer Discretionary",
+                "realized_price", "unrealized_price",
+                "realized_fx",    "unrealized_fx",
                 "realized", "unrealized", "fx", "total", "fees_memo",
-                "instruments": [ { "isin", "name", "realized",
-                                   "unrealized", "fx", "total" } ] } ],
+                "instruments": [ { "isin", "name",
+                                   "realized_price", "unrealized_price",
+                                   "realized_fx", "unrealized_fx",
+                                   "realized", "unrealized", "fx", "total",
+                                   "fx_split_imprecise" } ] } ],
   "reconciliation": { "investment_pnl", "cash_and_margin", "accrued_fees",
                       "provisions", "dividend_income", "total_pnl",
                       "aum_change", "net_flows", "residual",
@@ -313,9 +348,15 @@ A new `P&L` entry in the sidebar between Performance and Risk:
   notice stating which snapshot dates were actually used
 - Dimension selector, with the unclassified count beside it
 - Expandable table: group rows showing realized, unrealized, FX and total, each
-  expanding to its instruments
+  expanding to its instruments. Realized and unrealized each disclose their
+  price and FX components, so the FX split is available without cluttering the
+  default view.
+- An instrument whose FX split is imprecise (partial sale after a mid-period
+  purchase) is marked, with the reason on hover
 - Contribution bar chart via the existing `EChart` component
-- Reconciliation panel, collapsed while the residual is within tolerance
+- Reconciliation panel showing every line **including the residual, always**.
+  Within tolerance it reads as reconciled; beyond it, as a warning. The panel is
+  never collapsed in a way that hides the residual.
 
 The Data page gains a "Bloomberg classification" panel below the CTD panel:
 export button, upload control, and a count of unclassified instruments.
@@ -325,9 +366,16 @@ export button, upload control, and a count of unclassified instruments.
 - `analytics/pnl.rs`: cost-basis walk (buy/buy/sell sequences), the
   `Total = Realized + ΔUnrealized` identity, and a property test asserting
   `price effect + FX effect == total` exactly across generated inputs
+- A second property test asserting `realized FX + unrealized FX == total FX`
+  exactly, including the closed-position exception
+- FX split endpoint cases, each asserted explicitly: position held throughout;
+  position fully exited (all FX realized, unrealized FX exactly zero); position
+  opened and closed within one period (likewise); partial sale after mid-period
+  purchase (asserted to raise the `fx_split_imprecise` flag)
 - Case-insensitive side matching (`Vente` / `VENTE`)
 - Futures P&L pinned to known 2026-07-24 figures, including a 32nds contract
-- Reconciliation residual on `sample.xlsx` asserted within tolerance
+- Reconciliation residual on `sample.xlsx` asserted within tolerance, and
+  asserted present in the response regardless of magnitude
 - `ingest/bloomberg.rs`: request generation, valid parse, `#N/A` rejection,
   unknown-ticker rejection — fixtures alongside the existing `ctd_sample.*`
 - FX inversion check against the workbook's `Change` column
@@ -336,8 +384,13 @@ export button, upload control, and a count of unclassified instruments.
 ## Out of scope
 
 No daily P&L, no benchmark-relative attribution, no Brinson decomposition, no
-tax lots, no realized/unrealized split of the FX effect. Each is a separate spec
-if wanted.
+tax lots. Each is a separate spec if wanted.
+
+Lot accounting is the notable one: adopting it would make the FX split exact in
+the partial-sale case described above, and would allow an acquisition-referenced
+FX view alongside the period-referenced one. It is deliberately excluded here
+because it would also break the PAM reconciliation that validates the trade walk
+against the administrator's own figures.
 
 Daily P&L is the most likely follow-on. The engine reads prices and FX through a
 narrow interface, so a future daily price history can replace the snapshot
