@@ -114,7 +114,8 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
     // Bond futures: only contracts classified interest_rate, and only where
     // CTD analytics exist for this exact NAV date. No carry-forward.
     let specs = db::repo::contracts_all(&st.pool).await?;
-    let (fut_positions, _) = future_positions(&rows, &specs);
+    let (fut_positions, unconfirmed) = future_positions(&rows, &specs);
+    let unconfirmed: std::collections::HashSet<&str> = unconfirmed.iter().map(String::as_str).collect();
     let ctd = match date {
         Some(d) => db::repo::ctd_for(&st.pool, d).await?,
         None => Vec::new(),
@@ -122,14 +123,19 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
     let mut futures = Vec::new();
     let mut futures_missing_any = false;
     // Candidate bond futures: contracts confirmed `interest_rate`, plus
-    // contracts still sitting at `other` - the import-time seed's default for
-    // any `Comdty`-suffixed ticker, since a bare ticker can't distinguish a
-    // bond future from a commodity future (see db::repo::import_workbook).
-    // Once the user confirms a spec as `equity`/`fx`/`commodity`/`credit`
-    // it drops out here; until then it stays visible, `missing: true` if no
-    // CTD analytics resolve it, rather than disappearing silently.
+    // contracts still sitting at the import-time seed's default `other` -
+    // for any `Comdty`-suffixed ticker, since a bare ticker can't distinguish
+    // a bond future from a commodity future (see db::repo::import_workbook)
+    // - AND whose root the user has not yet confirmed. `other` is only a
+    // placeholder while unconfirmed; once the user confirms a spec, that
+    // confirmation is authoritative. A root confirmed `interest_rate` stays
+    // (or joins) here; a root confirmed to any other category (including a
+    // deliberate, terminal `other`) drops out for good, instead of sitting
+    // forever with `missing: true` and pinning `futures_missing_any`.
     for f in fut_positions.iter().filter(|f| {
-        matches!(f.category, analytics::Category::InterestRate | analytics::Category::Other)
+        f.category == analytics::Category::InterestRate
+            || (f.category == analytics::Category::Other
+                && analytics::contract_root(&f.ticker).is_some_and(|r| unconfirmed.contains(r.as_str())))
     }) {
         let a = ctd.iter().find(|c| c.ticker == f.ticker);
         let dv01 = match (a, f.point_value, f.fx_rate) {
@@ -179,9 +185,13 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
         "bonds": bonds,
         "futures": futures,
         "total_dv01_eur": total_dv01,
-        // 100bp in EUR as a fraction of net assets. Algebraically identical to
-        // the previous sum(modified x weight) x 0.01 for cash bonds, and it
-        // also accepts futures, which have no market-value weight.
+        // 100bp in EUR as a fraction of net assets, i.e. total DV01 scaled
+        // from 1bp to 100bp and divided by AUM. This replaces the old
+        // sum(modified x weight) x 0.01, which inherited a unit mismatch
+        // from the source workbook's own `Poids` column (it adds unconverted
+        // accrued interest to a EUR valuation); the DV01-based figure is the
+        // more defensible of the two, and it extends naturally to futures,
+        // which carry no market-value weight at all.
         "nav_sensitivity_100bp": if aum > 0.0 { 100.0 * total_dv01 / aum } else { 0.0 },
         "missing_any": missing_any,
         "futures_missing_any": futures_missing_any,
