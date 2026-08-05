@@ -23,3 +23,6 @@ pub use rates::*;
 pub use backtest::*;
 pub use futures::*;
 pub use pnl::*;
+
+// Disambiguate: returns::NavPoint is the default; pnl::NavPoint must be qualified
+pub use returns::NavPoint;

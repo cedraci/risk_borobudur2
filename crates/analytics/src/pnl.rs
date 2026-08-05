@@ -327,6 +327,66 @@ pub fn group_by(rows: Vec<InstrumentPnl>, dim: Dimension) -> Vec<GroupPnl> {
     out
 }
 
+/// Residual reads as reconciled at or below this fraction of gross P&L.
+pub const RESIDUAL_TOLERANCE: f64 = 0.001;
+
+#[derive(Debug, Clone, Copy)]
+pub struct NavPoint { pub date: NaiveDate, pub aum: f64, pub shares: f64, pub nav: f64 }
+
+/// Subscriptions and redemptions are not recorded directly. Derive them from
+/// the daily share count: a change in shares priced at that day's NAV is the
+/// net flow, exact for a daily-dealing fund priced at the same NAV.
+/// Flows are summed over `(t0, t1]`.
+pub fn net_flows(nav: &[NavPoint], t0: NaiveDate, t1: NaiveDate) -> f64 {
+    let mut sorted: Vec<&NavPoint> = nav.iter().filter(|p| p.date <= t1).collect();
+    sorted.sort_by_key(|p| p.date);
+    sorted.windows(2)
+        .filter(|w| w[1].date > t0)
+        .map(|w| (w[1].shares - w[0].shares) * w[1].nav)
+        .sum()
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Reconciliation {
+    pub investment_pnl: f64,
+    pub cash_and_margin: f64,
+    pub accrued_fees: f64,
+    pub provisions: f64,
+    pub dividend_income: f64,
+    pub total_pnl: f64,
+    pub aum_change: f64,
+    pub net_flows: f64,
+    pub residual: f64,
+    pub gross: f64,
+    pub within_tolerance: bool,
+}
+
+/// Tie the P&L lines to the fund's own AUM movement.
+///
+/// The residual is always computed and always returned; `within_tolerance`
+/// governs how it is presented, never whether it is shown. `gross` uses
+/// absolute values so a period of large offsetting gains and losses does not
+/// make every residual look like a breach.
+pub fn reconcile(
+    investment_pnl: f64,
+    cash_and_margin: f64,
+    accrued_fees: f64,
+    provisions: f64,
+    dividend_income: f64,
+    aum_change: f64,
+    net_flows: f64,
+) -> Reconciliation {
+    let total_pnl = investment_pnl + cash_and_margin + accrued_fees + provisions + dividend_income;
+    let residual = (aum_change - net_flows) - total_pnl;
+    let gross = investment_pnl.abs() + cash_and_margin.abs() + accrued_fees.abs()
+        + provisions.abs() + dividend_income.abs();
+    let within_tolerance = gross <= 0.0 || residual.abs() <= RESIDUAL_TOLERANCE * gross;
+    Reconciliation {
+        investment_pnl, cash_and_margin, accrued_fees, provisions, dividend_income,
+        total_pnl, aum_change, net_flows, residual, gross, within_tolerance,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +678,52 @@ mod tests {
         assert_eq!(asset_class_of("Frais provisionnés"), "Fees");
         assert_eq!(asset_class_of("Provisions ordres"), "Provisions");
         assert_eq!(asset_class_of("Dividendes"), "Income");
+    }
+
+    #[test]
+    fn net_flows_are_derived_from_share_count_changes() {
+        let nav = vec![
+            NavPoint { date: d(2026, 6, 10), aum: 1000.0, shares: 10.0, nav: 100.0 },
+            NavPoint { date: d(2026, 6, 11), aum: 2020.0, shares: 20.0, nav: 101.0 },
+            NavPoint { date: d(2026, 6, 12), aum: 1530.0, shares: 15.0, nav: 102.0 },
+        ];
+        // +10 shares @ 101 = +1010; -5 shares @ 102 = -510; net +500
+        let f = net_flows(&nav, d(2026, 6, 10), d(2026, 6, 12));
+        assert!((f - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn flows_before_the_period_are_excluded() {
+        let nav = vec![
+            NavPoint { date: d(2026, 6, 1), aum: 100.0, shares: 1.0, nav: 100.0 },
+            NavPoint { date: d(2026, 6, 5), aum: 500.0, shares: 5.0, nav: 100.0 },
+            NavPoint { date: d(2026, 6, 20), aum: 600.0, shares: 6.0, nav: 100.0 },
+        ];
+        let f = net_flows(&nav, d(2026, 6, 10), d(2026, 6, 30));
+        assert!((f - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_small_residual_reads_as_reconciled() {
+        // lines sum to 1000, AUM change less flows is 1000.4 -> residual 0.4
+        let r = reconcile(900.0, 50.0, -30.0, 5.0, 75.0, 1500.4, 500.0);
+        assert!((r.total_pnl - 1000.0).abs() < 1e-9);
+        assert!((r.residual - 0.4).abs() < 1e-9);
+        assert!(r.within_tolerance);
+    }
+
+    #[test]
+    fn a_large_residual_breaches_tolerance() {
+        let r = reconcile(900.0, 50.0, -30.0, 5.0, 75.0, 1600.0, 500.0);
+        assert!((r.residual - 100.0).abs() < 1e-9);
+        assert!(!r.within_tolerance);
+    }
+
+    #[test]
+    fn tolerance_uses_absolute_lines_so_offsetting_periods_are_not_false_breaches() {
+        // Lines net to ~0 but are individually large; a 1.0 residual must pass.
+        let r = reconcile(5000.0, 0.0, 0.0, 0.0, -5000.0, 1.0, 0.0);
+        assert!(r.gross >= 10000.0);
+        assert!(r.within_tolerance);
     }
 }
