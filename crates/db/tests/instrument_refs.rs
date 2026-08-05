@@ -16,6 +16,7 @@ async fn refs_upsert_seed_and_no_overwrite() {
         issuer_group: Some("GROUP A".into()),
         liquidity_bucket: Some("d8_30".into()),
         bond_coupon_pct: None, bond_maturity: None, bond_coupon_freq: None,
+        country_of_risk: None, region: None, gics_sector: None, gics_industry: None,
     };
     db::repo::refs_upsert(&pool, &r).await.unwrap();
     let all = db::repo::refs_all(&pool).await.unwrap();
@@ -25,7 +26,8 @@ async fn refs_upsert_seed_and_no_overwrite() {
 
     // 2. full-row replace: None reverts to NULL
     let r2 = InstrumentRef { code: "TEST1".into(), issuer_group: None, liquidity_bucket: None,
-        bond_coupon_pct: None, bond_maturity: None, bond_coupon_freq: None };
+        bond_coupon_pct: None, bond_maturity: None, bond_coupon_freq: None,
+        country_of_risk: None, region: None, gics_sector: None, gics_industry: None };
     db::repo::refs_upsert(&pool, &r2).await.unwrap();
     let all = db::repo::refs_all(&pool).await.unwrap();
     let got = all.iter().find(|x| x.code == "TEST1").unwrap();
@@ -34,7 +36,8 @@ async fn refs_upsert_seed_and_no_overwrite() {
     // 3. pre-seed a user override for the fixture bond, then import: the
     // user's coupon must survive; the empty maturity/freq get filled.
     let user = InstrumentRef { code: "US105756CL22".into(), issuer_group: None, liquidity_bucket: None,
-        bond_coupon_pct: Some(7.0), bond_maturity: None, bond_coupon_freq: None };
+        bond_coupon_pct: Some(7.0), bond_maturity: None, bond_coupon_freq: None,
+        country_of_risk: None, region: None, gics_sector: None, gics_industry: None };
     db::repo::refs_upsert(&pool, &user).await.unwrap();
 
     let wb = ingest::parse_workbook(&fixture_bytes()).unwrap();

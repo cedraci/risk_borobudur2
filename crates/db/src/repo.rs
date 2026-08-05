@@ -316,12 +316,17 @@ pub struct InstrumentRef {
     pub bond_coupon_pct: Option<f64>,
     pub bond_maturity: Option<NaiveDate>,
     pub bond_coupon_freq: Option<i32>,
+    pub country_of_risk: Option<String>,
+    pub region: Option<String>,
+    pub gics_sector: Option<String>,
+    pub gics_industry: Option<String>,
 }
 
 pub async fn refs_all(pool: &PgPool) -> anyhow::Result<Vec<InstrumentRef>> {
     Ok(sqlx::query_as(
         "SELECT code, issuer_group, liquidity_bucket,
-                bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq
+                bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq,
+                country_of_risk, region, gics_sector, gics_industry
          FROM instrument_refs ORDER BY code",
     )
     .fetch_all(pool)
@@ -453,4 +458,110 @@ pub async fn aum_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Option<f6
         .bind(date)
         .fetch_optional(pool)
         .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct OperationRecord {
+    pub trade_date: NaiveDate,
+    pub side: String,
+    pub isin: Option<String>,
+    pub ticker: Option<String>,
+    pub name: Option<String>,
+    pub currency: Option<String>,
+    pub quantity: Option<f64>,
+    pub net_price: Option<f64>,
+    pub net_amount: Option<f64>,
+    pub fees: Option<f64>,
+}
+
+pub async fn operations_all(pool: &PgPool) -> anyhow::Result<Vec<OperationRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT trade_date, side, isin, ticker, name, currency,
+                quantity::float8 AS quantity, net_price::float8 AS net_price,
+                net_amount::float8 AS net_amount, fees::float8 AS fees
+         FROM operations ORDER BY trade_date, id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct DividendRecord {
+    pub provision_date: NaiveDate,
+    pub issuer: String,
+    pub amount: f64,
+    pub currency: String,
+}
+
+pub async fn dividends_all(pool: &PgPool) -> anyhow::Result<Vec<DividendRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT provision_date, issuer, amount::float8 AS amount, currency
+         FROM dividends ORDER BY provision_date",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct FxRow {
+    pub date: NaiveDate,
+    pub currency: String,
+    pub rate_to_eur: f64,
+}
+
+pub async fn fx_all(pool: &PgPool) -> anyhow::Result<Vec<FxRow>> {
+    Ok(sqlx::query_as(
+        "SELECT date, currency, rate_to_eur::float8 AS rate_to_eur
+         FROM fx_history ORDER BY currency, date",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Replace-by-key: an FX rate is market data, so a fresh pull always wins.
+pub async fn fx_upsert_many(pool: &PgPool, rows: &[FxRow]) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for r in rows {
+        n += sqlx::query(
+            "INSERT INTO fx_history (date, currency, rate_to_eur) VALUES ($1, $2, $3)
+             ON CONFLICT (date, currency) DO UPDATE SET rate_to_eur = EXCLUDED.rate_to_eur",
+        )
+        .bind(r.date).bind(&r.currency).bind(r.rate_to_eur)
+        .execute(&mut *tx).await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// Seed classifications without ever overwriting a value already present,
+/// matching the bond-statics discipline at :126-137. A user correction, or an
+/// earlier good pull, always wins over a later one.
+#[allow(clippy::type_complexity)]
+pub async fn classify_upsert_many(
+    pool: &PgPool,
+    rows: &[(String, Option<String>, Option<String>, Option<String>, Option<String>)],
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for (code, country, region, sector, industry) in rows {
+        n += sqlx::query(
+            "INSERT INTO instrument_refs
+               (code, country_of_risk, region, gics_sector, gics_industry, classified_at)
+             VALUES ($1, $2, $3, $4, $5, now())
+             ON CONFLICT (code) DO UPDATE SET
+               country_of_risk = COALESCE(instrument_refs.country_of_risk, EXCLUDED.country_of_risk),
+               region          = COALESCE(instrument_refs.region,          EXCLUDED.region),
+               gics_sector     = COALESCE(instrument_refs.gics_sector,     EXCLUDED.gics_sector),
+               gics_industry   = COALESCE(instrument_refs.gics_industry,   EXCLUDED.gics_industry),
+               classified_at   = now(),
+               updated_at      = now()",
+        )
+        .bind(code).bind(country).bind(region).bind(sector).bind(industry)
+        .execute(&mut *tx).await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(n)
 }
