@@ -1968,8 +1968,11 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Resul
     if requested_from > requested_to {
         return Err(AppError::BadRequest("from is after to".into()));
     }
-    let t1 = snap(&dates, requested_to).unwrap();
-    let t0 = snap(&dates, requested_from).unwrap();
+    // `dates` is non-empty (guarded above), so `snap` always yields a date;
+    // the explicit error keeps that guarantee local instead of an unwrap.
+    let nope = || AppError::Internal("no position snapshot dates".into());
+    let t1 = snap(&dates, requested_to).ok_or_else(nope)?;
+    let t0 = snap(&dates, requested_from).ok_or_else(nope)?;
     if t0 == t1 {
         return Ok(Json(serde_json::json!({
             "empty": true,
@@ -2037,7 +2040,8 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Resul
     let (mut cash_and_margin, mut accrued_fees, mut provisions) = (0.0, 0.0, 0.0);
 
     for isin in isins {
-        let p = idx1.get(isin).or_else(|| idx0.get(isin)).copied().unwrap();
+        // `isin` came from these two maps, so one of them holds it.
+        let Some(p) = idx1.get(isin).or_else(|| idx0.get(isin)).copied() else { continue };
         let class = asset_class_of(&p.asset_type);
         let ccy = p.currency.clone().unwrap_or_else(|| "EUR".into());
 
