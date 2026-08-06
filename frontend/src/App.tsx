@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import Overview from "./pages/Overview";
 import Performance from "./pages/Performance";
+import PnlPage from "./pages/PnlPage";
 import Risk from "./pages/Risk";
 import VarPage from "./pages/VarPage";
 import LimitsPage from "./pages/LimitsPage";
@@ -9,6 +10,7 @@ import DataPage from "./pages/DataPage";
 const links = [
   { to: "/", label: "Overview" },
   { to: "/performance", label: "Performance" },
+  { to: "/pnl", label: "P&L" },
   { to: "/risk", label: "Risk" },
   { to: "/var", label: "VaR / ES" },
   { to: "/limits", label: "Limits" },
@@ -29,6 +31,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Overview />} />
             <Route path="/performance" element={<Performance />} />
+            <Route path="/pnl" element={<PnlPage />} />
             <Route path="/risk" element={<Risk />} />
             <Route path="/var" element={<VarPage />} />
             <Route path="/limits" element={<LimitsPage />} />

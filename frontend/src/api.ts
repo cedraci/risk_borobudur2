@@ -177,6 +177,58 @@ export const uploadCtd = (f: File) => {
   return req<CtdUploadOutcome>("/api/futures-analytics", { method: "POST", body: fd });
 };
 
+export type PnlDimension =
+  | "asset_class" | "country" | "region" | "sector" | "industry" | "currency" | "issuer_group";
+
+export interface PnlInstrument {
+  isin: string; name: string; asset_class: string;
+  country: string | null; region: string | null;
+  sector: string | null; industry: string | null;
+  currency: string; issuer_group: string | null;
+  realized_price: number; unrealized_price: number;
+  realized_fx: number; unrealized_fx: number;
+  fx_split_imprecise: boolean; fx_missing: string[];
+}
+export interface PnlGroup {
+  key: string;
+  realized_price: number; unrealized_price: number;
+  realized_fx: number; unrealized_fx: number;
+  realized: number; unrealized: number; fx: number; total: number;
+  instruments: PnlInstrument[];
+}
+export interface PnlPeriod {
+  requested_from: string; requested_to: string;
+  actual_from: string; actual_to: string; snapshots: number;
+}
+export interface PnlReconciliation {
+  investment_pnl: number; cash_and_margin: number; accrued_fees: number;
+  provisions: number; dividend_income: number; total_pnl: number;
+  aum_change: number; net_flows: number;
+  residual: number; gross: number; within_tolerance: boolean;
+}
+export interface Pnl {
+  empty: boolean;
+  period?: PnlPeriod;
+  groups?: PnlGroup[];
+  reconciliation?: PnlReconciliation;
+  unclassified?: number;
+  warnings: string[];
+}
+
+export const getPnl = (p: { from: string; to: string; dimension: PnlDimension }) =>
+  req<Pnl>(`/api/pnl?from=${p.from}&to=${p.to}&dimension=${p.dimension}`);
+
+export const bloombergRequestUrl = "/api/bloomberg/request";
+export interface BloombergUpload {
+  classified: number; fx_rows: number; skipped: RowError[];
+  fx_check: { currency: string; date: string; workbook: number; bloomberg: number; drift: number }[];
+}
+export const uploadBloomberg = (f: File) => {
+  const fd = new FormData();
+  fd.append("file", f);
+  return req<BloombergUpload>("/api/bloomberg/upload", { method: "POST", body: fd });
+};
+
 export const getConcentration = (date?: string) =>
   req<Concentration>(`/api/metrics/concentration${date ? `?date=${date}` : ""}`);
 export const getLiquidity = (date?: string) =>
