@@ -28,3 +28,5 @@ mime_guess = "2"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+calamine = { version = "0.26", features = ["dates"] }
+rust_xlsxwriter = "0.97"

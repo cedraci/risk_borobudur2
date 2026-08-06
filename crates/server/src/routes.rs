@@ -29,6 +29,8 @@ pub fn router(state: AppState) -> Router {
             "/api/futures-analytics",
             get(handlers::futures::list_ctd).post(handlers::futures::upload_ctd),
         )
+        .route("/api/bloomberg/request", get(handlers::bloomberg::request))
+        .route("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload))
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .fallback(crate::static_assets::static_handler)
         .with_state(state)
