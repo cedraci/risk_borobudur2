@@ -283,9 +283,13 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Resul
     //         = ΔAUM − F                                       by (1).
     // So the residual is identically zero on internally consistent books,
     // and nonzero exactly when the data disagrees with itself: AUM not
-    // tying to the position sheet, stored valuation_eur disagreeing with
-    // valuation_ccy × fx, a flow or dividend with no FX rate, or trade
-    // history missing against the snapshots.
+    // tying to the position sheet, or stored valuation_eur disagreeing
+    // with valuation_ccy × fx. Note what the residual can NOT detect:
+    // because ΣCF and F cancel structurally in the sum above, missing
+    // trade history, a flow or dividend translated at a fallback rate,
+    // and net_flows derivation errors all land on the cash line (the
+    // declared unexplained bucket) — they distort that line's split,
+    // never the residual.
     let dividend_cash_received = dividend_income - dividend_receivable_delta;
     let cash_and_margin = cash_delta - trade_flows_eur - flows - dividend_cash_received;
 
