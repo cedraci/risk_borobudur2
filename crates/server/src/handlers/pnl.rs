@@ -172,6 +172,11 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Resul
         });
     }
 
+    // Data-completeness badge for the Bloomberg classification round trip
+    // (Task 12's toolbar), not a mirror of the requested `dimension`: it
+    // always counts missing country+sector regardless of what the response
+    // is grouped by, so "N instruments missing classification data" reads
+    // the same whether grouping by asset_class, currency, or anything else.
     let unclassified = rows.iter().filter(|r| r.country.is_none() && r.sector.is_none()).count();
     let investment_pnl: f64 = rows.iter().map(|r| r.decomp.total()).sum();
     let dividend_income: f64 = divs.iter()
