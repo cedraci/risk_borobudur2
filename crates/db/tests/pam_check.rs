@@ -22,6 +22,30 @@ const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtu
 /// - `FR0000120859` reconciles cleanly: quantity and cost basis both agree,
 ///   so it produces neither warning. Without this assertion the other two
 ///   would trivially pass if the gate suppressed every warning.
+///
+/// `pam_warnings` used to `continue` silently - with no warning at all -
+/// whenever the trade walk yielded a *zero* quantity while the workbook
+/// still held a non-zero position: either because OPERATIONS has no rows
+/// for the ISIN at all (`mine.is_empty()`), or because the recognized trades
+/// round-trip exactly back to flat (`basis_end.qty <= 0.0`, which
+/// `analytics::pnl` documents as the signature of a truncated history). Both
+/// are now folded into the same quantity gate as `walked = 0.0`, which the
+/// workbook's confirmed non-zero holding always fails, producing the same
+/// "incomplete trade history" warning instead of nothing.
+///
+/// Neither silent-skip path is exercised by a real position in sample.xlsx as
+/// pure cases (checked with a throwaway probe over every cash position): no
+/// ISIN has zero recognized trades, and the only two ISINs whose walk ends
+/// flat (`ES0113900J37`, `FR0010599399`) are *also* oversold, so the
+/// oversold check - which runs first and is treated as subsuming the
+/// quantity gate (a broken history is a broken history; double-tagging the
+/// same instrument would just be noise) - reports them before the gate is
+/// ever reached. The two assertions below pin that: they are exactly the
+/// real ISINs available to exercise the boundary the fix touches, and they
+/// guard against a regression where the restructuring accidentally routes
+/// oversold positions through the gate too (which would either duplicate the
+/// warning or, worse, replace "sells exceed recorded buys" with the less
+/// specific "incomplete trade history").
 #[tokio::test]
 async fn pam_check_distinguishes_incomplete_history_from_genuine_drift() {
     let dir = tempfile::tempdir().unwrap();
@@ -51,6 +75,22 @@ async fn pam_check_distinguishes_incomplete_history_from_genuine_drift() {
 
     assert!(!has("FR0000120859", "PAM drift") && !has("FR0000120859", "incomplete trade history"),
         "FR0000120859 reconciles cleanly and must not be flagged either way: {:?}", out.warnings);
+
+    // Both walk to a flat (zero) ending quantity against a non-zero workbook
+    // holding - exactly the shape the fix now routes through the quantity
+    // gate - but both are also oversold, so the oversold check (which runs
+    // first and subsumes the gate) must report them, and only them: no
+    // "incomplete trade history" double-tag.
+    for isin in ["ES0113900J37", "FR0010599399"] {
+        assert!(has(isin, "sells exceed recorded buys"),
+            "{isin} has a walk that ends flat (zero quantity) via an oversold sell, so it should \
+             still warn as oversold: {:?}", out.warnings);
+        assert!(!has(isin, "incomplete trade history"),
+            "{isin} is oversold, which subsumes the quantity gate; it should not also be tagged \
+             as incomplete trade history: {:?}", out.warnings);
+        assert!(!has(isin, "PAM drift"),
+            "{isin} should not report PAM drift when oversold: {:?}", out.warnings);
+    }
 
     pool.close().await;
     edb.stop().await;

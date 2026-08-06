@@ -312,19 +312,30 @@ fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
         let (Some(pam), Some(qty)) = (p.avg_cost, p.quantity) else { continue };
         if qty.abs() < 1e-9 { continue; }
         let mine: Vec<Trade> = trades.iter().filter(|t| t.isin == p.isin).cloned().collect();
-        if mine.is_empty() { continue; }
 
+        // `walk_instrument` on an empty slice returns a zero `basis_end`, so an
+        // ISIN entirely absent from OPERATIONS - the most severe form of
+        // incomplete history - falls out of this call naturally rather than
+        // needing its own branch.
         let w = walk_instrument(&mine, chrono::NaiveDate::MIN, wb.nav_date);
         if w.oversold {
+            // A sell exceeding the running quantity is itself unambiguous
+            // evidence of a broken history; it gets its own warning and is not
+            // also run through the quantity gate below (oversold subsumes it -
+            // both report "history problem", and double-tagging the same
+            // instrument would just be noise).
             warnings.push(format!("{}: sells exceed recorded buys; cost basis incomplete", p.isin));
             continue;
         }
-        if w.basis_end.qty <= 0.0 { continue; }
 
         // The walked quantity is the evidence for whether OPERATIONS holds this
-        // instrument's full history. If it disagrees with the snapshot, the
-        // cost basis is built on an incomplete record and comparing it against
-        // PAM would report a drift whose real cause is the missing trades.
+        // instrument's full history. Zero trades for the ISIN (mine.is_empty())
+        // and a history that round-trips exactly back to flat (basis_end.qty <=
+        // 0.0, the signature `analytics::pnl` documents for a truncated
+        // history) both surface here as walked = 0.0, which the workbook's
+        // already-confirmed non-zero holding will fail below - producing the
+        // same "incomplete trade history" warning instead of silently
+        // continuing.
         let walked = w.basis_end.qty;
         if (walked - qty).abs() > 1e-6 * qty.abs().max(1.0) {
             warnings.push(format!(
