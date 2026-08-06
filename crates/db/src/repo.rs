@@ -137,7 +137,8 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         .await?;
     }
 
-    let warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+    let mut warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+    warnings.extend(pam_warnings(wb));
 
     if replace_div_ops {
         sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
@@ -274,6 +275,85 @@ async fn seed_futures_contracts(
     Ok(warnings)
 }
 
+/// Cross-check the engine's weighted-average cost against the administrator's
+/// PAM column for every cash position in the snapshot.
+///
+/// Two distinct problems are reported, and they are kept separate because
+/// they have different causes: the walked quantity disagreeing with the
+/// snapshot means OPERATIONS does not hold this instrument's complete
+/// history, so no cost-basis comparison is meaningful (an "incomplete trade
+/// history" warning); only once the quantity agrees is the cost basis itself
+/// compared against PAM (a "PAM drift" warning), which reports a genuine
+/// mismatch between the administrator's file and the trade walk. Non-fatal:
+/// it warns, it never blocks the weekly import.
+fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
+    use analytics::pnl::{Trade, is_buy, walk_instrument};
+
+    let mut trades: Vec<Trade> = Vec::new();
+    for o in &wb.operations {
+        let (Some(isin), Some(qty), Some(px)) = (o.isin.as_deref(), o.quantity, o.net_price) else { continue };
+        let Some(buy) = is_buy(&o.side) else { continue };
+        trades.push(Trade {
+            trade_date: o.trade_date,
+            isin: isin.to_string(),
+            is_buy: buy,
+            quantity: qty.abs(),
+            net_price: px,
+            net_amount: o.net_amount.unwrap_or(0.0),
+            currency: o.currency.clone().unwrap_or_default(),
+        });
+    }
+    trades.sort_by_key(|t| t.trade_date);
+
+    let mut warnings = Vec::new();
+    for p in &wb.positions {
+        // Futures have no cost basis; cash rows carry no PAM.
+        if !matches!(p.asset_type.as_str(), "Action" | "Fonds" | "Obligation") { continue; }
+        let (Some(pam), Some(qty)) = (p.avg_cost, p.quantity) else { continue };
+        if qty.abs() < 1e-9 { continue; }
+        let mine: Vec<Trade> = trades.iter().filter(|t| t.isin == p.isin).cloned().collect();
+
+        // `walk_instrument` on an empty slice returns a zero `basis_end`, so an
+        // ISIN entirely absent from OPERATIONS - the most severe form of
+        // incomplete history - falls out of this call naturally rather than
+        // needing its own branch.
+        let w = walk_instrument(&mine, chrono::NaiveDate::MIN, wb.nav_date);
+        if w.oversold {
+            // A sell exceeding the running quantity is itself unambiguous
+            // evidence of a broken history; it gets its own warning and is not
+            // also run through the quantity gate below (oversold subsumes it -
+            // both report "history problem", and double-tagging the same
+            // instrument would just be noise).
+            warnings.push(format!("{}: sells exceed recorded buys; cost basis incomplete", p.isin));
+            continue;
+        }
+
+        // The walked quantity is the evidence for whether OPERATIONS holds this
+        // instrument's full history. Zero trades for the ISIN (mine.is_empty())
+        // and a history that round-trips exactly back to flat (basis_end.qty <=
+        // 0.0, the signature `analytics::pnl` documents for a truncated
+        // history) both surface here as walked = 0.0, which the workbook's
+        // already-confirmed non-zero holding will fail below - producing the
+        // same "incomplete trade history" warning instead of silently
+        // continuing.
+        let walked = w.basis_end.qty;
+        if (walked - qty).abs() > 1e-6 * qty.abs().max(1.0) {
+            warnings.push(format!(
+                "{}: incomplete trade history - OPERATIONS gives {:.4} units, workbook holds {:.4}; cost basis not compared",
+                p.isin, walked, qty
+            ));
+            continue;
+        }
+        if (w.basis_end.avg_cost - pam).abs() > 0.01 {
+            warnings.push(format!(
+                "{}: PAM drift - workbook {:.6}, computed {:.6}",
+                p.isin, pam, w.basis_end.avg_cost
+            ));
+        }
+    }
+    warnings
+}
+
 pub async fn nav_rows(pool: &PgPool) -> anyhow::Result<Vec<NavRow>> {
     Ok(sqlx::query_as(
         "SELECT date, aum::float8 AS aum, shares::float8 AS shares, nav::float8 AS nav FROM nav_history ORDER BY date",
@@ -316,12 +396,17 @@ pub struct InstrumentRef {
     pub bond_coupon_pct: Option<f64>,
     pub bond_maturity: Option<NaiveDate>,
     pub bond_coupon_freq: Option<i32>,
+    pub country_of_risk: Option<String>,
+    pub region: Option<String>,
+    pub gics_sector: Option<String>,
+    pub gics_industry: Option<String>,
 }
 
 pub async fn refs_all(pool: &PgPool) -> anyhow::Result<Vec<InstrumentRef>> {
     Ok(sqlx::query_as(
         "SELECT code, issuer_group, liquidity_bucket,
-                bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq
+                bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq,
+                country_of_risk, region, gics_sector, gics_industry
          FROM instrument_refs ORDER BY code",
     )
     .fetch_all(pool)
@@ -453,4 +538,245 @@ pub async fn aum_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Option<f6
         .bind(date)
         .fetch_optional(pool)
         .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct OperationRecord {
+    pub trade_date: NaiveDate,
+    pub side: String,
+    pub isin: Option<String>,
+    pub ticker: Option<String>,
+    pub name: Option<String>,
+    pub currency: Option<String>,
+    pub quantity: Option<f64>,
+    pub net_price: Option<f64>,
+    pub net_amount: Option<f64>,
+    pub fees: Option<f64>,
+}
+
+pub async fn operations_all(pool: &PgPool) -> anyhow::Result<Vec<OperationRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT trade_date, side, isin, ticker, name, currency,
+                quantity::float8 AS quantity, net_price::float8 AS net_price,
+                net_amount::float8 AS net_amount, fees::float8 AS fees
+         FROM operations ORDER BY trade_date, id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct DividendRecord {
+    pub provision_date: NaiveDate,
+    pub issuer: String,
+    pub amount: f64,
+    pub currency: String,
+}
+
+pub async fn dividends_all(pool: &PgPool) -> anyhow::Result<Vec<DividendRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT provision_date, issuer, amount::float8 AS amount, currency
+         FROM dividends ORDER BY provision_date",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct FxRow {
+    pub date: NaiveDate,
+    pub currency: String,
+    pub rate_to_eur: f64,
+}
+
+pub async fn fx_all(pool: &PgPool) -> anyhow::Result<Vec<FxRow>> {
+    Ok(sqlx::query_as(
+        "SELECT date, currency, rate_to_eur::float8 AS rate_to_eur
+         FROM fx_history ORDER BY currency, date",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Replace-by-key: an FX rate is market data, so a fresh pull always wins.
+pub async fn fx_upsert_many(pool: &PgPool, rows: &[FxRow]) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for r in rows {
+        n += sqlx::query(
+            "INSERT INTO fx_history (date, currency, rate_to_eur) VALUES ($1, $2, $3)
+             ON CONFLICT (date, currency) DO UPDATE SET rate_to_eur = EXCLUDED.rate_to_eur",
+        )
+        .bind(r.date).bind(&r.currency).bind(r.rate_to_eur)
+        .execute(&mut *tx).await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// Seed classifications without ever overwriting a value already present,
+/// matching the bond-statics discipline at :126-137. A user correction, or an
+/// earlier good pull, always wins over a later one.
+#[allow(clippy::type_complexity)]
+pub async fn classify_upsert_many(
+    pool: &PgPool,
+    rows: &[(String, Option<String>, Option<String>, Option<String>, Option<String>)],
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for (code, country, region, sector, industry) in rows {
+        n += sqlx::query(
+            "INSERT INTO instrument_refs
+               (code, country_of_risk, region, gics_sector, gics_industry, classified_at)
+             VALUES ($1, $2, $3, $4, $5, now())
+             ON CONFLICT (code) DO UPDATE SET
+               country_of_risk = COALESCE(instrument_refs.country_of_risk, EXCLUDED.country_of_risk),
+               region          = COALESCE(instrument_refs.region,          EXCLUDED.region),
+               gics_sector     = COALESCE(instrument_refs.gics_sector,     EXCLUDED.gics_sector),
+               gics_industry   = COALESCE(instrument_refs.gics_industry,   EXCLUDED.gics_industry),
+               classified_at   = now(),
+               updated_at      = now()",
+        )
+        .bind(code).bind(country).bind(region).bind(sector).bind(industry)
+        .execute(&mut *tx).await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(n)
+}
+
+#[cfg(test)]
+mod pam_warnings_tests {
+    //! Unit-level pin for the two silent-skip paths in `pam_warnings`, using
+    //! synthetic `ParsedWorkbook` data rather than the `sample.xlsx` fixture:
+    //! no real position in that fixture is both non-oversold and walks to a
+    //! zero/empty history (see task-9-fix1-report.md, Round 1), so the
+    //! integration test in `pam_check.rs` cannot exercise the exact defect
+    //! class this fix addresses. These tests construct the minimal shape that
+    //! does, and would fail if either removed `continue` were reinstated.
+    use super::pam_warnings;
+    use chrono::NaiveDate;
+    use ingest::{OperationRow, ParsedWorkbook, PositionRow};
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    fn position(isin: &str, quantity: f64, avg_cost: f64) -> PositionRow {
+        PositionRow {
+            asset_type: "Action".to_string(),
+            isin: isin.to_string(),
+            name: None,
+            currency: None,
+            quantity: Some(quantity),
+            avg_cost: Some(avg_cost),
+            price: None,
+            valuation_ccy: None,
+            accrued_interest: None,
+            fx_rate: None,
+            valuation_eur: None,
+            weight: None,
+            ticker: None,
+        }
+    }
+
+    fn op(isin: &str, side: &str, trade_date: NaiveDate, quantity: f64, net_price: f64) -> OperationRow {
+        OperationRow {
+            trade_date,
+            side: side.to_string(),
+            ticker: None,
+            isin: Some(isin.to_string()),
+            name: None,
+            currency: Some("EUR".to_string()),
+            quantity: Some(quantity),
+            price: Some(net_price),
+            gross_amount: None,
+            fees: None,
+            net_price: Some(net_price),
+            net_amount: Some(-quantity * net_price),
+        }
+    }
+
+    fn workbook(positions: Vec<PositionRow>, operations: Vec<OperationRow>) -> ParsedWorkbook {
+        ParsedWorkbook {
+            nav_date: d(2026, 1, 31),
+            aum: 0.0,
+            shares: 0.0,
+            nav: 0.0,
+            positions,
+            nav_history: Vec::new(),
+            dividends: Vec::new(),
+            operations,
+        }
+    }
+
+    /// Point 1: OPERATIONS has zero rows at all for an ISIN the workbook
+    /// currently holds a non-zero, non-oversold position in. This is
+    /// `mine.is_empty()` in `pam_warnings`. Before the fix this `continue`d
+    /// with no warning at all.
+    #[test]
+    fn zero_operations_rows_warns_incomplete_history() {
+        let wb = workbook(
+            vec![position("T1_NO_TRADES", 50.0, 10.0)],
+            vec![
+                // An operation for a *different* ISIN, so `mine` for
+                // T1_NO_TRADES is empty but `wb.operations` is not.
+                op("SOME_OTHER_ISIN", "achat", d(2026, 1, 5), 10.0, 5.0),
+            ],
+        );
+        let warnings = pam_warnings(&wb);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("T1_NO_TRADES") && w.contains("incomplete trade history")),
+            "an ISIN with zero OPERATIONS rows but a non-zero workbook holding must warn \
+             'incomplete trade history', got: {warnings:?}"
+        );
+    }
+
+    /// Point 2: OPERATIONS has trades for the ISIN, but they round-trip
+    /// exactly back to flat (buy 100, sell 100) while the workbook still
+    /// shows a non-zero holding. This is `basis_end.qty <= 0.0` in
+    /// `pam_warnings`. Before the fix this `continue`d with no warning.
+    #[test]
+    fn flat_round_trip_warns_incomplete_history() {
+        let wb = workbook(
+            vec![position("T2_FLAT", 50.0, 10.0)],
+            vec![
+                op("T2_FLAT", "achat", d(2026, 1, 5), 100.0, 9.0),
+                op("T2_FLAT", "vente", d(2026, 1, 10), 100.0, 11.0),
+            ],
+        );
+        let warnings = pam_warnings(&wb);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("T2_FLAT") && w.contains("incomplete trade history")),
+            "a history that round-trips to exactly flat against a non-zero workbook holding must \
+             warn 'incomplete trade history', got: {warnings:?}"
+        );
+    }
+
+    /// Point 3: an oversold position (a sell exceeding the running quantity)
+    /// must still warn "sells exceed recorded buys" only - not also get
+    /// double-tagged as "incomplete trade history" by the quantity gate.
+    /// Pins the oversold-subsumes-gate ordering decision at the unit level,
+    /// matching the ES0113900J37 / FR0010599399 fixture-level pin in
+    /// `pam_check.rs`.
+    #[test]
+    fn oversold_warns_only_oversold() {
+        let wb = workbook(
+            vec![position("T3_OVERSOLD", 50.0, 10.0)],
+            vec![
+                op("T3_OVERSOLD", "achat", d(2026, 1, 5), 50.0, 9.0),
+                op("T3_OVERSOLD", "vente", d(2026, 1, 10), 100.0, 11.0),
+            ],
+        );
+        let warnings = pam_warnings(&wb);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("sells exceed recorded buys")),
+            "an oversold position must warn 'sells exceed recorded buys', got: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("incomplete trade history")),
+            "an oversold position must not also be tagged 'incomplete trade history', got: {warnings:?}"
+        );
+    }
 }

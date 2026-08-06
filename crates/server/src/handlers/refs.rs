@@ -109,6 +109,10 @@ pub async fn put(
         bond_coupon_pct: b.bond_coupon_pct,
         bond_maturity: b.bond_maturity,
         bond_coupon_freq: b.bond_coupon_freq,
+        country_of_risk: None,
+        region: None,
+        gics_sector: None,
+        gics_industry: None,
     };
     db::repo::refs_upsert(&st.pool, &r).await?;
     Ok(Json(r))

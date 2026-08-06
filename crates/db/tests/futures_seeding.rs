@@ -1,5 +1,17 @@
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx");
 
+/// `import_workbook` now also runs the PAM reconciliation check (see
+/// `pam_check.rs`), which genuinely and correctly warns on this same sample
+/// workbook - `OPERATIONS` really does have incomplete history and real PAM
+/// drift for several ISINs, independent of anything futures-related. This
+/// file is about futures contract seeding, not PAM, so tests here filter
+/// down to the warnings `seed_futures_contracts` itself can produce (every
+/// variant mentions either "contract" or "point value") before asserting on
+/// them - narrowing scope, not hiding a regression.
+fn futures_warnings(warnings: &[String]) -> Vec<&String> {
+    warnings.iter().filter(|w| w.contains("contract") || w.contains("point value")).collect()
+}
+
 #[tokio::test]
 async fn import_seeds_futures_contracts_unconfirmed() {
     let dir = tempfile::tempdir().unwrap();
@@ -128,14 +140,15 @@ async fn reimport_warns_on_point_value_mismatch_and_never_overwrites() {
     assert_eq!(ty2.point_value, Some(1000.0), "user edits are never overwritten");
     assert_eq!(ty2.price_convention, "th32");
     assert!(ty2.confirmed);
-    assert!(out.warnings.is_empty(), "th32 now reconciles exactly, so no warning");
+    assert!(futures_warnings(&out.warnings).is_empty(),
+        "th32 now reconciles exactly, so no futures-seeding warning: {:?}", out.warnings);
 
     // Now break it: claim decimal for a contract that is quoted in 32nds.
     db::repo::contracts_upsert(&pool, &db::repo::FuturesContract {
         price_convention: "decimal".into(), ..ty
     }).await.unwrap();
     let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-c", &wb).await.unwrap();
-    let w = out.warnings.join(" | ");
+    let w = futures_warnings(&out.warnings).into_iter().cloned().collect::<Vec<_>>().join(" | ");
     assert!(w.contains("TY"), "warning names the contract: {w}");
     assert!(w.contains("th32"), "warning names the likely convention: {w}");
 

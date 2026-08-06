@@ -30,6 +30,21 @@ automatically; go to the Data page and upload the NAV Recap workbook.
    futures contract table that is unexpectedly empty.
 2. Upload the CTD companion file for the same NAV date. Re-uploading replaces that
    date's rows, so a corrected pull simply overwrites.
+3. On the Data page's Bloomberg classification panel, export the request workbook.
+   It lists every equity/fund/bond position still missing a country or sector plus
+   every non-EUR currency held, with `BDP`/`BDH` formulas that only resolve on a
+   machine with a logged-in Bloomberg Terminal add-in — open the file in Excel
+   there, let the formulas fill in, save, and upload the result back. The upload
+   classifies instruments by country/region/sector/industry, stores the FX rates,
+   and cross-checks each rate against the NAV Recap's own Change column at every
+   snapshot date it applies to; a mismatch beyond 1% usually means Bloomberg
+   returned the inverse quote and is reported rather than stored silently. Cells
+   whose formula never resolved (`#N/A`, blank) are skipped and listed, not
+   guessed at. The parser assumes a specific `BDH` spill shape (two columns per
+   currency, dates then rates); this was built and tested against a synthetic
+   workbook, since no live Bloomberg Terminal was available to confirm the
+   add-in's actual spill layout — if a real pull parses differently, the
+   symptom will be currency rows landing in `skipped` rather than `fx_rows`.
 
 The companion file is one row per bond future, `.csv` or `.xlsx` (an `.xlsx` file
 is read from a worksheet named `CTD`, falling back to its first sheet if there
@@ -75,6 +90,20 @@ re-uploaded — nothing is stored until every row passes.
   Basel traffic-light zones and Kupiec proportion-of-failures test.
 - **Reference data** (Data page): editable issuer groups, liquidity bucket overrides
   and bond statics (coupon/maturity/frequency, auto-parsed from position names on import).
+- **P&L page**: attributes period P&L per instrument into realized/unrealized price
+  and realized/unrealized FX, grouped by asset class, country, region, sector,
+  industry, currency or issuer group, with a reconciliation to the fund's own AUM
+  change (investment P&L, cash/margin, accrued fees, provisions, dividend income,
+  less net subscriptions/redemptions) and the residual flagged once it exceeds
+  tolerance. MTD/QTD/YTD/ITD presets and a custom date range are struck between the
+  two imported NAV dates nearest the request, never interpolated — the page shows
+  the actual dates used when they differ from what was asked for. A partial sale
+  following a mid-period purchase cannot split that purchase's FX exactly by
+  weighted-average costing; it is flagged per instrument (⚠) rather than silently
+  approximated. Futures carry no cost basis — their P&L is the variation-margin
+  change — and realized P&L from a bond future closed mid-period is not yet derived
+  from `OPERATIONS`, so it reports as zero and any resulting error surfaces in the
+  residual instead of being absorbed.
 
 ## Development
 

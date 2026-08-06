@@ -3,6 +3,7 @@ import {
   ApiError, getImports, getPositions, getSettings, getRefs, putRef, putSettings, uploadFile,
   type ImportOutcome, type Settings,
 } from "../api";
+import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
 import { useFetch } from "../hooks";
 import { eur, num, pct } from "../fmt";
@@ -106,6 +107,8 @@ export default function DataPage() {
       <RefsCard rows={refs.data} onSaved={refs.reload} />
 
       <FuturesContracts />
+
+      <BloombergPanel />
 
       <div className="card">
         <h3>Portfolio snapshot</h3>

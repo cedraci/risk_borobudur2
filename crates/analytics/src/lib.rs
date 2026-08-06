@@ -9,6 +9,7 @@ pub mod liquidity;
 pub mod rates;
 pub mod backtest;
 pub mod futures;
+pub mod pnl;
 
 pub use returns::*;
 pub use stats::*;
@@ -21,3 +22,7 @@ pub use liquidity::*;
 pub use rates::*;
 pub use backtest::*;
 pub use futures::*;
+pub use pnl::*;
+
+// Disambiguate: returns::NavPoint is the default; pnl::NavPoint must be qualified
+pub use returns::NavPoint;
