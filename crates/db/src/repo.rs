@@ -137,7 +137,8 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         .await?;
     }
 
-    let warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+    let mut warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+    warnings.extend(pam_warnings(wb));
 
     if replace_div_ops {
         sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
@@ -272,6 +273,74 @@ async fn seed_futures_contracts(
         }
     }
     Ok(warnings)
+}
+
+/// Cross-check the engine's weighted-average cost against the administrator's
+/// PAM column for every cash position in the snapshot.
+///
+/// Two distinct problems are reported, and they are kept separate because
+/// they have different causes: the walked quantity disagreeing with the
+/// snapshot means OPERATIONS does not hold this instrument's complete
+/// history, so no cost-basis comparison is meaningful (an "incomplete trade
+/// history" warning); only once the quantity agrees is the cost basis itself
+/// compared against PAM (a "PAM drift" warning), which reports a genuine
+/// mismatch between the administrator's file and the trade walk. Non-fatal:
+/// it warns, it never blocks the weekly import.
+fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
+    use analytics::pnl::{Trade, is_buy, walk_instrument};
+
+    let mut trades: Vec<Trade> = Vec::new();
+    for o in &wb.operations {
+        let (Some(isin), Some(qty), Some(px)) = (o.isin.as_deref(), o.quantity, o.net_price) else { continue };
+        let Some(buy) = is_buy(&o.side) else { continue };
+        trades.push(Trade {
+            trade_date: o.trade_date,
+            isin: isin.to_string(),
+            is_buy: buy,
+            quantity: qty.abs(),
+            net_price: px,
+            net_amount: o.net_amount.unwrap_or(0.0),
+            currency: o.currency.clone().unwrap_or_default(),
+        });
+    }
+    trades.sort_by_key(|t| t.trade_date);
+
+    let mut warnings = Vec::new();
+    for p in &wb.positions {
+        // Futures have no cost basis; cash rows carry no PAM.
+        if !matches!(p.asset_type.as_str(), "Action" | "Fonds" | "Obligation") { continue; }
+        let (Some(pam), Some(qty)) = (p.avg_cost, p.quantity) else { continue };
+        if qty.abs() < 1e-9 { continue; }
+        let mine: Vec<Trade> = trades.iter().filter(|t| t.isin == p.isin).cloned().collect();
+        if mine.is_empty() { continue; }
+
+        let w = walk_instrument(&mine, chrono::NaiveDate::MIN, wb.nav_date);
+        if w.oversold {
+            warnings.push(format!("{}: sells exceed recorded buys; cost basis incomplete", p.isin));
+            continue;
+        }
+        if w.basis_end.qty <= 0.0 { continue; }
+
+        // The walked quantity is the evidence for whether OPERATIONS holds this
+        // instrument's full history. If it disagrees with the snapshot, the
+        // cost basis is built on an incomplete record and comparing it against
+        // PAM would report a drift whose real cause is the missing trades.
+        let walked = w.basis_end.qty;
+        if (walked - qty).abs() > 1e-6 * qty.abs().max(1.0) {
+            warnings.push(format!(
+                "{}: incomplete trade history - OPERATIONS gives {:.4} units, workbook holds {:.4}; cost basis not compared",
+                p.isin, walked, qty
+            ));
+            continue;
+        }
+        if (w.basis_end.avg_cost - pam).abs() > 0.01 {
+            warnings.push(format!(
+                "{}: PAM drift - workbook {:.6}, computed {:.6}",
+                p.isin, pam, w.basis_end.avg_cost
+            ));
+        }
+    }
+    warnings
 }
 
 pub async fn nav_rows(pool: &PgPool) -> anyhow::Result<Vec<NavRow>> {
