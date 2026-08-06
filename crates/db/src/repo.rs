@@ -645,3 +645,138 @@ pub async fn classify_upsert_many(
     tx.commit().await?;
     Ok(n)
 }
+
+#[cfg(test)]
+mod pam_warnings_tests {
+    //! Unit-level pin for the two silent-skip paths in `pam_warnings`, using
+    //! synthetic `ParsedWorkbook` data rather than the `sample.xlsx` fixture:
+    //! no real position in that fixture is both non-oversold and walks to a
+    //! zero/empty history (see task-9-fix1-report.md, Round 1), so the
+    //! integration test in `pam_check.rs` cannot exercise the exact defect
+    //! class this fix addresses. These tests construct the minimal shape that
+    //! does, and would fail if either removed `continue` were reinstated.
+    use super::pam_warnings;
+    use chrono::NaiveDate;
+    use ingest::{OperationRow, ParsedWorkbook, PositionRow};
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    fn position(isin: &str, quantity: f64, avg_cost: f64) -> PositionRow {
+        PositionRow {
+            asset_type: "Action".to_string(),
+            isin: isin.to_string(),
+            name: None,
+            currency: None,
+            quantity: Some(quantity),
+            avg_cost: Some(avg_cost),
+            price: None,
+            valuation_ccy: None,
+            accrued_interest: None,
+            fx_rate: None,
+            valuation_eur: None,
+            weight: None,
+            ticker: None,
+        }
+    }
+
+    fn op(isin: &str, side: &str, trade_date: NaiveDate, quantity: f64, net_price: f64) -> OperationRow {
+        OperationRow {
+            trade_date,
+            side: side.to_string(),
+            ticker: None,
+            isin: Some(isin.to_string()),
+            name: None,
+            currency: Some("EUR".to_string()),
+            quantity: Some(quantity),
+            price: Some(net_price),
+            gross_amount: None,
+            fees: None,
+            net_price: Some(net_price),
+            net_amount: Some(-quantity * net_price),
+        }
+    }
+
+    fn workbook(positions: Vec<PositionRow>, operations: Vec<OperationRow>) -> ParsedWorkbook {
+        ParsedWorkbook {
+            nav_date: d(2026, 1, 31),
+            aum: 0.0,
+            shares: 0.0,
+            nav: 0.0,
+            positions,
+            nav_history: Vec::new(),
+            dividends: Vec::new(),
+            operations,
+        }
+    }
+
+    /// Point 1: OPERATIONS has zero rows at all for an ISIN the workbook
+    /// currently holds a non-zero, non-oversold position in. This is
+    /// `mine.is_empty()` in `pam_warnings`. Before the fix this `continue`d
+    /// with no warning at all.
+    #[test]
+    fn zero_operations_rows_warns_incomplete_history() {
+        let wb = workbook(
+            vec![position("T1_NO_TRADES", 50.0, 10.0)],
+            vec![
+                // An operation for a *different* ISIN, so `mine` for
+                // T1_NO_TRADES is empty but `wb.operations` is not.
+                op("SOME_OTHER_ISIN", "achat", d(2026, 1, 5), 10.0, 5.0),
+            ],
+        );
+        let warnings = pam_warnings(&wb);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("T1_NO_TRADES") && w.contains("incomplete trade history")),
+            "an ISIN with zero OPERATIONS rows but a non-zero workbook holding must warn \
+             'incomplete trade history', got: {warnings:?}"
+        );
+    }
+
+    /// Point 2: OPERATIONS has trades for the ISIN, but they round-trip
+    /// exactly back to flat (buy 100, sell 100) while the workbook still
+    /// shows a non-zero holding. This is `basis_end.qty <= 0.0` in
+    /// `pam_warnings`. Before the fix this `continue`d with no warning.
+    #[test]
+    fn flat_round_trip_warns_incomplete_history() {
+        let wb = workbook(
+            vec![position("T2_FLAT", 50.0, 10.0)],
+            vec![
+                op("T2_FLAT", "achat", d(2026, 1, 5), 100.0, 9.0),
+                op("T2_FLAT", "vente", d(2026, 1, 10), 100.0, 11.0),
+            ],
+        );
+        let warnings = pam_warnings(&wb);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("T2_FLAT") && w.contains("incomplete trade history")),
+            "a history that round-trips to exactly flat against a non-zero workbook holding must \
+             warn 'incomplete trade history', got: {warnings:?}"
+        );
+    }
+
+    /// Point 3: an oversold position (a sell exceeding the running quantity)
+    /// must still warn "sells exceed recorded buys" only - not also get
+    /// double-tagged as "incomplete trade history" by the quantity gate.
+    /// Pins the oversold-subsumes-gate ordering decision at the unit level,
+    /// matching the ES0113900J37 / FR0010599399 fixture-level pin in
+    /// `pam_check.rs`.
+    #[test]
+    fn oversold_warns_only_oversold() {
+        let wb = workbook(
+            vec![position("T3_OVERSOLD", 50.0, 10.0)],
+            vec![
+                op("T3_OVERSOLD", "achat", d(2026, 1, 5), 50.0, 9.0),
+                op("T3_OVERSOLD", "vente", d(2026, 1, 10), 100.0, 11.0),
+            ],
+        );
+        let warnings = pam_warnings(&wb);
+        assert!(
+            warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("sells exceed recorded buys")),
+            "an oversold position must warn 'sells exceed recorded buys', got: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("incomplete trade history")),
+            "an oversold position must not also be tagged 'incomplete trade history', got: {warnings:?}"
+        );
+    }
+}
