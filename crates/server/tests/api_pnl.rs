@@ -186,6 +186,131 @@ async fn a_range_resolving_to_a_single_snapshot_reports_empty_with_a_reason() {
     edb.stop().await;
 }
 
+/// The spec's reconciliation promise, pinned on books that actually balance:
+/// two snapshots of a synthetic mini-fund constructed by double-entry, so the
+/// residual must be ~0 - not merely "within tolerance of a large gross".
+///
+/// The fixture (all EUR values tie exactly):
+///
+///   t0 = 2026-06-01                          t1 = 2026-06-30
+///   EQ1EUR  (Action, EUR) 100 @ 10 = 1,000   150 @ 11    = 1,650
+///   EQ2USD  (Action, USD) 1,000 USD @ 0.90   1,100 USD @ 0.95
+///                         =   900 EUR        = 1,045 EUR
+///   CASHEUR (Cash Acc)    5,000              4,900
+///   DIVBETA (Dividendes)  -                  300 USD @ 0.95 = 285
+///   AUM                   6,900              7,880
+///
+///   2026-06-10  subscription +500 (shares 69 -> 74 at NAV 100)
+///               cash 5,000 -> 5,500
+///   2026-06-15  buy 50 EQ1EUR @ 12, net_amount -600; cash 5,500 -> 4,900
+///   2026-06-20  dividend provisioned on Beta Corp: 300 USD, fx_history
+///               rate 0.92 -> 276 EUR of income; receivable carried at the
+///               t1 rate 0.95 -> 285 EUR on the balance sheet
+///
+/// Hand-derived reconciliation for (t0, t1]:
+///   investment_pnl  = EQ1: (1,650 - 1,000) - 600      =  50
+///                   + EQ2: 1,100*0.95 - 1,000*0.90    = 145   -> 195
+///   cash line       = dCash - trade flows - net flows - dividend receipts
+///                   = -100 - (-600) - 500 - (276 - 285) = +9
+///                     (the +9 is the receivable's FX revaluation
+///                      300*(0.95 - 0.92), the only genuine unexplained-cash
+///                      -bucket movement in the fixture)
+///   accrued_fees    = 0        provisions = 0
+///   dividend_income = 300 * 0.92                      = 276
+///   total           = 195 + 9 + 0 + 0 + 276           = 480
+///   dAUM - flows    = (7,880 - 6,900) - 500           = 480   -> residual 0
+///
+/// A third snapshot (2026-07-15) pins the payment leg of the same dividend:
+/// receivable -285, cash +285, no income - each line 0, residual 0.
+///
+/// This scenario is exactly the reviewer's three traces (settlement leg of a
+/// buy, subscription, dividend accrual + payment): under the pre-fix wiring
+/// the period-1 residual is -(flows + trade CFs + dividends)
+/// = -(500 - 600 + 300) = -200, so this test fails loudly there.
+#[tokio::test]
+async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (filename, sha256, nav_date, row_counts)
+         VALUES ('mini.xlsx', 'mini-sha', '2026-06-30', '{}') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO position_snapshots
+           (nav_date, import_id, asset_type, isin, name, currency,
+            quantity, price, valuation_ccy, fx_rate, valuation_eur)
+         VALUES
+           ('2026-06-01', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 100,  10,   1000, NULL, 1000),
+           ('2026-06-01', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5,    1000, 0.90, 900),
+           ('2026-06-01', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 5000, NULL, 5000),
+           ('2026-06-30', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 150,  11,   1650, NULL, 1650),
+           ('2026-06-30', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5.5,  1100, 0.95, 1045),
+           ('2026-06-30', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 4900, NULL, 4900),
+           ('2026-06-30', $1, 'Dividendes', 'DIVBETA', 'Beta Corp div', 'USD', NULL, NULL, 300,  0.95, 285),
+           ('2026-07-15', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 150,  11,   1650, NULL, 1650),
+           ('2026-07-15', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5.5,  1100, 0.95, 1045),
+           ('2026-07-15', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 5185, NULL, 5185)",
+    ).bind(import_id).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO nav_history (date, aum, shares, nav) VALUES
+           ('2026-06-01', 6900, 69, 100),
+           ('2026-06-10', 7400, 74, 100),
+           ('2026-06-30', 7880, 74, 106.486486486486486),
+           ('2026-07-15', 7880, 74, 106.486486486486486)",
+    ).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO operations (trade_date, side, isin, name, currency, quantity, net_price, net_amount)
+         VALUES ('2026-06-15', 'Achat', 'EQ1EUR', 'Alpha SE', 'EUR', 50, 12, -600)",
+    ).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO dividends (provision_date, payment_date, issuer, amount, currency)
+         VALUES ('2026-06-20', '2026-07-10', 'Beta Corp', 300, 'USD')",
+    ).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO fx_history (date, currency, rate_to_eur) VALUES ('2026-06-20', 'USD', 0.92)",
+    ).execute(&pool).await.unwrap();
+
+    // Period 1: subscription + settled buy + dividend accrual.
+    let (status, body) = get_json(&app, "/api/pnl?from=2026-06-01&to=2026-06-30").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["empty"], false, "{body}");
+    assert_eq!(body["warnings"].as_array().unwrap().len(), 0, "{body}");
+    let r = &body["reconciliation"];
+    assert!((r["investment_pnl"].as_f64().unwrap() - 195.0).abs() < 1e-6, "{r}");
+    assert!((r["cash_and_margin"].as_f64().unwrap() - 9.0).abs() < 1e-6, "{r}");
+    assert!((r["accrued_fees"].as_f64().unwrap() - 0.0).abs() < 1e-9, "{r}");
+    assert!((r["provisions"].as_f64().unwrap() - 0.0).abs() < 1e-9, "{r}");
+    assert!((r["dividend_income"].as_f64().unwrap() - 276.0).abs() < 1e-6, "{r}");
+    assert!((r["aum_change"].as_f64().unwrap() - 980.0).abs() < 1e-6, "{r}");
+    assert!((r["net_flows"].as_f64().unwrap() - 500.0).abs() < 1e-6, "{r}");
+    assert!(r["residual"].as_f64().unwrap().abs() < 0.01,
+        "consistent books must reconcile to ~0, got {r}");
+    assert_eq!(r["within_tolerance"], true, "{r}");
+
+    // Period 2: the dividend's payment leg (receivable -> cash) must net to
+    // zero, not resurface as P&L.
+    let (status, body) = get_json(&app, "/api/pnl?from=2026-06-30&to=2026-07-15").await;
+    assert_eq!(status, StatusCode::OK);
+    let r = &body["reconciliation"];
+    assert!((r["investment_pnl"].as_f64().unwrap() - 0.0).abs() < 1e-6, "{r}");
+    assert!((r["cash_and_margin"].as_f64().unwrap() - 0.0).abs() < 1e-6, "{r}");
+    assert!((r["dividend_income"].as_f64().unwrap() - 0.0).abs() < 1e-9, "{r}");
+    assert!(r["residual"].as_f64().unwrap().abs() < 0.01,
+        "the payment leg of an already-recognised dividend is a transfer, got {r}");
+    assert_eq!(r["within_tolerance"], true, "{r}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 /// Pins the handler's arithmetic - not the analytics library's, which has
 /// its own exhaustive unit tests in `crates/analytics/src/pnl.rs` - against
 /// a hand-checked scenario. `app_with_sample`'s cloned earlier snapshot
@@ -200,13 +325,14 @@ async fn instrument_and_reconciliation_arithmetic_matches_a_hand_checked_scenari
     let t0: chrono::NaiveDate = sqlx::query_scalar("SELECT MIN(nav_date) FROM position_snapshots")
         .fetch_one(&pool).await.unwrap();
 
-    // Both equities have real trades across the whole 2025-02-28..2026-07-24
-    // window (every equity in the fixture does). Remove them so
-    // `walk_instrument` sees an empty history: `decompose` then reduces to
-    // its simplest form - no realized leg, no split ambiguity - price P&L is
-    // exactly `(v1 - v0) * f0` and FX P&L is exactly `v1 * (f1 - f0)`.
-    sqlx::query("DELETE FROM operations WHERE isin IN ('GRS145003000', 'GB0007188757')")
-        .execute(&pool).await.unwrap();
+    // Every equity in the fixture has real trades across the whole
+    // 2025-02-28..2026-07-24 window. Remove all of them so `walk_instrument`
+    // sees an empty history everywhere: `decompose` then reduces to its
+    // simplest form - no realized leg, no split ambiguity - price P&L is
+    // exactly `(v1 - v0) * f0`, FX P&L is exactly `v1 * (f1 - f0)`, and the
+    // trade-flow sum the cash line is netted of is exactly zero, keeping the
+    // reconciliation figures below hand-derivable.
+    sqlx::query("DELETE FROM operations").execute(&pool).await.unwrap();
 
     // EUR equity GRS145003000: real t1 valuation_ccy = 316,572.00. EUR is
     // special-cased to f0 = f1 = 1.0 regardless of stored fx_rate, so with
@@ -228,9 +354,9 @@ async fn instrument_and_reconciliation_arithmetic_matches_a_hand_checked_scenari
     //   total                                               =  9,464.0664524656
     // Every other GBP row's fx_rate at t0 is nulled so `snap_rate`'s search
     // for "any GBP row with a positive fx_rate" deterministically lands on
-    // this one, regardless of row insertion order (their own price P&L is
-    // still real trade-driven noise from the untouched clone, which is why
-    // this test doesn't assert a portfolio-wide total).
+    // this one, regardless of row insertion order (each still picks up
+    // translation-FX noise `v1 * (f1 - f0)` from the perturbed f0, which is
+    // why this test doesn't assert a portfolio-wide total).
     sqlx::query(
         "UPDATE position_snapshots SET valuation_ccy = 60000.0, valuation_eur = 66000.0, fx_rate = 1.10
          WHERE nav_date = $1 AND isin = 'GB0007188757'",
@@ -242,12 +368,17 @@ async fn instrument_and_reconciliation_arithmetic_matches_a_hand_checked_scenari
     )
     .bind(t0).execute(&pool).await.unwrap();
 
-    // Cash row BK001USD (USD): cash/margin lines bypass `decompose`
+    // Cash row BK001USD (USD): cash/margin rows bypass `decompose`
     // entirely - they're straight `valuation_eur` deltas. Real t1
     // valuation_eur = 902,830.24; set t0 to 850,000.00. Every other
     // cash/margin/fees/provisions/income row is an untouched clone
     // (e1 - e0 = 0 exactly), so this is the only nonzero contributor to
-    // `cash_and_margin`: 902,830.24 - 850,000.00 = 52,830.24.
+    // the raw cash delta: 902,830.24 - 850,000.00 = 52,830.24. The
+    // `cash_and_margin` LINE nets that delta of trade flows (zero here -
+    // operations were deleted above), external subscriptions (this
+    // fixture's derived net_flows, asserted below) and dividend receipts
+    // (income minus receivable movement) - see the assertion for the
+    // arithmetic.
     sqlx::query(
         "UPDATE position_snapshots SET valuation_eur = 850000.0
          WHERE nav_date = $1 AND isin = 'BK001USD'",
@@ -276,7 +407,6 @@ async fn instrument_and_reconciliation_arithmetic_matches_a_hand_checked_scenari
     assert!((gbp_eq["unrealized_fx"].as_f64().unwrap() - 4589.7244524656).abs() < 1e-3, "{gbp_eq}");
 
     let r = &body["reconciliation"];
-    assert!((r["cash_and_margin"].as_f64().unwrap() - 52830.24).abs() < 1e-6, "{r}");
     // Fees/Provisions/Income rows were never touched, so every one of them
     // is a straight clone: their e1 - e0 is exactly zero.
     assert!((r["accrued_fees"].as_f64().unwrap() - 0.0).abs() < 1e-9, "{r}");
@@ -284,7 +414,37 @@ async fn instrument_and_reconciliation_arithmetic_matches_a_hand_checked_scenari
     // Dividend window is (t0, t1] = (2025-02-28, 2026-07-24], which is every
     // one of the fixture's 53 dividend rows - untouched by the
     // perturbations above, so this independently pins the window filter.
-    assert!((r["dividend_income"].as_f64().unwrap() - 221124.35).abs() < 1e-2, "{r}");
+    // Amounts are converted at each currency's snapshot rate (fx_history is
+    // empty in this fixture, so the provision-date lookup falls back to the
+    // untouched t1 snapshot; DKK and SEK carry no fx_rate on any position
+    // row, so their rate is the first row's valuation_eur/valuation_ccy):
+    //   CHF:   5,504.51 x 1.07503763       =   5,917.555385
+    //   DKK:   1,250.52 x 0.13376495204594 =     167.275748
+    //   EUR: 153,114.34 x 1                = 153,114.340000
+    //   GBP:  28,668.45 x 1.17123448       =  33,577.477128
+    //   SEK:  25,617.00 x 0.09052641011727 =   2,319.015048
+    //   USD:   6,969.53 x 0.87881185       =   6,124.905553
+    //   total                              = 201,220.568862
+    assert!((r["dividend_income"].as_f64().unwrap() - 201_220.568862).abs() < 1e-2, "{r}");
+    // Net flows derived from the fixture's own nav_history over
+    // (2025-02-28, 2026-07-24]: sum of (shares[i] - shares[i-1]) * nav[i]
+    // across all 344 rows (shares 3,010 -> 271,342.492). Machine-derived
+    // once from the fixture, stable, and pinned here because the cash line
+    // below nets it out.
+    assert!((r["net_flows"].as_f64().unwrap() - 27_446_800.194710).abs() < 1e-2, "{r}");
+    // cash_and_margin = raw cash delta - trade flows - net flows
+    //                 - (dividend income - dividend receivable delta)
+    //   raw cash delta            =         52,830.24   (BK001USD, above)
+    //   trade flows               =              0      (operations deleted)
+    //   net flows                 =     27,446,800.194710
+    //   dividend income           =        201,220.568862
+    //   dividend receivable delta =              0      (untouched clones)
+    //   =>  52,830.24 - 27,446,800.194710 - 201,220.568862
+    //     = -27,595,190.523572
+    // (Huge and negative because the cloned books really are inconsistent:
+    // the subscriptions that AUM history records never landed in the cloned
+    // cash rows. The residual, recomputed below, carries the same story.)
+    assert!((r["cash_and_margin"].as_f64().unwrap() - (-27_595_190.523572)).abs() < 1e-2, "{r}");
     // aum_change from the fixture's own NAV history, independent of every
     // perturbation above: 28,332,753.49 (2026-07-24) - 301,000.00 (2025-02-28).
     assert!((r["aum_change"].as_f64().unwrap() - 28_031_753.49).abs() < 1e-2, "{r}");
