@@ -7,7 +7,7 @@ fn d(y: i32, m: u32, dd: u32) -> NaiveDate { NaiveDate::from_ymd_opt(y, m, dd).u
 
 #[test]
 fn request_workbook_has_the_three_expected_sheets() {
-    let items = vec![RequestItem { isin: "FR0000121014".into(), ticker: "MC FP Equity".into() }];
+    let items = vec![RequestItem { isin: "FR0000121014".into() }];
     let bytes = build_request(&items, &["USD".into(), "GBP".into()], d(2025, 3, 18), d(2026, 7, 24)).unwrap();
 
     let mut wb: calamine::Xlsx<_> =
@@ -27,14 +27,13 @@ fn request_workbook_has_the_three_expected_sheets() {
 
     let row1: Vec<String> = refs.rows().nth(1).unwrap().iter().map(|c| c.to_string()).collect();
     assert_eq!(row1[0], "FR0000121014");
-    assert_eq!(row1[1], "MC FP Equity");
 }
 
 #[test]
 fn refs_and_fx_formulas_reference_the_correct_rows_and_ranges() {
     let items = vec![
-        RequestItem { isin: "FR0000121014".into(), ticker: "MC FP Equity".into() },
-        RequestItem { isin: "US0378331005".into(), ticker: "AAPL US Equity".into() },
+        RequestItem { isin: "FR0000121014".into() },
+        RequestItem { isin: "US0378331005".into() },
     ];
     let bytes = build_request(&items, &["USD".into()], d(2025, 3, 18), d(2026, 7, 24)).unwrap();
 
@@ -43,6 +42,12 @@ fn refs_and_fx_formulas_reference_the_correct_rows_and_ranges() {
 
     let refs = calamine::Reader::worksheet_formula(&mut wb, "REFS").unwrap();
     let f = |r: u32, c: u32| refs.get_value((r, c)).cloned().unwrap_or_default();
+
+    // The NAV Recap carries no Bloomberg ticker, so column B resolves the
+    // full security key from the ISIN on the Terminal itself; the
+    // classification formulas then query that ticker, not the raw ISIN.
+    assert_eq!(f(1, 1), "BDP(\"/isin/FR0000121014\",\"PARSEKYABLE_DES\")");
+    assert_eq!(f(2, 1), "BDP(\"/isin/US0378331005\",\"PARSEKYABLE_DES\")");
 
     // item 1 (row 2 in Excel, row index 1): country/sector/industry BDP formulas
     // must reference ticker cell B2.
