@@ -72,10 +72,25 @@ re-uploaded — nothing is stored until every row passes.
   bucketing (1d / 2–7d / 8–30d / >30d) with a configurable redemption stress; bond
   YTM / modified duration / DV01 (bond futures included via weekly-uploaded
   cheapest-to-deliver analytics).
-- **Derivatives exposure**: notional by reference to the underlying, by category
-  (equity / interest rate / FX / credit / commodity / other), long and short each
-  shown in absolute value as a percentage of net assets. Contract point values are
-  derived from the workbook on import and confirmed on the Data page.
+- **Derivatives exposure** (Derivatives page): notional by reference to the
+  underlying, by category (equity / interest rate / FX / credit / commodity /
+  other), long and short each shown in absolute value as a percentage of net
+  assets. Contract point values are derived from the workbook on import and
+  confirmed on the Data page.
+- **Derivatives / EMIR page**: the derivatives exposure display (moved here from
+  Limits) plus EMIR clearing-threshold monitoring — the average of month-end
+  gross notional per asset class over the last 12 months (each month uses the
+  latest snapshot inside that month; months without one are reported missing,
+  and the average says "N of 12"), with total and of-which-OTC lines. Only OTC
+  notional counts against the 1/1/3/3/4 bn EUR thresholds (WATCH at 80%);
+  contracts default to non-OTC and are flagged on the Data page's contract
+  panel (a contract on a non-equivalent third-country venue is OTC even if
+  exchange-listed). Also derives the reconciliation-cadence tier and
+  compression trigger from the OTC contract count (conservatively assuming a
+  single counterparty), shows margin-account balances, records monthly
+  middle-office KPIs (confirmations > 5 days, reconciliation status,
+  disputes), and exports the full calculation as an `.xlsx` evidence file for
+  archiving per the EMIR procedure.
 - **NAV sensitivity per +100bp**: signed as profit and loss, `-100 × Σ DV01 ÷ AUM`
   at the snapshot's own NAV date. Negative means net assets fall if yields rise
   100bp (the book is long rates); positive means they rise. It covers the cash
