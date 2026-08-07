@@ -156,6 +156,7 @@ export interface Derivatives {
 export interface FuturesContract {
   contract_root: string; label: string; category: Category; point_value: number | null;
   currency: string; curve: string | null; price_convention: "decimal" | "th32"; confirmed: boolean;
+  otc: boolean;
 }
 export interface CtdRecord {
   nav_date: string; ticker: string; ctd_isin: string; ctd_mod_duration: number;
