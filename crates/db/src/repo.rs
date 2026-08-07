@@ -651,6 +651,49 @@ pub async fn classify_upsert_many(
     Ok(n)
 }
 
+// ---- EMIR monthly KPIs ----
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct EmirKpi {
+    /// First day of the calendar month the record describes.
+    pub month: NaiveDate,
+    pub unconfirmed_over_5d: i32,
+    pub reconciliation: String,
+    pub disputes: i32,
+    pub note: Option<String>,
+}
+
+pub async fn emir_kpis_all(pool: &PgPool) -> anyhow::Result<Vec<EmirKpi>> {
+    Ok(sqlx::query_as::<_, EmirKpi>(
+        "SELECT month, unconfirmed_over_5d, reconciliation, disputes, note
+         FROM emir_kpis ORDER BY month DESC",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Full-row replace, like `contracts_upsert`: every field is written as given.
+pub async fn emir_kpi_upsert(pool: &PgPool, k: &EmirKpi) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO emir_kpis (month, unconfirmed_over_5d, reconciliation, disputes, note)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (month) DO UPDATE SET
+           unconfirmed_over_5d = EXCLUDED.unconfirmed_over_5d,
+           reconciliation = EXCLUDED.reconciliation,
+           disputes = EXCLUDED.disputes,
+           note = EXCLUDED.note,
+           updated_at = now()",
+    )
+    .bind(k.month)
+    .bind(k.unconfirmed_over_5d)
+    .bind(&k.reconciliation)
+    .bind(k.disputes)
+    .bind(&k.note)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod pam_warnings_tests {
     //! Unit-level pin for the two silent-skip paths in `pam_warnings`, using
