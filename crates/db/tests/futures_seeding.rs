@@ -98,7 +98,7 @@ async fn duplicate_import_seeds_specs_a_pre_existing_database_is_missing() {
     db::repo::contracts_upsert(&pool, &db::repo::FuturesContract {
         contract_root: "TY".into(), label: "US 10Y Note".into(), category: "interest_rate".into(),
         point_value: Some(1000.0), currency: "USD".into(), curve: Some("US-10y".into()),
-        price_convention: "th32".into(), confirmed: true,
+        price_convention: "th32".into(), confirmed: true, otc: false,
     }).await.unwrap();
     let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-dup", &wb).await.unwrap();
     assert!(out.duplicate);
@@ -128,7 +128,7 @@ async fn reimport_warns_on_point_value_mismatch_and_never_overwrites() {
     let ty = db::repo::FuturesContract {
         contract_root: "TY".into(), label: "US 10Y Note".into(), category: "interest_rate".into(),
         point_value: Some(1000.0), currency: "USD".into(), curve: Some("US-10y".into()),
-        price_convention: "th32".into(), confirmed: true,
+        price_convention: "th32".into(), confirmed: true, otc: false,
     };
     db::repo::contracts_upsert(&pool, &ty).await.unwrap();
 

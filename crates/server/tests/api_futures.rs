@@ -66,6 +66,7 @@ async fn contracts_and_ctd_upload() {
     let (st, _) = put_json(&app, "/api/futures-contracts/RX", serde_json::json!({
         "label": "Euro-Bund", "category": "interest_rate", "point_value": 1000.0,
         "currency": "EUR", "curve": "DE-10y", "price_convention": "decimal", "confirmed": true,
+        "otc": false,
     })).await;
     assert_eq!(st, StatusCode::OK);
 
@@ -73,11 +74,13 @@ async fn contracts_and_ctd_upload() {
     let (st, _) = put_json(&app, "/api/futures-contracts/RX", serde_json::json!({
         "label": "x", "category": "bogus", "point_value": 1000.0,
         "currency": "EUR", "curve": null, "price_convention": "decimal", "confirmed": true,
+        "otc": false,
     })).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
     let (st, _) = put_json(&app, "/api/futures-contracts/RX", serde_json::json!({
         "label": "x", "category": "interest_rate", "point_value": -1.0,
         "currency": "EUR", "curve": null, "price_convention": "decimal", "confirmed": true,
+        "otc": false,
     })).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
@@ -98,6 +101,30 @@ async fn contracts_and_ctd_upload() {
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(body["rows"][0]["message"].as_str().unwrap().contains("ZZZ9"), "{body}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn otc_flag_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    // OTC flag round-trips through PUT and GET (EMIR threshold feed).
+    let (status, body) = put_json(&app, "/api/futures-contracts/RX", serde_json::json!({
+        "label": "Euro-Bund", "category": "interest_rate", "point_value": 1000.0,
+        "currency": "EUR", "curve": null, "price_convention": "decimal",
+        "confirmed": true, "otc": true,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["otc"], true, "{body}");
+    let (status, list) = get_json(&app, "/api/futures-contracts").await;
+    assert_eq!(status, StatusCode::OK);
+    let rx = list.as_array().unwrap().iter().find(|c| c["contract_root"] == "RX").unwrap();
+    assert_eq!(rx["otc"], true, "{rx}");
 
     pool.close().await;
     edb.stop().await;

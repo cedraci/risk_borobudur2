@@ -445,10 +445,11 @@ pub struct FuturesContract {
     pub curve: Option<String>,
     pub price_convention: String,
     pub confirmed: bool,
+    pub otc: bool,
 }
 
 const SELECT_CONTRACTS: &str = "SELECT contract_root, label, category,
-        point_value::float8 AS point_value, currency, curve, price_convention, confirmed
+        point_value::float8 AS point_value, currency, curve, price_convention, confirmed, otc
      FROM futures_contracts ORDER BY contract_root";
 
 pub async fn contracts_all(pool: &PgPool) -> anyhow::Result<Vec<FuturesContract>> {
@@ -459,8 +460,8 @@ pub async fn contracts_all(pool: &PgPool) -> anyhow::Result<Vec<FuturesContract>
 pub async fn contracts_upsert(pool: &PgPool, c: &FuturesContract) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO futures_contracts
-           (contract_root, label, category, point_value, currency, curve, price_convention, confirmed, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           (contract_root, label, category, point_value, currency, curve, price_convention, confirmed, otc, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
          ON CONFLICT (contract_root) DO UPDATE SET
            label = EXCLUDED.label,
            category = EXCLUDED.category,
@@ -469,10 +470,12 @@ pub async fn contracts_upsert(pool: &PgPool, c: &FuturesContract) -> anyhow::Res
            curve = EXCLUDED.curve,
            price_convention = EXCLUDED.price_convention,
            confirmed = EXCLUDED.confirmed,
+           otc = EXCLUDED.otc,
            updated_at = now()",
     )
     .bind(&c.contract_root).bind(&c.label).bind(&c.category).bind(c.point_value)
     .bind(&c.currency).bind(&c.curve).bind(&c.price_convention).bind(c.confirmed)
+    .bind(c.otc)
     .execute(pool)
     .await?;
     Ok(())

@@ -22,6 +22,7 @@ pub struct ContractBody {
     pub curve: Option<String>,
     pub price_convention: String,
     pub confirmed: bool,
+    pub otc: bool,
 }
 
 pub async fn put_contract(
@@ -55,6 +56,7 @@ pub async fn put_contract(
         curve: b.curve.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
         price_convention: b.price_convention,
         confirmed: b.confirmed,
+        otc: b.otc,
     };
     db::repo::contracts_upsert(&st.pool, &c).await?;
     Ok(Json(c))
