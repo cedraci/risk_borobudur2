@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { getConcentration, getLiquidity, getRates, type Check, type CheckStatus } from "../api";
-import DerivativesExposure from "../components/DerivativesExposure";
 import EChart from "../components/EChart";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
@@ -68,8 +67,6 @@ export default function LimitsPage() {
       {conc.error && <p className="neg">{conc.error}</p>}
       {(conc.data?.checks ?? []).map((c) => <CheckCard key={c.check} c={c} />)}
       {conc.data && <p className="kpi-sub">{conc.data.excluded_note}</p>}
-
-      <DerivativesExposure date={date} />
 
       <h3>Liquidity</h3>
       {liq.error && <p className="neg">{liq.error}</p>}
