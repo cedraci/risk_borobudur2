@@ -10,6 +10,7 @@ pub mod rates;
 pub mod backtest;
 pub mod futures;
 pub mod pnl;
+pub mod emir;
 
 pub use returns::*;
 pub use stats::*;
