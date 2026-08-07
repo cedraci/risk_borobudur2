@@ -400,13 +400,14 @@ pub struct InstrumentRef {
     pub region: Option<String>,
     pub gics_sector: Option<String>,
     pub gics_industry: Option<String>,
+    pub ticker: Option<String>,
 }
 
 pub async fn refs_all(pool: &PgPool) -> anyhow::Result<Vec<InstrumentRef>> {
     Ok(sqlx::query_as(
         "SELECT code, issuer_group, liquidity_bucket,
                 bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq,
-                country_of_risk, region, gics_sector, gics_industry
+                country_of_risk, region, gics_sector, gics_industry, ticker
          FROM instrument_refs ORDER BY code",
     )
     .fetch_all(pool)
@@ -621,16 +622,17 @@ pub async fn fx_upsert_many(pool: &PgPool, rows: &[FxRow]) -> anyhow::Result<u64
 #[allow(clippy::type_complexity)]
 pub async fn classify_upsert_many(
     pool: &PgPool,
-    rows: &[(String, Option<String>, Option<String>, Option<String>, Option<String>)],
+    rows: &[(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)],
 ) -> anyhow::Result<u64> {
     let mut tx = pool.begin().await?;
     let mut n = 0u64;
-    for (code, country, region, sector, industry) in rows {
+    for (code, ticker, country, region, sector, industry) in rows {
         n += sqlx::query(
             "INSERT INTO instrument_refs
-               (code, country_of_risk, region, gics_sector, gics_industry, classified_at)
-             VALUES ($1, $2, $3, $4, $5, now())
+               (code, ticker, country_of_risk, region, gics_sector, gics_industry, classified_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now())
              ON CONFLICT (code) DO UPDATE SET
+               ticker          = COALESCE(instrument_refs.ticker,          EXCLUDED.ticker),
                country_of_risk = COALESCE(instrument_refs.country_of_risk, EXCLUDED.country_of_risk),
                region          = COALESCE(instrument_refs.region,          EXCLUDED.region),
                gics_sector     = COALESCE(instrument_refs.gics_sector,     EXCLUDED.gics_sector),
@@ -638,7 +640,7 @@ pub async fn classify_upsert_many(
                classified_at   = now(),
                updated_at      = now()",
         )
-        .bind(code).bind(country).bind(region).bind(sector).bind(industry)
+        .bind(code).bind(ticker).bind(country).bind(region).bind(sector).bind(industry)
         .execute(&mut *tx).await?
         .rows_affected();
     }

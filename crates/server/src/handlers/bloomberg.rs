@@ -63,9 +63,10 @@ pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Jso
         ingest::ParseFailure::Rows(rows) => AppError::UnprocessableRows(rows),
     })?;
 
-    let classifications: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> =
+    let classifications: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
         parsed.classifications.iter().map(|c| (
             c.isin.clone(),
+            c.ticker.clone(),
             c.country.clone(),
             c.country.as_deref().and_then(region_for).map(|s| s.to_string()),
             c.sector.clone(),

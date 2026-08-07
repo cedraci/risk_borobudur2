@@ -34,18 +34,19 @@ async fn classify_upsert_never_overwrites_an_existing_value() {
 
     db::repo::classify_upsert_many(
         &pool,
-        &[("FR0000121014".into(), Some("France".into()), Some("Europe".into()),
+        &[("FR0000121014".into(), Some("MC FP Equity".into()), Some("France".into()), Some("Europe".into()),
            Some("Consumer Discretionary".into()), Some("Textiles Apparel & Luxury Goods".into()))],
     ).await.unwrap();
 
-    // A second load carrying a different country must not clobber the first.
+    // A second load carrying different values must not clobber the first.
     db::repo::classify_upsert_many(
         &pool,
-        &[("FR0000121014".into(), Some("Wrong".into()), None, None, None)],
+        &[("FR0000121014".into(), Some("WRONG Equity".into()), Some("Wrong".into()), None, None, None)],
     ).await.unwrap();
 
     let refs = db::repo::refs_all(&pool).await.unwrap();
     let r = refs.iter().find(|r| r.code == "FR0000121014").unwrap();
+    assert_eq!(r.ticker.as_deref(), Some("MC FP Equity"));
     assert_eq!(r.country_of_risk.as_deref(), Some("France"));
     assert_eq!(r.gics_sector.as_deref(), Some("Consumer Discretionary"));
 
