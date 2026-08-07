@@ -43,22 +43,20 @@ fn refs_and_fx_formulas_reference_the_correct_rows_and_ranges() {
     let refs = calamine::Reader::worksheet_formula(&mut wb, "REFS").unwrap();
     let f = |r: u32, c: u32| refs.get_value((r, c)).cloned().unwrap_or_default();
 
-    // The NAV Recap carries no Bloomberg ticker, so column B resolves the
-    // full security key from the ISIN on the Terminal itself; the
-    // classification formulas then query that ticker, not the raw ISIN.
-    assert_eq!(f(1, 1), "BDP(\"/isin/FR0000121014\",\"PARSEKYABLE_DES\")");
-    assert_eq!(f(2, 1), "BDP(\"/isin/US0378331005\",\"PARSEKYABLE_DES\")");
+    // The NAV Recap carries no Bloomberg ticker, so every BDP keys off the
+    // ISIN in column A with the Equity yellow key appended — the security
+    // format confirmed to resolve on the user's Terminal. Column B pulls the
+    // ticker itself (stored on upload); C-E pull the classification.
+    assert_eq!(f(1, 1), "BDP(A2&\" Equity\",\"PARSEKYABLE_DES\")");
+    assert_eq!(f(1, 2), "BDP(A2&\" Equity\",\"CNTRY_OF_RISK\")");
+    assert_eq!(f(1, 3), "BDP(A2&\" Equity\",\"GICS_SECTOR_NAME\")");
+    assert_eq!(f(1, 4), "BDP(A2&\" Equity\",\"GICS_INDUSTRY_GROUP_NAME\")");
 
-    // item 1 (row 2 in Excel, row index 1): country/sector/industry BDP formulas
-    // must reference ticker cell B2.
-    assert_eq!(f(1, 2), "BDP(B2,\"CNTRY_OF_RISK\")");
-    assert_eq!(f(1, 3), "BDP(B2,\"GICS_SECTOR_NAME\")");
-    assert_eq!(f(1, 4), "BDP(B2,\"GICS_INDUSTRY_GROUP_NAME\")");
-
-    // item 2 (row 3 in Excel, row index 2): same three formulas, referencing B3.
-    assert_eq!(f(2, 2), "BDP(B3,\"CNTRY_OF_RISK\")");
-    assert_eq!(f(2, 3), "BDP(B3,\"GICS_SECTOR_NAME\")");
-    assert_eq!(f(2, 4), "BDP(B3,\"GICS_INDUSTRY_GROUP_NAME\")");
+    // item 2 (row 3 in Excel, row index 2): same four formulas, keyed off A3.
+    assert_eq!(f(2, 1), "BDP(A3&\" Equity\",\"PARSEKYABLE_DES\")");
+    assert_eq!(f(2, 2), "BDP(A3&\" Equity\",\"CNTRY_OF_RISK\")");
+    assert_eq!(f(2, 3), "BDP(A3&\" Equity\",\"GICS_SECTOR_NAME\")");
+    assert_eq!(f(2, 4), "BDP(A3&\" Equity\",\"GICS_INDUSTRY_GROUP_NAME\")");
 
     // FX: one currency owns a two-column block (anchor + "rate" header);
     // the formula spills dates into the anchor column and values into the
@@ -153,6 +151,7 @@ fn parses_classifications_and_derives_region() {
     assert_eq!(out.classifications.len(), 1);
     let c = &out.classifications[0];
     assert_eq!(c.isin, "FR0000121014");
+    assert_eq!(c.ticker.as_deref(), Some("T"), "the resolved ticker is read back for storage");
     assert_eq!(c.country.as_deref(), Some("France"));
     assert_eq!(region_for("France"), Some("Europe"));
 }

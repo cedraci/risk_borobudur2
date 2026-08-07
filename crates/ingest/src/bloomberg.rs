@@ -33,20 +33,20 @@ pub fn build_request(
     }
     s.set_column_width(0, 16)?;
     s.set_column_width(1, 24)?;
-    // The NAV Recap has no Bloomberg ticker column, so the Terminal supplies
-    // it: column B resolves the full security key from the ISIN, and the
-    // classification columns query that ticker cell. BDP by raw ISIN is not
-    // reliable across asset types; BDP by ticker is.
+    // The NAV Recap has no Bloomberg ticker column, so every BDP keys off
+    // the ISIN in column A with the Equity yellow key appended
+    // ("FR0000121014 Equity") — the security format the user confirmed
+    // resolves on their Terminal. Column B pulls the ticker itself, stored
+    // on upload for later use.
     for (i, it) in items.iter().enumerate() {
         let r = (i + 1) as u32;
         s.write_string(r, 0, &it.isin)?;
-        s.write_formula(r, 1, Formula::new(format!(
-            "=BDP(\"/isin/{}\",\"PARSEKYABLE_DES\")", it.isin
-        )))?;
         let row = r + 1; // 1-based for the formula text
-        s.write_formula(r, 2, Formula::new(format!("=BDP(B{row},\"CNTRY_OF_RISK\")")))?;
-        s.write_formula(r, 3, Formula::new(format!("=BDP(B{row},\"GICS_SECTOR_NAME\")")))?;
-        s.write_formula(r, 4, Formula::new(format!("=BDP(B{row},\"GICS_INDUSTRY_GROUP_NAME\")")))?;
+        let key = format!("A{row}&\" Equity\"");
+        s.write_formula(r, 1, Formula::new(format!("=BDP({key},\"PARSEKYABLE_DES\")")))?;
+        s.write_formula(r, 2, Formula::new(format!("=BDP({key},\"CNTRY_OF_RISK\")")))?;
+        s.write_formula(r, 3, Formula::new(format!("=BDP({key},\"GICS_SECTOR_NAME\")")))?;
+        s.write_formula(r, 4, Formula::new(format!("=BDP({key},\"GICS_INDUSTRY_GROUP_NAME\")")))?;
     }
 
     // ---- FX ----
@@ -83,7 +83,7 @@ pub fn build_request(
         "4. Upload it on the Data page, Bloomberg classification panel.".into(),
         String::new(),
         "REFS: one row per instrument still missing a country or GICS classification.".into(),
-        "      The ticker column resolves itself from the ISIN; the other columns query it.".into(),
+        "      Every column queries Bloomberg by \"{ISIN} Equity\"; the resolved ticker is stored on upload.".into(),
         "FX:   daily EUR cross rates. The tool inverts these to euros-per-unit and".into(),
         "      cross-checks them against the NAV Recap's own Change column.".into(),
     ];
@@ -97,6 +97,7 @@ pub fn build_request(
 #[derive(Debug, Clone)]
 pub struct ClassificationRow {
     pub isin: String,
+    pub ticker: Option<String>,
     pub country: Option<String>,
     pub sector: Option<String>,
     pub industry: Option<String>,
@@ -155,10 +156,11 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
         let end = refs.end().map(|(r, _)| r).unwrap_or(0);
         for row in 1..=end {
             let Some(isin) = text(&refs, row, 0) else { continue };
+            let ticker = text(&refs, row, 1);
             let country = text(&refs, row, 2);
             let sector = text(&refs, row, 3);
             let industry = text(&refs, row, 4);
-            for (col, name) in [(2u32, "country_of_risk"), (3, "gics_sector"), (4, "gics_industry")] {
+            for (col, name) in [(1u32, "ticker"), (2, "country_of_risk"), (3, "gics_sector"), (4, "gics_industry")] {
                 if unresolved(refs.get_value((row, col))) {
                     out.skipped.push(RowError {
                         sheet: "REFS".into(),
@@ -167,8 +169,8 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
                     });
                 }
             }
-            if country.is_some() || sector.is_some() || industry.is_some() {
-                out.classifications.push(ClassificationRow { isin, country, sector, industry });
+            if ticker.is_some() || country.is_some() || sector.is_some() || industry.is_some() {
+                out.classifications.push(ClassificationRow { isin, ticker, country, sector, industry });
             }
         }
     }

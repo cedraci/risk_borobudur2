@@ -113,6 +113,7 @@ pub async fn put(
         region: None,
         gics_sector: None,
         gics_industry: None,
+        ticker: None,
     };
     db::repo::refs_upsert(&st.pool, &r).await?;
     Ok(Json(r))
