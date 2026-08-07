@@ -122,3 +122,48 @@ async fn emir_report_on_sample() {
     pool.close().await;
     edb.stop().await;
 }
+
+#[tokio::test]
+async fn kpi_upsert_validation_and_echo_in_report() {
+    let (app, pool, edb) = app_with_sample().await;
+
+    let good = serde_json::json!({
+        "unconfirmed_over_5d": 1, "reconciliation": "done", "disputes": 0, "note": "  trimmed  ",
+    });
+    let (status, body) = put_json(&app, "/api/emir/kpis/2026-07-01", good.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["month"], "2026-07-01");
+    assert_eq!(body["note"], "trimmed"); // trimmed, not stored raw
+
+    // Blank note collapses to null.
+    let blank = serde_json::json!({
+        "unconfirmed_over_5d": 0, "reconciliation": "not_applicable", "disputes": 0, "note": "   ",
+    });
+    let (status, body) = put_json(&app, "/api/emir/kpis/2026-06-01", blank).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["note"], serde_json::Value::Null);
+
+    // Mid-month date, unknown status and negative counts are rejected.
+    let (status, _) = put_json(&app, "/api/emir/kpis/2026-07-15", good.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = put_json(&app, "/api/emir/kpis/2026-07-01", serde_json::json!({
+        "unconfirmed_over_5d": 0, "reconciliation": "maybe", "disputes": 0, "note": null,
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = put_json(&app, "/api/emir/kpis/2026-07-01", serde_json::json!({
+        "unconfirmed_over_5d": -1, "reconciliation": "done", "disputes": 0, "note": null,
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = put_json(&app, "/api/emir/kpis/garbage", good).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Both records come back in the report, newest first.
+    let (status, body) = get_json(&app, "/api/emir").await;
+    assert_eq!(status, StatusCode::OK);
+    let kpis = body["kpis"].as_array().unwrap();
+    assert_eq!(kpis.len(), 2, "{body}");
+    assert_eq!(kpis[0]["month"], "2026-07-01");
+
+    pool.close().await;
+    edb.stop().await;
+}

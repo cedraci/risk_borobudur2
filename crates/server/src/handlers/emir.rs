@@ -4,9 +4,9 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use analytics::emir;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 
 #[derive(serde::Deserialize)]
 pub struct DateQuery {
@@ -128,4 +128,42 @@ pub async fn get(
         "kpis": a.kpis,
         "otc_note": "Only OTC positions count toward the clearing thresholds. Contracts on an EU regulated market or an equivalent third-country market are not OTC; flag any contract on a non-equivalent venue as OTC on the Data page.",
     })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct KpiBody {
+    pub unconfirmed_over_5d: i32,
+    pub reconciliation: String,
+    pub disputes: i32,
+    pub note: Option<String>,
+}
+
+pub async fn put_kpi(
+    State(st): State<AppState>,
+    Path(month): Path<String>,
+    Json(b): Json<KpiBody>,
+) -> Result<Json<db::repo::EmirKpi>, AppError> {
+    let month = month
+        .parse::<NaiveDate>()
+        .map_err(|_| AppError::BadRequest(format!("bad month: {month}")))?;
+    if month.day() != 1 {
+        return Err(AppError::Unprocessable("month must be a first-of-month date (YYYY-MM-01)".into()));
+    }
+    if !["done", "not_done", "not_applicable"].contains(&b.reconciliation.as_str()) {
+        return Err(AppError::Unprocessable(
+            "reconciliation must be one of done, not_done, not_applicable".into(),
+        ));
+    }
+    if b.unconfirmed_over_5d < 0 || b.disputes < 0 {
+        return Err(AppError::Unprocessable("counts must be >= 0".into()));
+    }
+    let k = db::repo::EmirKpi {
+        month,
+        unconfirmed_over_5d: b.unconfirmed_over_5d,
+        reconciliation: b.reconciliation,
+        disputes: b.disputes,
+        note: b.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+    };
+    db::repo::emir_kpi_upsert(&st.pool, &k).await?;
+    Ok(Json(k))
 }
