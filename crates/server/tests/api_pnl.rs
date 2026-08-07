@@ -311,6 +311,102 @@ async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
     edb.stop().await;
 }
 
+/// A snapshot legitimately lists the same ISIN twice: an equity and its
+/// `Dividendes` receivable share the code. Indexing a snapshot one-row-per-
+/// ISIN lets the receivable evict the instrument row, and the whole position
+/// silently vanishes from the P&L. This is a real incident, not a
+/// hypothetical: in the 2026-08-05 book a 481 EUR Kering receivable evicted
+/// the 249,811 EUR equity row at t0 - the position had been fully sold in
+/// the period, so its sale went missing from investment P&L and its 295,668
+/// EUR of proceeds were never netted off the cash line, producing a
+/// -231,446 EUR residual flagged above tolerance.
+///
+/// The fixture reproduces both shapes on consistent books (residual must
+/// be ~0):
+///   EQDUP  (Action, EUR)  t0 1,000; fully sold 08-15 for 1,100; absent t1.
+///          Its receivable row (constant 50) is inserted AFTER it at t0, so
+///          a one-row-per-ISIN index drops the equity exactly like Kering.
+///   EQSHAD (Action, EUR)  t0 200 -> t1 260, held; receivable (constant 10)
+///          inserted after it at BOTH dates - the ABN AMRO shape.
+///   CASHEUR                5,000 -> 6,100 (the sale proceeds).
+///   AUM    6,260 -> 6,420; no flows, no dividend accruals (receivables
+///          constant, DIV sheet empty).
+///
+/// Correct wiring: investment_pnl = (0-1,000)+1,100 + (260-200) = 160,
+/// cash line = 1,100 - 1,100 = 0, every receivable delta 0, residual 0.
+#[tokio::test]
+async fn duplicate_isin_receivable_rows_do_not_evict_the_instrument() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (filename, sha256, nav_date, row_counts)
+         VALUES ('dup.xlsx', 'dup-sha', '2026-08-20', '{}') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+
+    // Insertion order is load-bearing: positions_for orders by id, so each
+    // Dividendes row lands after its equity and wins any one-row-per-ISIN map.
+    sqlx::query(
+        "INSERT INTO position_snapshots
+           (nav_date, import_id, asset_type, isin, name, currency,
+            quantity, price, valuation_ccy, fx_rate, valuation_eur)
+         VALUES
+           ('2026-08-10', $1, 'Action',     'EQDUP',   'Kering-like SA', 'EUR', 100,  10,   1000, NULL, 1000),
+           ('2026-08-10', $1, 'Dividendes', 'EQDUP',   'Kering-like div','EUR', NULL, NULL, 50,   NULL, 50),
+           ('2026-08-10', $1, 'Action',     'EQSHAD',  'ABN-like NV',    'EUR', 20,   10,   200,  NULL, 200),
+           ('2026-08-10', $1, 'Dividendes', 'EQSHAD',  'ABN-like div',   'EUR', NULL, NULL, 10,   NULL, 10),
+           ('2026-08-10', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',       'EUR', NULL, NULL, 5000, NULL, 5000),
+           ('2026-08-20', $1, 'Action',     'EQSHAD',  'ABN-like NV',    'EUR', 20,   13,   260,  NULL, 260),
+           ('2026-08-20', $1, 'Dividendes', 'EQSHAD',  'ABN-like div',   'EUR', NULL, NULL, 10,   NULL, 10),
+           ('2026-08-20', $1, 'Dividendes', 'EQDUP',   'Kering-like div','EUR', NULL, NULL, 50,   NULL, 50),
+           ('2026-08-20', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',       'EUR', NULL, NULL, 6100, NULL, 6100)",
+    ).bind(import_id).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO nav_history (date, aum, shares, nav) VALUES
+           ('2026-08-10', 6260, 62.6, 100),
+           ('2026-08-20', 6420, 62.6, 102.55591054313099)",
+    ).execute(&pool).await.unwrap();
+
+    // The lifetime buy (before t0) seeds the cost basis; only the sale falls
+    // inside the period.
+    sqlx::query(
+        "INSERT INTO operations (trade_date, side, isin, name, currency, quantity, net_price, net_amount)
+         VALUES ('2026-08-01', 'Achat', 'EQDUP', 'Kering-like SA', 'EUR', 100, 10, -1000),
+                ('2026-08-15', 'Vente', 'EQDUP', 'Kering-like SA', 'EUR', -100, 11, 1100)",
+    ).execute(&pool).await.unwrap();
+
+    let (status, body) = get_json(&app, "/api/pnl?from=2026-08-10&to=2026-08-20").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["empty"], false, "{body}");
+    assert_eq!(body["warnings"].as_array().unwrap().len(), 0, "{body}");
+    let r = &body["reconciliation"];
+    assert!((r["investment_pnl"].as_f64().unwrap() - 160.0).abs() < 1e-6,
+        "the sold equity's realized 100 and the shadowed equity's 60 must both be counted: {r}");
+    assert!((r["cash_and_margin"].as_f64().unwrap() - 0.0).abs() < 1e-6,
+        "the sale proceeds must be netted off the cash line: {r}");
+    assert!((r["provisions"].as_f64().unwrap() - 0.0).abs() < 1e-9, "{r}");
+    assert!(r["residual"].as_f64().unwrap().abs() < 0.01,
+        "an evicted duplicate-ISIN row must not leak into the residual, got {r}");
+    assert_eq!(r["within_tolerance"], true, "{r}");
+
+    // Both equities must exist as instrument rows with the right components.
+    let instruments: Vec<&serde_json::Value> = body["groups"].as_array().unwrap().iter()
+        .flat_map(|g| g["instruments"].as_array().unwrap())
+        .collect();
+    let eqdup = instruments.iter().find(|i| i["isin"] == "EQDUP")
+        .expect("the fully-sold equity must appear in instrument P&L");
+    assert!((eqdup["realized_price"].as_f64().unwrap() - 100.0).abs() < 1e-6, "{eqdup}");
+    let eqshad = instruments.iter().find(|i| i["isin"] == "EQSHAD")
+        .expect("the shadowed equity must appear in instrument P&L");
+    assert!((eqshad["unrealized_price"].as_f64().unwrap() - 60.0).abs() < 1e-6, "{eqshad}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 /// Pins the handler's arithmetic - not the analytics library's, which has
 /// its own exhaustive unit tests in `crates/analytics/src/pnl.rs` - against
 /// a hand-checked scenario. `app_with_sample`'s cloned earlier snapshot

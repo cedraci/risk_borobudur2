@@ -110,45 +110,64 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Resul
     }
     for v in trades_by_isin.values_mut() { v.sort_by_key(|t| t.trade_date); }
 
-    let idx0: HashMap<&str, &db::repo::PositionRecord> = p0.iter().map(|p| (p.isin.as_str(), p)).collect();
-    let idx1: HashMap<&str, &db::repo::PositionRecord> = p1.iter().map(|p| (p.isin.as_str(), p)).collect();
+    // A snapshot legitimately lists the same ISIN twice - an equity and its
+    // `Dividendes` receivable share the code - so nothing here may index a
+    // snapshot one-row-per-ISIN across classes: a receivable would evict the
+    // instrument row and the whole position (and its trades) would silently
+    // vanish from the P&L. Balance-sheet rows are therefore accumulated by
+    // iterating every row; instrument rows get their own per-ISIN index
+    // below, summing valuations if one code genuinely appears twice as an
+    // instrument.
+    //
+    // Raw balance-sheet deltas per reconciliation bucket. `cash_delta` and
+    // `dividend_receivable_delta` are inputs to the netted reconciliation
+    // lines assembled below, not lines themselves. The `Dividendes`
+    // receivable is kept apart from `Provisions ordres`: it is the
+    // balance-sheet side of the DIV-sheet accrual (spec: "the receivable
+    // side of the same accrual") and must not be recognised as P&L a second
+    // time - see the assembly below.
+    let (mut cash_delta, mut accrued_fees, mut provisions, mut dividend_receivable_delta) =
+        (0.0, 0.0, 0.0, 0.0);
+    let balance_sheet = |class: &str| matches!(class, "Cash" | "Fees" | "Provisions" | "Income");
+    for (side, sign) in [(&p1, 1.0), (&p0, -1.0)] {
+        for p in side.iter() {
+            let e = p.valuation_eur.unwrap_or(0.0) * sign;
+            match asset_class_of(&p.asset_type) {
+                "Cash" => cash_delta += e,
+                "Fees" => accrued_fees += e,
+                "Provisions" => provisions += e,
+                "Income" => dividend_receivable_delta += e,
+                _ => {}
+            }
+        }
+    }
+
+    // Instrument rows only: valuation_ccy summed per ISIN, first row kept
+    // for name/currency/class metadata.
+    let mut idx0: HashMap<&str, (f64, &db::repo::PositionRecord)> = HashMap::new();
+    let mut idx1: HashMap<&str, (f64, &db::repo::PositionRecord)> = HashMap::new();
+    for (side, idx) in [(&p0, &mut idx0), (&p1, &mut idx1)] {
+        for p in side.iter().filter(|p| !balance_sheet(asset_class_of(&p.asset_type))) {
+            idx.entry(p.isin.as_str()).or_insert((0.0, p)).0 += p.valuation_ccy.unwrap_or(0.0);
+        }
+    }
     let mut isins: Vec<&str> = idx0.keys().chain(idx1.keys()).copied().collect();
     isins.sort_unstable();
     isins.dedup();
 
     let mut rows: Vec<InstrumentPnl> = Vec::new();
-    // Raw balance-sheet deltas per reconciliation bucket. `cash_delta` and
-    // `dividend_receivable_delta` are inputs to the netted reconciliation
-    // lines assembled below, not lines themselves.
-    let (mut cash_delta, mut accrued_fees, mut provisions, mut dividend_receivable_delta) =
-        (0.0, 0.0, 0.0, 0.0);
     // Σ CF_eur: every trade flow the per-instrument decompositions added back,
     // translated exactly as they translated it.
     let mut trade_flows_eur = 0.0;
 
     for isin in isins {
         // `isin` came from these two maps, so one of them holds it.
-        let Some(p) = idx1.get(isin).or_else(|| idx0.get(isin)).copied() else { continue };
+        let Some(p) = idx1.get(isin).map(|t| t.1).or_else(|| idx0.get(isin).map(|t| t.1)) else { continue };
         let class = asset_class_of(&p.asset_type);
         let ccy = p.currency.clone().unwrap_or_else(|| "EUR".into());
 
-        let v0 = idx0.get(isin).and_then(|r| r.valuation_ccy).unwrap_or(0.0);
-        let v1 = idx1.get(isin).and_then(|r| r.valuation_ccy).unwrap_or(0.0);
-        let e0 = idx0.get(isin).and_then(|r| r.valuation_eur).unwrap_or(0.0);
-        let e1 = idx1.get(isin).and_then(|r| r.valuation_eur).unwrap_or(0.0);
-
-        // Balance-sheet classes feed reconciliation lines, not instrument
-        // P&L. The `Dividendes` receivable is kept apart from `Provisions
-        // ordres`: it is the balance-sheet side of the DIV-sheet accrual
-        // (spec: "the receivable side of the same accrual") and must not be
-        // recognised as P&L a second time - see the assembly below.
-        match class {
-            "Cash" => { cash_delta += e1 - e0; continue; }
-            "Fees" => { accrued_fees += e1 - e0; continue; }
-            "Provisions" => { provisions += e1 - e0; continue; }
-            "Income" => { dividend_receivable_delta += e1 - e0; continue; }
-            _ => {}
-        }
+        let v0 = idx0.get(isin).map(|t| t.0).unwrap_or(0.0);
+        let v1 = idx1.get(isin).map(|t| t.0).unwrap_or(0.0);
 
         let fx = FxLookup {
             f0: snap_rate(&p0, &ccy),
