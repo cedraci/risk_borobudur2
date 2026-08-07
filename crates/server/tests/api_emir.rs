@@ -1,5 +1,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use calamine::Reader;
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
@@ -32,6 +33,15 @@ async fn put_json(app: &axum::Router, uri: &str, payload: serde_json::Value) -> 
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
     (status, serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap())
+}
+
+async fn get_bytes(app: &axum::Router, uri: &str) -> (StatusCode, String, Vec<u8>) {
+    let res = app.clone().oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap();
+    let status = res.status();
+    let ctype = res.headers().get(axum::http::header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, ctype, bytes)
 }
 
 /// Fresh embedded database seeded with the sample workbook through the HTTP
@@ -119,6 +129,46 @@ async fn emir_report_on_sample() {
     let (status, _) = get_json(&app, "/api/emir?date=garbage").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn evidence_export_round_trips() {
+    let (app, pool, edb) = app_with_sample().await;
+
+    let (status, ctype, bytes) = get_bytes(&app, "/api/emir/export").await;
+    assert_eq!(status, 200);
+    assert!(ctype.contains("spreadsheet"), "got {ctype}");
+    let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
+    let names = calamine::Reader::sheet_names(&wb).to_vec();
+    for n in ["Seuils", "Contrats", "KPI"] {
+        assert!(names.iter().any(|x| x == n), "missing {n} in {names:?}");
+    }
+    let s = calamine::Reader::worksheet_range(&mut wb, "Seuils").unwrap();
+    let text: Vec<String> = s.cells().filter_map(|(_, _, v)| match v {
+        calamine::Data::String(s) => Some(s.clone()),
+        _ => None,
+    }).collect();
+    assert!(text.iter().any(|t| t.contains("2026-07-24")), "{text:?}");
+    assert!(text.iter().any(|t| t == "Interest-rate derivatives"), "{text:?}");
+    assert!(text.iter().any(|t| t.contains("1 of 12")), "{text:?}");
+    let c = calamine::Reader::worksheet_range(&mut wb, "Contrats").unwrap();
+    // Header + the 8 seeded contracts.
+    assert_eq!(c.rows().count(), 9, "{:?}", c.rows().collect::<Vec<_>>());
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn evidence_export_refuses_empty_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let res = app.clone().oneshot(Request::get("/api/emir/export").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     pool.close().await;
     edb.stop().await;
 }

@@ -5,8 +5,11 @@ use crate::error::AppError;
 use crate::state::AppState;
 use analytics::emir;
 use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use chrono::{Datelike, NaiveDate};
+use ingest::emir_file;
 
 #[derive(serde::Deserialize)]
 pub struct DateQuery {
@@ -128,6 +131,67 @@ pub async fn get(
         "kpis": a.kpis,
         "otc_note": "Only OTC positions count toward the clearing thresholds. Contracts on an EU regulated market or an equivalent third-country market are not OTC; flag any contract on a non-equivalent venue as OTC on the Data page.",
     })))
+}
+
+pub async fn export(
+    State(st): State<AppState>,
+    Query(q): Query<DateQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let Some(a) = assemble(&st, &q.date).await? else {
+        return Err(AppError::Unprocessable(
+            "no snapshots imported yet; there is nothing to evidence".into(),
+        ));
+    };
+    let summary = a.report.classes.iter().map(|c| emir_file::SummaryRow {
+        label: c.label.to_string(),
+        threshold_eur: c.threshold_eur,
+        avg_otc_eur: c.avg_otc_eur,
+        pct_of_threshold: c.pct_of_threshold,
+        verdict: c.verdict.as_str().to_string(),
+        avg_total_eur: c.avg_total_eur,
+    }).collect();
+    let months = a.report.classes.iter().flat_map(|c| {
+        c.months.iter().map(|m| emir_file::MonthRow {
+            label: c.label.to_string(),
+            month: m.month.format("%Y-%m").to_string(),
+            snapshot_date: m.snapshot_date.map(|d| d.to_string()),
+            total_eur: m.total_eur,
+            otc_eur: m.otc_eur,
+        })
+    }).collect();
+    let contracts = a.contracts.iter().map(|c| emir_file::ContractRow {
+        root: c.contract_root.clone(),
+        label: c.label.clone(),
+        category: c.category.clone(),
+        otc: c.otc,
+        confirmed: c.confirmed,
+        point_value: c.point_value,
+        currency: c.currency.clone(),
+    }).collect();
+    let kpis = a.kpis.iter().map(|k| emir_file::KpiRow {
+        month: k.month.format("%Y-%m").to_string(),
+        unconfirmed_over_5d: k.unconfirmed_over_5d,
+        reconciliation: k.reconciliation.clone(),
+        disputes: k.disputes,
+        note: k.note.clone().unwrap_or_default(),
+    }).collect();
+    let bytes = emir_file::build_evidence(&emir_file::EmirEvidence {
+        anchor: a.anchor,
+        months_present: a.report.months_present,
+        months_total: a.report.months_total,
+        summary,
+        months,
+        contracts,
+        kpis,
+        warnings: a.report.warnings.clone(),
+    })?;
+
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+    h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
+        &format!("attachment; filename=\"EMIR - seuils - {}.xlsx\"", a.anchor))?);
+    Ok((StatusCode::OK, h, bytes))
 }
 
 #[derive(serde::Deserialize)]

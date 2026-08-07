@@ -23,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pnl", get(handlers::pnl::get))
         .route("/api/emir", get(handlers::emir::get))
         .route("/api/emir/kpis/{month}", axum::routing::put(handlers::emir::put_kpi))
+        .route("/api/emir/export", get(handlers::emir::export))
         .route("/api/refs", get(handlers::refs::list))
         .route("/api/refs/{code}", axum::routing::put(handlers::refs::put))
         .route("/api/futures-contracts", get(handlers::futures::contracts))
