@@ -12,7 +12,25 @@ use rust_xlsxwriter::{Format, Formula, Workbook};
 use std::io::Cursor;
 
 #[derive(Debug, Clone)]
-pub struct RequestItem { pub isin: String }
+pub struct RequestItem {
+    pub isin: String,
+    /// Bloomberg market sector ("yellow key") joined to the ISIN in every
+    /// BDP formula: "{ISIN} Equity", "{ISIN} Corp", ...
+    pub market_sector: String,
+}
+
+/// The Bloomberg market sector that resolves an ISIN of the given asset
+/// class (as named by `analytics::asset_class_of`). Bloomberg has no Fund
+/// sector — funds resolve under the Equity yellow key; bonds under Corp.
+/// The sector is written as plain text next to each row, so a wrong guess
+/// (e.g. a sovereign needing Govt) is a one-cell edit in Excel, not a
+/// broken formula.
+pub fn market_sector_for(asset_class: &str) -> &'static str {
+    match asset_class {
+        "Bonds" => "Corp",
+        _ => "Equity",
+    }
+}
 
 /// Build the request workbook. `items` are instruments still missing a
 /// classification; `currencies` are the non-EUR currencies held.
@@ -28,21 +46,25 @@ pub fn build_request(
     // ---- REFS ----
     let s = wb.add_worksheet();
     s.set_name("REFS")?;
-    for (c, h) in ["isin", "ticker", "country_of_risk", "gics_sector", "gics_industry"].iter().enumerate() {
+    for (c, h) in ["isin", "ticker", "country_of_risk", "gics_sector", "gics_industry", "market_sector"].iter().enumerate() {
         s.write_string_with_format(0, c as u16, *h, &bold)?;
     }
     s.set_column_width(0, 16)?;
     s.set_column_width(1, 24)?;
+    s.set_column_width(5, 14)?;
     // The NAV Recap has no Bloomberg ticker column, so every BDP keys off
-    // the ISIN in column A with the Equity yellow key appended
-    // ("FR0000121014 Equity") — the security format the user confirmed
-    // resolves on their Terminal. Column B pulls the ticker itself, stored
-    // on upload for later use.
+    // the ISIN in column A joined with the row's own market sector in
+    // column F ("FR0000121014 Equity", "US105756CL22 Corp"). A hardcoded
+    // Equity suffix only resolved equities and funds; keeping the sector in
+    // a plain cell lets the user correct a row in Excel (e.g. Corp -> Govt
+    // for a sovereign) without touching the formulas. Column B pulls the
+    // ticker itself, stored on upload for later use.
     for (i, it) in items.iter().enumerate() {
         let r = (i + 1) as u32;
         s.write_string(r, 0, &it.isin)?;
+        s.write_string(r, 5, &it.market_sector)?;
         let row = r + 1; // 1-based for the formula text
-        let key = format!("A{row}&\" Equity\"");
+        let key = format!("A{row}&\" \"&F{row}");
         s.write_formula(r, 1, Formula::new(format!("=BDP({key},\"PARSEKYABLE_DES\")")))?;
         s.write_formula(r, 2, Formula::new(format!("=BDP({key},\"CNTRY_OF_RISK\")")))?;
         s.write_formula(r, 3, Formula::new(format!("=BDP({key},\"GICS_SECTOR_NAME\")")))?;
@@ -83,7 +105,10 @@ pub fn build_request(
         "4. Upload it on the Data page, Bloomberg classification panel.".into(),
         String::new(),
         "REFS: one row per instrument still missing a country or GICS classification.".into(),
-        "      Every column queries Bloomberg by \"{ISIN} Equity\"; the resolved ticker is stored on upload.".into(),
+        "      Every column queries Bloomberg by \"{ISIN} {market sector}\", with the market sector".into(),
+        "      (Equity for equities and funds, Corp for bonds) written per row in column F.".into(),
+        "      If a bond does not resolve, edit its column F cell (e.g. Corp -> Govt) and let the".into(),
+        "      formulas recalculate. The resolved ticker is stored on upload.".into(),
         "FX:   daily EUR cross rates. The tool inverts these to euros-per-unit and".into(),
         "      cross-checks them against the NAV Recap's own Change column.".into(),
     ];

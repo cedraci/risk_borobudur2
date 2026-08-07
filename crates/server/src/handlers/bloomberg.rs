@@ -4,7 +4,8 @@ use axum::extract::{Multipart, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use ingest::bloomberg::{build_request, parse_response, region_for, RequestItem};
+use analytics::pnl::asset_class_of;
+use ingest::bloomberg::{build_request, market_sector_for, parse_response, region_for, RequestItem};
 use std::collections::BTreeSet;
 
 /// Export the request workbook for everything still unclassified.
@@ -32,7 +33,10 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
         // from the ISIN, so nothing is skipped for lack of one.
         if !matches!(p.asset_type.as_str(), "Action" | "Fonds" | "Obligation") { continue; }
         if classified.contains(p.isin.as_str()) { continue; }
-        items.push(RequestItem { isin: p.isin.clone() });
+        items.push(RequestItem {
+            isin: p.isin.clone(),
+            market_sector: market_sector_for(asset_class_of(&p.asset_type)).to_string(),
+        });
     }
 
     let navs = db::repo::nav_rows(&st.pool).await?;

@@ -1,13 +1,17 @@
 use calamine::Reader;
 use chrono::NaiveDate;
-use ingest::bloomberg::{build_request, parse_response, region_for, RequestItem};
+use ingest::bloomberg::{build_request, market_sector_for, parse_response, region_for, RequestItem};
 use ingest::ParseFailure;
 
 fn d(y: i32, m: u32, dd: u32) -> NaiveDate { NaiveDate::from_ymd_opt(y, m, dd).unwrap() }
 
+fn equity(isin: &str) -> RequestItem {
+    RequestItem { isin: isin.into(), market_sector: "Equity".into() }
+}
+
 #[test]
 fn request_workbook_has_the_three_expected_sheets() {
-    let items = vec![RequestItem { isin: "FR0000121014".into() }];
+    let items = vec![equity("FR0000121014")];
     let bytes = build_request(&items, &["USD".into(), "GBP".into()], d(2025, 3, 18), d(2026, 7, 24)).unwrap();
 
     let mut wb: calamine::Xlsx<_> =
@@ -24,39 +28,59 @@ fn request_workbook_has_the_three_expected_sheets() {
     assert_eq!(header[2], "country_of_risk");
     assert_eq!(header[3], "gics_sector");
     assert_eq!(header[4], "gics_industry");
+    assert_eq!(header[5], "market_sector");
 
     let row1: Vec<String> = refs.rows().nth(1).unwrap().iter().map(|c| c.to_string()).collect();
     assert_eq!(row1[0], "FR0000121014");
+    assert_eq!(row1[5], "Equity");
+}
+
+/// The tool's asset classes map onto the Bloomberg market sector that
+/// actually resolves an ISIN on the Terminal: funds live under the Equity
+/// yellow key (Bloomberg has no Fund sector), bonds under Corp.
+#[test]
+fn market_sector_covers_every_classifiable_asset_class() {
+    assert_eq!(market_sector_for("Equities"), "Equity");
+    assert_eq!(market_sector_for("Funds"), "Equity");
+    assert_eq!(market_sector_for("Bonds"), "Corp");
 }
 
 #[test]
 fn refs_and_fx_formulas_reference_the_correct_rows_and_ranges() {
     let items = vec![
-        RequestItem { isin: "FR0000121014".into() },
-        RequestItem { isin: "US0378331005".into() },
+        equity("FR0000121014"),
+        RequestItem { isin: "US105756CL22".into(), market_sector: "Corp".into() },
     ];
     let bytes = build_request(&items, &["USD".into()], d(2025, 3, 18), d(2026, 7, 24)).unwrap();
 
     let mut wb: calamine::Xlsx<_> =
         calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
 
+    // Each row's market sector is written as plain text in column F so the
+    // user can correct it in Excel (e.g. Corp -> Govt for a sovereign)...
+    let vals = calamine::Reader::worksheet_range(&mut wb, "REFS").unwrap();
+    let v = |r: u32, c: u32| vals.get_value((r, c)).map(|d| d.to_string()).unwrap_or_default();
+    assert_eq!(v(1, 5), "Equity");
+    assert_eq!(v(2, 5), "Corp");
+
     let refs = calamine::Reader::worksheet_formula(&mut wb, "REFS").unwrap();
     let f = |r: u32, c: u32| refs.get_value((r, c)).cloned().unwrap_or_default();
 
-    // The NAV Recap carries no Bloomberg ticker, so every BDP keys off the
-    // ISIN in column A with the Equity yellow key appended — the security
-    // format confirmed to resolve on the user's Terminal. Column B pulls the
-    // ticker itself (stored on upload); C-E pull the classification.
-    assert_eq!(f(1, 1), "BDP(A2&\" Equity\",\"PARSEKYABLE_DES\")");
-    assert_eq!(f(1, 2), "BDP(A2&\" Equity\",\"CNTRY_OF_RISK\")");
-    assert_eq!(f(1, 3), "BDP(A2&\" Equity\",\"GICS_SECTOR_NAME\")");
-    assert_eq!(f(1, 4), "BDP(A2&\" Equity\",\"GICS_INDUSTRY_GROUP_NAME\")");
+    // ...and every BDP keys off the ISIN in column A joined with that market
+    // sector — "{ISIN} Equity" / "{ISIN} Corp" — instead of a hardcoded
+    // Equity suffix that only resolved equities and funds. Column B pulls
+    // the ticker itself (stored on upload); C-E pull the classification.
+    assert_eq!(f(1, 1), "BDP(A2&\" \"&F2,\"PARSEKYABLE_DES\")");
+    assert_eq!(f(1, 2), "BDP(A2&\" \"&F2,\"CNTRY_OF_RISK\")");
+    assert_eq!(f(1, 3), "BDP(A2&\" \"&F2,\"GICS_SECTOR_NAME\")");
+    assert_eq!(f(1, 4), "BDP(A2&\" \"&F2,\"GICS_INDUSTRY_GROUP_NAME\")");
 
-    // item 2 (row 3 in Excel, row index 2): same four formulas, keyed off A3.
-    assert_eq!(f(2, 1), "BDP(A3&\" Equity\",\"PARSEKYABLE_DES\")");
-    assert_eq!(f(2, 2), "BDP(A3&\" Equity\",\"CNTRY_OF_RISK\")");
-    assert_eq!(f(2, 3), "BDP(A3&\" Equity\",\"GICS_SECTOR_NAME\")");
-    assert_eq!(f(2, 4), "BDP(A3&\" Equity\",\"GICS_INDUSTRY_GROUP_NAME\")");
+    // item 2 (row 3 in Excel, row index 2): same four formulas, keyed off
+    // A3 and its own row's market sector F3.
+    assert_eq!(f(2, 1), "BDP(A3&\" \"&F3,\"PARSEKYABLE_DES\")");
+    assert_eq!(f(2, 2), "BDP(A3&\" \"&F3,\"CNTRY_OF_RISK\")");
+    assert_eq!(f(2, 3), "BDP(A3&\" \"&F3,\"GICS_SECTOR_NAME\")");
+    assert_eq!(f(2, 4), "BDP(A3&\" \"&F3,\"GICS_INDUSTRY_GROUP_NAME\")");
 
     // FX: one currency owns a two-column block (anchor + "rate" header);
     // the formula spills dates into the anchor column and values into the
