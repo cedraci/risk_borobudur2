@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/metrics/derivatives", get(handlers::limits::derivatives_h))
         .route("/api/metrics/backtest", get(handlers::metrics::backtest))
         .route("/api/pnl", get(handlers::pnl::get))
+        .route("/api/emir", get(handlers::emir::get))
         .route("/api/refs", get(handlers::refs::list))
         .route("/api/refs/{code}", axum::routing::put(handlers::refs::put))
         .route("/api/futures-contracts", get(handlers::futures::contracts))

@@ -1,5 +1,6 @@
 pub mod bloomberg;
 pub mod data;
+pub mod emir;
 pub mod futures;
 pub mod imports;
 pub mod limits;
