@@ -12,7 +12,7 @@ use rust_xlsxwriter::{Format, Formula, Workbook};
 use std::io::Cursor;
 
 #[derive(Debug, Clone)]
-pub struct RequestItem { pub isin: String, pub ticker: String }
+pub struct RequestItem { pub isin: String }
 
 /// Build the request workbook. `items` are instruments still missing a
 /// classification; `currencies` are the non-EUR currencies held.
@@ -33,10 +33,16 @@ pub fn build_request(
     }
     s.set_column_width(0, 16)?;
     s.set_column_width(1, 24)?;
+    // The NAV Recap has no Bloomberg ticker column, so the Terminal supplies
+    // it: column B resolves the full security key from the ISIN, and the
+    // classification columns query that ticker cell. BDP by raw ISIN is not
+    // reliable across asset types; BDP by ticker is.
     for (i, it) in items.iter().enumerate() {
         let r = (i + 1) as u32;
         s.write_string(r, 0, &it.isin)?;
-        s.write_string(r, 1, &it.ticker)?;
+        s.write_formula(r, 1, Formula::new(format!(
+            "=BDP(\"/isin/{}\",\"PARSEKYABLE_DES\")", it.isin
+        )))?;
         let row = r + 1; // 1-based for the formula text
         s.write_formula(r, 2, Formula::new(format!("=BDP(B{row},\"CNTRY_OF_RISK\")")))?;
         s.write_formula(r, 3, Formula::new(format!("=BDP(B{row},\"GICS_SECTOR_NAME\")")))?;
@@ -77,6 +83,7 @@ pub fn build_request(
         "4. Upload it on the Data page, Bloomberg classification panel.".into(),
         String::new(),
         "REFS: one row per instrument still missing a country or GICS classification.".into(),
+        "      The ticker column resolves itself from the ISIN; the other columns query it.".into(),
         "FX:   daily EUR cross rates. The tool inverts these to euros-per-unit and".into(),
         "      cross-checks them against the NAV Recap's own Change column.".into(),
     ];

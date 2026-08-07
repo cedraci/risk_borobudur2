@@ -27,12 +27,12 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
         if let Some(c) = &p.currency {
             if c != "EUR" { currencies.insert(c.clone()); }
         }
-        // Only instruments a Bloomberg ticker can identify, and only those
-        // classification would actually apply to.
+        // Only instrument types classification applies to. Every one still
+        // unclassified is exported — the workbook resolves its own ticker
+        // from the ISIN, so nothing is skipped for lack of one.
         if !matches!(p.asset_type.as_str(), "Action" | "Fonds" | "Obligation") { continue; }
         if classified.contains(p.isin.as_str()) { continue; }
-        let Some(ticker) = p.ticker.clone() else { continue };
-        items.push(RequestItem { isin: p.isin.clone(), ticker });
+        items.push(RequestItem { isin: p.isin.clone() });
     }
 
     let navs = db::repo::nav_rows(&st.pool).await?;
