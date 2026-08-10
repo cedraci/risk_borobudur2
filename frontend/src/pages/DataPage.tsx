@@ -5,12 +5,14 @@ import {
 } from "../api";
 import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
+import PortfoliosAdmin from "../components/PortfoliosAdmin";
 import { useFetch } from "../hooks";
-import { usePortfolio } from "../PortfolioContext";
+import { usePortfolio, useReloadPortfolios } from "../PortfolioContext";
 import { eur, num, pct } from "../fmt";
 
 export default function DataPage() {
   const portfolio = usePortfolio();
+  const reloadPortfolios = useReloadPortfolios();
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
@@ -42,6 +44,8 @@ export default function DataPage() {
     <div>
       <h2>Data</h2>
 
+      <PortfoliosAdmin onChange={reloadPortfolios} />
+
       <div
         className={`card drop ${over ? "over" : ""}`}
         onDragOver={(e) => { e.preventDefault(); setOver(true); }}
@@ -53,6 +57,7 @@ export default function DataPage() {
           if (f) void doUpload(f);
         }}
       >
+        <h3>NAV Recap — {portfolio.name}</h3>
         <p>{busy ? "Importing…" : "Drop the NAV Recap .xlsx here, or"}</p>
         <input
           type="file"
@@ -228,6 +233,7 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
   return (
     <div className="card">
       <h3>Reference data</h3>
+      <p className="kpi-sub">Shared across all portfolios.</p>
       <p className="kpi-sub">
         Issuer groups drive the concentration checks (merge connected issuers by giving them the same group);
         buckets drive the liquidity view; bond fields drive YTM/duration. Blank override = default.

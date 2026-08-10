@@ -25,6 +25,7 @@ export default function BloombergPanel() {
   return (
     <div className="card">
       <h3>Bloomberg classification</h3>
+      <p className="kpi-sub">Shared across all portfolios.</p>
       <p className="kpi-sub">
         Export the request workbook, open it in Excel on a machine with a logged-in Bloomberg
         Terminal add-in so the BDP/BDH formulas resolve to values, save it, then upload the

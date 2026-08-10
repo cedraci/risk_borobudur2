@@ -127,6 +127,7 @@ export default function FuturesContracts() {
   return (
     <div className="card">
       <h3>Futures contracts</h3>
+      <p className="kpi-sub">Shared across all portfolios.</p>
       {contracts.error && <p className="neg">{contracts.error}</p>}
       {unconfirmedCount > 0 && (
         <p className="warn-badge">
@@ -319,7 +320,7 @@ export default function FuturesContracts() {
         </div>
       )}
 
-      <h4>Weekly CTD analytics</h4>
+      <h4>Weekly CTD analytics — {portfolio.name}</h4>
       <p className="kpi-sub">
         One row per bond future, with columns nav_date, ticker, ctd_isin, ctd_mod_duration, ctd_clean_price,
         ctd_accrued, conversion_factor. Re-uploading a file for the same NAV date replaces that date's rows.

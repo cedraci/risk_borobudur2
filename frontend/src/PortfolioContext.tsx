@@ -11,6 +11,18 @@ export function usePortfolio(): Portfolio {
   return p;
 }
 
+/** Lets a page below /p/{id} (e.g. the Data page's portfolios admin card)
+ * trigger a refetch of the App-level portfolio list, so the nav selector
+ * picks up a rename/archive/create without a full page reload. Provided
+ * once at the top of App.tsx, alongside the per-route PortfolioContext. */
+export const PortfoliosReloadContext = createContext<(() => void) | null>(null);
+
+export function useReloadPortfolios(): () => void {
+  const fn = useContext(PortfoliosReloadContext);
+  if (!fn) throw new Error("useReloadPortfolios outside provider");
+  return fn;
+}
+
 const LAST_KEY = "borobudur.lastPortfolio";
 export function rememberPortfolio(id: number) {
   try { localStorage.setItem(LAST_KEY, String(id)); } catch { /* private mode */ }

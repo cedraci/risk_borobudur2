@@ -4,7 +4,7 @@ import {
 } from "react-router-dom";
 import { getPortfolios, type Portfolio } from "./api";
 import { useFetch } from "./hooks";
-import { lastPortfolio, PortfolioContext, rememberPortfolio } from "./PortfolioContext";
+import { lastPortfolio, PortfolioContext, PortfoliosReloadContext, rememberPortfolio } from "./PortfolioContext";
 import Overview from "./pages/Overview";
 import Performance from "./pages/Performance";
 import PnlPage from "./pages/PnlPage";
@@ -114,12 +114,14 @@ export default function App() {
   }
 
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<RootRedirect portfolios={portfolios.data} />} />
-        <Route path="/p/:pid/*" element={<PortfolioLayout portfolios={portfolios.data} />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <PortfoliosReloadContext.Provider value={portfolios.reload}>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<RootRedirect portfolios={portfolios.data} />} />
+          <Route path="/p/:pid/*" element={<PortfolioLayout portfolios={portfolios.data} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </PortfoliosReloadContext.Provider>
   );
 }
