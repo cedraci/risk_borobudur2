@@ -61,3 +61,17 @@ pub async fn update(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Js
         .ok_or_else(|| AppError::NotFound(format!("no portfolio {id}")))?;
     Ok(Json(p))
 }
+
+/// Every scoped handler's first call. `mutating` requests (imports, CTD
+/// upload, KPI puts, settings puts) are refused on an archived portfolio;
+/// reads stay available so history remains inspectable.
+pub async fn ensure(pool: &sqlx::PgPool, id: i64, mutating: bool)
+    -> Result<db::repo::Portfolio, AppError>
+{
+    let p = db::repo::portfolio_get(pool, id).await?
+        .ok_or_else(|| AppError::NotFound(format!("no portfolio {id}")))?;
+    if mutating && p.archived {
+        return Err(AppError::Conflict(format!("portfolio '{}' is archived", p.name)));
+    }
+    Ok(p)
+}

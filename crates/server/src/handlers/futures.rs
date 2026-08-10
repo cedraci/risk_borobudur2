@@ -71,8 +71,10 @@ pub struct CtdUploadOutcome {
 
 pub async fn upload_ctd(
     State(st): State<AppState>,
+    Path(pid): Path<i64>,
     mut multipart: Multipart,
 ) -> Result<Json<CtdUploadOutcome>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, true).await?;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -92,7 +94,7 @@ pub async fn upload_ctd(
         })?;
 
         let date = rows[0].nav_date;
-        let known = db::repo::positions_for(&st.pool, date).await?;
+        let known = db::repo::positions_for(&st.pool, pid, date).await?;
         if known.is_empty() {
             return Err(AppError::Unprocessable(format!(
                 "no NAV snapshot for {date}; upload the NAV Recap first"
@@ -117,8 +119,8 @@ pub async fn upload_ctd(
             return Err(AppError::UnprocessableRows(unknown));
         }
 
-        let replaced = !db::repo::ctd_for(&st.pool, date).await?.is_empty();
-        let n = db::repo::ctd_replace(&st.pool, date, &filename, &rows).await?;
+        let replaced = !db::repo::ctd_for(&st.pool, pid, date).await?.is_empty();
+        let n = db::repo::ctd_replace(&st.pool, pid, date, &filename, &rows).await?;
         return Ok(Json(CtdUploadOutcome { nav_date: date, rows: n, replaced }));
     }
     Err(AppError::BadRequest("missing multipart field 'file'".into()))
@@ -126,14 +128,16 @@ pub async fn upload_ctd(
 
 pub async fn list_ctd(
     State(st): State<AppState>,
+    Path(pid): Path<i64>,
     Query(q): Query<DateQuery>,
 ) -> Result<Json<Vec<db::repo::CtdRecord>>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
     let date = match &q.date {
         Some(s) => s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?,
-        None => match db::repo::position_dates(&st.pool).await?.first().copied() {
+        None => match db::repo::position_dates(&st.pool, pid).await?.first().copied() {
             Some(d) => d,
             None => return Ok(Json(Vec::new())),
         },
     };
-    Ok(Json(db::repo::ctd_for(&st.pool, date).await?))
+    Ok(Json(db::repo::ctd_for(&st.pool, pid, date).await?))
 }

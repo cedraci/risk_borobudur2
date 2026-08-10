@@ -1,17 +1,19 @@
 use crate::error::AppError;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use db::settings::AppSettings;
 
-pub async fn get(State(st): State<AppState>) -> Result<Json<AppSettings>, AppError> {
-    Ok(Json(db::settings::get_settings(&st.pool).await?))
+pub async fn get(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<AppSettings>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    Ok(Json(db::settings::get_settings(&st.pool, pid).await?))
 }
 
-pub async fn put(State(st): State<AppState>, Json(s): Json<AppSettings>) -> Result<Json<AppSettings>, AppError> {
+pub async fn put(State(st): State<AppState>, Path(pid): Path<i64>, Json(s): Json<AppSettings>) -> Result<Json<AppSettings>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, true).await?;
     validate(&s).map_err(AppError::BadRequest)?;
-    db::settings::put_settings(&st.pool, &s).await?;
-    Ok(Json(db::settings::get_settings(&st.pool).await?))
+    db::settings::put_settings(&st.pool, pid, &s).await?;
+    Ok(Json(db::settings::get_settings(&st.pool, pid).await?))
 }
 
 fn validate(s: &AppSettings) -> Result<(), String> {

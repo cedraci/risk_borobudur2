@@ -33,11 +33,15 @@ pub fn effective_bucket(defaults: &serde_json::Value, asset_type: &str, override
 /// Latest-snapshot positions merged with their instrument_refs rows,
 /// de-duplicated by code (e.g. an equity plus its dividend receivable).
 pub async fn list(State(st): State<AppState>) -> Result<Json<Vec<RefRow>>, AppError> {
-    let dates = db::repo::position_dates(&st.pool).await?;
+    // `refs` is a global route (instrument reference data is shared across
+    // portfolios), but the "latest snapshot" and liquidity-default settings it
+    // reads from are portfolio-scoped. Pass portfolio 1 explicitly for now;
+    // Task 4 replaces this with a fleet-wide union.
+    let dates = db::repo::position_dates(&st.pool, 1).await?;
     let Some(latest) = dates.first().copied() else { return Ok(Json(Vec::new())); };
-    let positions = db::repo::positions_for(&st.pool, latest).await?;
+    let positions = db::repo::positions_for(&st.pool, 1, latest).await?;
     let refs = db::repo::refs_all(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+    let settings = db::settings::get_settings(&st.pool, 1).await?;
     let by_code: HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();
 

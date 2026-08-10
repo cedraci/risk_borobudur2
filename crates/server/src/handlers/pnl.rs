@@ -4,7 +4,7 @@ use analytics::pnl::{
     self, asset_class_of, decompose, futures_pnl, group_by, is_buy, net_flows, reconcile,
     Dimension, FxLookup, InstrumentPnl, NavPoint, Trade,
 };
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::NaiveDate;
 use std::collections::{BTreeMap, HashMap};
@@ -26,14 +26,15 @@ fn snap(dates: &[NaiveDate], want: NaiveDate) -> Option<NaiveDate> {
     dates.iter().copied().find(|d| *d <= want).or_else(|| dates.last().copied())
 }
 
-pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn get(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<PnlQuery>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
     let dim = match q.dimension.as_deref() {
         None | Some("") => None,
         Some(s) => Some(Dimension::parse(s)
             .ok_or_else(|| AppError::BadRequest(format!("unknown dimension: {s}")))?),
     };
 
-    let dates = db::repo::position_dates(&st.pool).await?;
+    let dates = db::repo::position_dates(&st.pool, pid).await?;
     if dates.len() < 2 {
         return Ok(Json(serde_json::json!({
             "empty": true,
@@ -59,13 +60,13 @@ pub async fn get(State(st): State<AppState>, Query(q): Query<PnlQuery>) -> Resul
     }
     let snapshots = dates.iter().filter(|d| **d >= t0 && **d <= t1).count();
 
-    let p0 = db::repo::positions_for(&st.pool, t0).await?;
-    let p1 = db::repo::positions_for(&st.pool, t1).await?;
-    let ops = db::repo::operations_all(&st.pool).await?;
-    let divs = db::repo::dividends_all(&st.pool).await?;
+    let p0 = db::repo::positions_for(&st.pool, pid, t0).await?;
+    let p1 = db::repo::positions_for(&st.pool, pid, t1).await?;
+    let ops = db::repo::operations_all(&st.pool, pid).await?;
+    let divs = db::repo::dividends_all(&st.pool, pid).await?;
     let refs = db::repo::refs_all(&st.pool).await?;
     let fx_rows = db::repo::fx_all(&st.pool).await?;
-    let navs = db::repo::nav_rows(&st.pool).await?;
+    let navs = db::repo::nav_rows(&st.pool, pid).await?;
 
     let by_ref: HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();

@@ -44,14 +44,14 @@ async fn contracts_and_ctd_upload() {
 
     // Uploading CTD before any NAV snapshot exists is rejected, with guidance.
     let ctd = std::fs::read(CTD).unwrap();
-    let res = app.clone().oneshot(upload_req("/api/futures-analytics", "ctd.csv", &ctd)).await.unwrap();
+    let res = app.clone().oneshot(upload_req("/api/portfolios/1/futures-analytics", "ctd.csv", &ctd)).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(body["detail"].as_str().unwrap().contains("NAV Recap"), "{body}");
 
     // Import the workbook: contracts are seeded unconfirmed.
     let wb = std::fs::read(SAMPLE).unwrap();
-    let res = app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &wb)).await.unwrap();
+    let res = app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
     let (st, cs) = get_json(&app, "/api/futures-contracts").await;
@@ -85,19 +85,19 @@ async fn contracts_and_ctd_upload() {
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
     // Now the CTD file is accepted.
-    let res = app.clone().oneshot(upload_req("/api/futures-analytics", "ctd.csv", &ctd)).await.unwrap();
+    let res = app.clone().oneshot(upload_req("/api/portfolios/1/futures-analytics", "ctd.csv", &ctd)).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["rows"], 4);
     assert_eq!(body["nav_date"], "2026-07-24");
 
-    let (_, rows) = get_json(&app, "/api/futures-analytics?date=2026-07-24").await;
+    let (_, rows) = get_json(&app, "/api/portfolios/1/futures-analytics?date=2026-07-24").await;
     assert_eq!(rows.as_array().unwrap().len(), 4);
 
     // A ticker absent from that snapshot is a row error.
     let bad = "nav_date,ticker,ctd_isin,ctd_mod_duration,ctd_clean_price,ctd_accrued,conversion_factor\n\
                2026-07-24,ZZZ9 Comdty,DE0001102580,8.4,98.7,0.6,0.78\n";
-    let res = app.clone().oneshot(upload_req("/api/futures-analytics", "bad.csv", bad.as_bytes())).await.unwrap();
+    let res = app.clone().oneshot(upload_req("/api/portfolios/1/futures-analytics", "bad.csv", bad.as_bytes())).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(body["rows"][0]["message"].as_str().unwrap().contains("ZZZ9"), "{body}");

@@ -16,7 +16,7 @@ fn multipart_body(bytes: &[u8], filename: &str) -> Body {
 }
 
 fn upload_req(bytes: &[u8], filename: &str) -> Request<Body> {
-    Request::post("/api/imports")
+    Request::post("/api/portfolios/1/imports")
         .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
         .body(multipart_body(bytes, filename))
         .unwrap()
@@ -54,18 +54,18 @@ async fn upload_then_read_back() {
     let res = app.clone().oneshot(upload_req(b"not an xlsx", "junk.xlsx")).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-    let res = app.clone().oneshot(Request::get("/api/nav").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.clone().oneshot(Request::get("/api/portfolios/1/nav").body(Body::empty()).unwrap()).await.unwrap();
     let nav: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(nav.as_array().unwrap().len(), 344);
 
-    let res = app.clone().oneshot(Request::get("/api/positions").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.clone().oneshot(Request::get("/api/portfolios/1/positions").body(Body::empty()).unwrap()).await.unwrap();
     let pos: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(pos["date"], "2026-07-24");
     assert_eq!(pos["rows"].as_array().unwrap().len(), 111);
 
-    let res = app.oneshot(Request::get("/api/imports").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.oneshot(Request::get("/api/portfolios/1/imports").body(Body::empty()).unwrap()).await.unwrap();
     let imports: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(imports.as_array().unwrap().len(), 1);

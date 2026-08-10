@@ -47,10 +47,10 @@ async fn rates_includes_bond_futures_when_ctd_present() {
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     let wb = std::fs::read(SAMPLE).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
 
     // Baseline: the cash bond only. Capture it so the restatement can be checked.
-    let (_, r0) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r0) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let bond_dv01 = r0["bonds"][0]["dv01_eur"].as_f64().unwrap();
     let total0 = r0["total_dv01_eur"].as_f64().unwrap();
     assert!((total0 - bond_dv01).abs() < 1e-9, "no futures yet");
@@ -77,10 +77,10 @@ async fn rates_includes_bond_futures_when_ctd_present() {
                             spec("interest_rate", 1000.0, ccy, conv)).await, StatusCode::OK);
     }
     let ctd = std::fs::read(CTD).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
                StatusCode::OK);
 
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let futs = r["futures"].as_array().unwrap();
     assert_eq!(futs.len(), 4);
     assert!(futs.iter().all(|f| f["missing"] == false));
@@ -115,7 +115,7 @@ async fn rates_includes_bond_futures_when_ctd_present() {
     // An unknown AUM is a gap, not a zero: with no NAV row for the snapshot
     // date the sensitivity is null while the DV01 beside it stays populated.
     sqlx::query("DELETE FROM nav_history WHERE date = '2026-07-24'").execute(&pool).await.unwrap();
-    let (_, r2) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r2) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     assert!(r2["nav_sensitivity_100bp"].is_null(), "{}", r2["nav_sensitivity_100bp"]);
     assert!((r2["total_dv01_eur"].as_f64().unwrap() - total).abs() < 1e-9,
             "the DV01 itself does not depend on AUM");
@@ -137,7 +137,7 @@ async fn a_future_with_no_spec_at_all_blocks_the_completeness_claim() {
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     let wb = std::fs::read(SAMPLE).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
 
     // Confirm every root properly and supply CTD analytics, so the only thing
     // left that could be incomplete is the spec we are about to remove.
@@ -151,10 +151,10 @@ async fn a_future_with_no_spec_at_all_blocks_the_completeness_claim() {
                             spec(cat, 1000.0, ccy, conv)).await, StatusCode::OK);
     }
     let ctd = std::fs::read(CTD).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
                StatusCode::OK);
 
-    let (_, ok) = get_json(&app, "/api/metrics/rates").await;
+    let (_, ok) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     assert_eq!(ok["futures_missing_any"], false, "baseline: everything resolves");
     assert!(ok["futures_no_spec"].as_array().unwrap().is_empty());
     let total_ok = ok["total_dv01_eur"].as_f64().unwrap();
@@ -164,7 +164,7 @@ async fn a_future_with_no_spec_at_all_blocks_the_completeness_claim() {
     sqlx::query("DELETE FROM futures_contracts WHERE contract_root = 'OAT'")
         .execute(&pool).await.unwrap();
 
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let futs = r["futures"].as_array().unwrap();
     assert!(futs.iter().all(|f| !f["ticker"].as_str().unwrap().starts_with("OAT")),
             "the spec-less root is still dropped from the table: {futs:?}");
@@ -198,11 +198,11 @@ async fn confirmed_non_rate_future_drops_out_of_rates_section() {
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     let wb = std::fs::read(SAMPLE).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
 
     // Baseline: all four Comdty-suffixed roots are unconfirmed and show up
     // as missing bond futures.
-    let (_, r0) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r0) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     assert_eq!(r0["futures"].as_array().unwrap().len(), 4);
     assert_eq!(r0["futures_missing_any"], true);
 
@@ -223,10 +223,10 @@ async fn confirmed_non_rate_future_drops_out_of_rates_section() {
                             spec("interest_rate", 1000.0, ccy, conv)).await, StatusCode::OK);
     }
     let ctd = std::fs::read(CTD).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/futures-analytics", "ctd.csv", &ctd)).await.unwrap().status(),
                StatusCode::OK);
 
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let futs = r["futures"].as_array().unwrap();
     assert_eq!(futs.len(), 3, "the confirmed-`other` root must drop out entirely: {futs:?}");
     assert!(futs.iter().all(|f| !f["ticker"].as_str().unwrap().starts_with("KOA")),

@@ -10,10 +10,13 @@ use std::collections::BTreeSet;
 
 /// Export the request workbook for everything still unclassified.
 pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let dates = db::repo::position_dates(&st.pool).await?;
+    // `bloomberg/request` is a global route reading portfolio-scoped position
+    // data. Pass portfolio 1 explicitly for now; Task 4 replaces this with a
+    // fleet-wide union.
+    let dates = db::repo::position_dates(&st.pool, 1).await?;
     let latest = dates.first().copied();
     let positions = match latest {
-        Some(d) => db::repo::positions_for(&st.pool, d).await?,
+        Some(d) => db::repo::positions_for(&st.pool, 1, d).await?,
         None => Vec::new(),
     };
     let refs = db::repo::refs_all(&st.pool).await?;
@@ -44,7 +47,7 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
         });
     }
 
-    let navs = db::repo::nav_rows(&st.pool).await?;
+    let navs = db::repo::nav_rows(&st.pool, 1).await?;
     let from = navs.first().map(|n| n.date).unwrap_or_else(|| chrono::Utc::now().date_naive());
     let to = latest.unwrap_or_else(|| chrono::Utc::now().date_naive());
 
@@ -90,9 +93,10 @@ pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Jso
 
     // Cross-check the inversion against the workbook's own Change column at
     // every snapshot date. Disagreement means the pull is upside down.
+    // Portfolio 1 explicitly, as above; Task 4 replaces this.
     let mut fx_check = Vec::new();
-    for d in db::repo::position_dates(&st.pool).await? {
-        let positions = db::repo::positions_for(&st.pool, d).await?;
+    for d in db::repo::position_dates(&st.pool, 1).await? {
+        let positions = db::repo::positions_for(&st.pool, 1, d).await?;
         for o in parsed.fx.iter().filter(|o| o.date == d) {
             let Some(book) = positions.iter()
                 .find(|p| p.currency.as_deref() == Some(o.currency.as_str()) && p.fx_rate.is_some_and(|f| f > 0.0))

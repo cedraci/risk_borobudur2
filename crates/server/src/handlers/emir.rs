@@ -40,10 +40,11 @@ pub struct Assembly {
 /// then each row picks up its contract's OTC flag by root.
 async fn emir_positions(
     st: &AppState,
+    pid: i64,
     date: NaiveDate,
     specs: &[db::repo::FuturesContract],
 ) -> Result<Vec<emir::EmirPosition>, AppError> {
-    let rows = db::repo::positions_for(&st.pool, date).await?;
+    let rows = db::repo::positions_for(&st.pool, pid, date).await?;
     let snap = super::limits::future_positions(&rows, specs);
     let rep = analytics::exposure(&snap.positions, 0.0);
     Ok(rep
@@ -64,8 +65,8 @@ async fn emir_positions(
         .collect())
 }
 
-pub async fn assemble(st: &AppState, q_date: &Option<String>) -> Result<Option<Assembly>, AppError> {
-    let dates = db::repo::position_dates(&st.pool).await?;
+pub async fn assemble(st: &AppState, pid: i64, q_date: &Option<String>) -> Result<Option<Assembly>, AppError> {
+    let dates = db::repo::position_dates(&st.pool, pid).await?;
     let anchor = match q_date {
         Some(s) => Some(s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?),
         None => dates.first().copied(),
@@ -76,7 +77,7 @@ pub async fn assemble(st: &AppState, q_date: &Option<String>) -> Result<Option<A
     let mut months = Vec::with_capacity(12);
     for (month, chosen) in emir::month_window(anchor, &dates) {
         let snapshot = match chosen {
-            Some(d) => Some((d, emir_positions(st, d, &specs).await?)),
+            Some(d) => Some((d, emir_positions(st, pid, d, &specs).await?)),
             None => None,
         };
         months.push(emir::MonthSnapshot { month, snapshot });
@@ -88,7 +89,7 @@ pub async fn assemble(st: &AppState, q_date: &Option<String>) -> Result<Option<A
     let monitors = emir::monitors(anchor_cell.as_ref().map(|(_, p)| p.as_slice()).unwrap_or(&[]));
     let (margin, futures_count) = match anchor_cell.as_ref().map(|(d, _)| *d) {
         Some(d) => {
-            let rows = db::repo::positions_for(&st.pool, d).await?;
+            let rows = db::repo::positions_for(&st.pool, pid, d).await?;
             let margin = rows
                 .iter()
                 .filter(|r| r.asset_type == "Margin Acc")
@@ -106,15 +107,17 @@ pub async fn assemble(st: &AppState, q_date: &Option<String>) -> Result<Option<A
     };
 
     let report = emir::thresholds(&months);
-    let kpis = db::repo::emir_kpis_all(&st.pool).await?;
+    let kpis = db::repo::emir_kpis_all(&st.pool, pid).await?;
     Ok(Some(Assembly { dates, anchor, report, monitors, margin, futures_count, kpis, contracts: specs }))
 }
 
 pub async fn get(
     State(st): State<AppState>,
+    Path(pid): Path<i64>,
     Query(q): Query<DateQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let Some(a) = assemble(&st, &q.date).await? else {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let Some(a) = assemble(&st, pid, &q.date).await? else {
         return Ok(Json(serde_json::json!({"empty": true, "warnings": ["No snapshots imported yet."]})));
     };
     Ok(Json(serde_json::json!({
@@ -135,9 +138,11 @@ pub async fn get(
 
 pub async fn export(
     State(st): State<AppState>,
+    Path(pid): Path<i64>,
     Query(q): Query<DateQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let Some(a) = assemble(&st, &q.date).await? else {
+    let portfolio = super::portfolios::ensure(&st.pool, pid, false).await?;
+    let Some(a) = assemble(&st, pid, &q.date).await? else {
         return Err(AppError::Unprocessable(
             "no snapshots imported yet; there is nothing to evidence".into(),
         ));
@@ -190,7 +195,7 @@ pub async fn export(
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
-        &format!("attachment; filename=\"EMIR - seuils - {}.xlsx\"", a.anchor))?);
+        &format!("attachment; filename=\"EMIR - seuils - {} - {}.xlsx\"", portfolio.name, a.anchor))?);
     Ok((StatusCode::OK, h, bytes))
 }
 
@@ -204,9 +209,10 @@ pub struct KpiBody {
 
 pub async fn put_kpi(
     State(st): State<AppState>,
-    Path(month): Path<String>,
+    Path((pid, month)): Path<(i64, String)>,
     Json(b): Json<KpiBody>,
 ) -> Result<Json<db::repo::EmirKpi>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, true).await?;
     let month = month
         .parse::<NaiveDate>()
         .map_err(|_| AppError::BadRequest(format!("bad month: {month}")))?;
@@ -228,6 +234,6 @@ pub async fn put_kpi(
         disputes: b.disputes,
         note: b.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     };
-    db::repo::emir_kpi_upsert(&st.pool, &k).await?;
+    db::repo::emir_kpi_upsert(&st.pool, pid, &k).await?;
     Ok(Json(k))
 }

@@ -54,7 +54,7 @@ async fn pam_check_distinguishes_incomplete_history_from_genuine_drift() {
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     let wb = ingest::parse_workbook(&bytes).unwrap();
-    let out = db::repo::import_workbook(&pool, "sample.xlsx", "sha-pam-1", &wb).await.unwrap();
+    let out = db::repo::import_workbook(&pool, 1, "sample.xlsx", "sha-pam-1", &wb).await.unwrap();
 
     let has = |isin: &str, needle: &str| {
         out.warnings.iter().any(|w| w.starts_with(isin) && w.contains(needle))

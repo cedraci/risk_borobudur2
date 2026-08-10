@@ -12,7 +12,7 @@ fn upload_req(bytes: &[u8]) -> Request<Body> {
     ).as_bytes());
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    Request::post("/api/imports")
+    Request::post("/api/portfolios/1/imports")
         .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
         .body(Body::from(body))
         .unwrap()
@@ -98,9 +98,9 @@ async fn refs_editor_flow() {
     assert_eq!(err["status"], 422);
 
     // settings validation: bad redemption_shock -> 400
-    let (_, mut s) = get_json(&app, "/api/settings").await;
+    let (_, mut s) = get_json(&app, "/api/portfolios/1/settings").await;
     s["redemption_shock"] = serde_json::json!(1.5);
-    let (st, _) = put_json(&app, "/api/settings", s).await;
+    let (st, _) = put_json(&app, "/api/portfolios/1/settings", s).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     pool.close().await;

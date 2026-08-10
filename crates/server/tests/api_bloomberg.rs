@@ -53,15 +53,15 @@ async fn app_with_sample() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     let bytes = std::fs::read(SAMPLE).unwrap();
-    assert_eq!(app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &bytes)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &bytes)).await.unwrap().status(), StatusCode::OK);
 
     let earliest: chrono::NaiveDate = sqlx::query_scalar("SELECT MIN(date) FROM nav_history")
         .fetch_one(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO position_snapshots
-             (nav_date, import_id, asset_type, isin, name, currency, quantity,
+             (portfolio_id, nav_date, import_id, asset_type, isin, name, currency, quantity,
               avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
-         SELECT $1, import_id, asset_type, isin, name, currency, quantity,
+         SELECT portfolio_id, $1, import_id, asset_type, isin, name, currency, quantity,
                 avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker
          FROM position_snapshots WHERE nav_date = (SELECT MAX(nav_date) FROM position_snapshots)",
     )
@@ -136,7 +136,7 @@ async fn upload_stores_classifications_and_reports_unresolved_cells() {
         .any(|e| e["message"].as_str().unwrap().contains("gics_industry")), "{body}");
 
     // The stored value must now appear in the P&L grouping.
-    let pnl = get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01&dimension=sector").await;
+    let pnl = get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01&dimension=sector").await;
     let keys: Vec<String> = pnl["groups"].as_array().unwrap().iter()
         .map(|g| g["key"].as_str().unwrap().to_string()).collect();
     assert!(keys.iter().any(|k| k == "Consumer Discretionary"), "got {keys:?}");

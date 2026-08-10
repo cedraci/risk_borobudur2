@@ -13,7 +13,7 @@ fn upload_req(bytes: &[u8]) -> Request<Body> {
     ).as_bytes());
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    Request::post("/api/imports")
+    Request::post("/api/portfolios/1/imports")
         .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
         .body(Body::from(body)).unwrap()
 }
@@ -70,12 +70,12 @@ async fn duplicate_import_restores_exposure_on_a_pre_existing_database() {
     // Rewind to an upgraded installation: positions on record, specs absent.
     sqlx::query("DELETE FROM futures_contracts").execute(&pool).await.unwrap();
 
-    let (_, broken) = get_json(&app, "/api/metrics/derivatives").await;
+    let (_, broken) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert_eq!(broken["rows"].as_array().unwrap().len(), 8);
     assert_eq!(broken["excluded"].as_array().unwrap().len(), 8, "nothing is computable");
     assert!((broken["total"]["gross_pct"].as_f64().unwrap()).abs() < 1e-12);
     // The rates section must not claim completeness in this state (I1).
-    let (_, broken_rates) = get_json(&app, "/api/metrics/rates").await;
+    let (_, broken_rates) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     assert_eq!(broken_rates["futures"].as_array().unwrap().len(), 0);
     assert_eq!(broken_rates["futures_missing_any"], true,
                "four bond futures are held and none was evaluated");
@@ -91,7 +91,7 @@ async fn duplicate_import_restores_exposure_on_a_pre_existing_database() {
     assert_eq!(out["positions"], 0, "and nothing is re-ingested");
     assert_eq!(out["warnings"].as_array().unwrap().len(), 8, "eight roots re-seeded: {out}");
 
-    let (_, seeded) = get_json(&app, "/api/metrics/derivatives").await;
+    let (_, seeded) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert_eq!(seeded["unconfirmed"].as_array().unwrap().len(), 8, "seeded, needing confirmation");
     assert!(seeded["excluded"].as_array().unwrap().is_empty(), "every row is computable again");
 
@@ -100,7 +100,7 @@ async fn duplicate_import_restores_exposure_on_a_pre_existing_database() {
         assert_eq!(put_json(&app, &format!("/api/futures-contracts/{root}"), spec(cat, pv, ccy, conv)).await,
                    StatusCode::OK, "{root}");
     }
-    let (_, d) = get_json(&app, "/api/metrics/derivatives").await;
+    let (_, d) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert!((d["total"]["gross_pct"].as_f64().unwrap() - 0.255045).abs() < 1e-5,
             "25.5045% of net assets, as verified from the workbook: {}", d["total"]);
 
@@ -119,7 +119,7 @@ async fn derivatives_exposure_on_sample() {
     assert_eq!(app.clone().oneshot(upload_req(&bytes)).await.unwrap().status(), StatusCode::OK);
 
     // Seeded but unconfirmed: rows are listed and flagged.
-    let (st, d) = get_json(&app, "/api/metrics/derivatives").await;
+    let (st, d) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(d["date"], "2026-07-24");
     assert_eq!(d["rows"].as_array().unwrap().len(), 8);
@@ -140,7 +140,7 @@ async fn derivatives_exposure_on_sample() {
                    StatusCode::OK, "{root}");
     }
 
-    let (_, d) = get_json(&app, "/api/metrics/derivatives").await;
+    let (_, d) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert!(d["unconfirmed"].as_array().unwrap().is_empty());
     assert!(d["rows"].as_array().unwrap().iter().all(|r| r["unconfirmed"] == false), "{}", d["rows"]);
     assert!(d["excluded"].as_array().unwrap().is_empty());
@@ -192,7 +192,7 @@ async fn derivatives_exposure_on_sample() {
         StatusCode::OK,
     );
 
-    let (_, d2) = get_json(&app, "/api/metrics/derivatives").await;
+    let (_, d2) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert_eq!(d2["rows"].as_array().unwrap().len(), 8, "the row stays listed");
     let cf_row = d2["rows"].as_array().unwrap().iter()
         .find(|r| r["ticker"] == "CFQ6 Index").unwrap();
@@ -212,7 +212,7 @@ async fn derivatives_exposure_on_sample() {
         "{}", d2["total"]);
 
     // Bad date -> 400, consistent with the other limits endpoints.
-    let (st, _) = get_json(&app, "/api/metrics/derivatives?date=notadate").await;
+    let (st, _) = get_json(&app, "/api/portfolios/1/metrics/derivatives?date=notadate").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     pool.close().await;

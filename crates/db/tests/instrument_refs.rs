@@ -41,7 +41,7 @@ async fn refs_upsert_seed_and_no_overwrite() {
     db::repo::refs_upsert(&pool, &user).await.unwrap();
 
     let wb = ingest::parse_workbook(&fixture_bytes()).unwrap();
-    db::repo::import_workbook(&pool, "sample.xlsx", "sha-refs-test", &wb).await.unwrap();
+    db::repo::import_workbook(&pool, 1, "sample.xlsx", "sha-refs-test", &wb).await.unwrap();
 
     let all = db::repo::refs_all(&pool).await.unwrap();
     let bond = all.iter().find(|x| x.code == "US105756CL22").unwrap();
