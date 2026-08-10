@@ -115,6 +115,78 @@ async fn bond_with_country_but_no_sector_is_not_re_requested() {
 }
 
 #[tokio::test]
+async fn request_unions_unclassified_across_portfolios() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let bytes = std::fs::read(SAMPLE).unwrap();
+
+    async fn create_mandate(app: &axum::Router, name: &str) -> i64 {
+        let res = app.clone().oneshot(
+            Request::post("/api/portfolios")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"name": name, "kind": "mandate"}).to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        body["id"].as_i64().unwrap()
+    }
+
+    // Portfolio 1 stays empty for the whole test. Portfolio 2 gets the
+    // sample workbook — request must still union its unclassified
+    // instruments, not just portfolio 1's (empty) latest snapshot.
+    let pid2 = create_mandate(&app, "Mandat Alpha").await;
+    assert_eq!(pid2, 2);
+    let res = app.clone().oneshot(upload_req(&format!("/api/portfolios/{pid2}/imports"), "s.xlsx", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (status, _, resp_bytes) = get_bytes(&app, "/api/bloomberg/request").await;
+    assert_eq!(status, 200);
+    let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(resp_bytes)).unwrap();
+    let range = wb.worksheet_range("REFS").unwrap();
+    let isins: Vec<String> = range.rows().skip(1)
+        .filter_map(|r| r.first().and_then(|c| c.get_string()).map(str::to_string))
+        .collect();
+    assert!(isins.iter().any(|i| i == "FR0000121014"),
+        "sample instrument from portfolio 2 missing from the fleet-wide union: {isins:?}");
+
+    // Portfolio 3, archived: excluded from the walk by construction, and a
+    // mutating request (import) against it is refused outright.
+    let pid3 = create_mandate(&app, "Mandat Beta").await;
+    assert_eq!(pid3, 3);
+    let res = app.clone().oneshot(
+        Request::put(format!("/api/portfolios/{pid3}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name": "Mandat Beta", "archived": true}).to_string()))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.clone().oneshot(upload_req(&format!("/api/portfolios/{pid3}/imports"), "s.xlsx", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // Classify one ISIN directly (as bond_with_country_but_no_sector... does
+    // for its bond) and confirm it drops out of a fresh request: refs are
+    // shared/global, so the classification serves every portfolio.
+    sqlx::query("UPDATE instrument_refs SET country_of_risk = 'US' WHERE code = 'US105756CL22'")
+        .execute(&pool).await.unwrap();
+
+    let (status, _, resp_bytes2) = get_bytes(&app, "/api/bloomberg/request").await;
+    assert_eq!(status, 200);
+    let mut wb2: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(resp_bytes2)).unwrap();
+    let range2 = wb2.worksheet_range("REFS").unwrap();
+    let isins2: Vec<String> = range2.rows().skip(1)
+        .filter_map(|r| r.first().and_then(|c| c.get_string()).map(str::to_string))
+        .collect();
+    assert!(!isins2.iter().any(|i| i == "US105756CL22"), "classified bond re-requested: {isins2:?}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
 async fn upload_stores_classifications_and_reports_unresolved_cells() {
     let (app, pool, edb) = app_with_sample().await;
 

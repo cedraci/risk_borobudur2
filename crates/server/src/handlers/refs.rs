@@ -30,44 +30,48 @@ pub fn effective_bucket(defaults: &serde_json::Value, asset_type: &str, override
         .unwrap_or_else(|| "d1".into())
 }
 
-/// Latest-snapshot positions merged with their instrument_refs rows,
-/// de-duplicated by code (e.g. an equity plus its dividend receivable).
+/// Every non-archived portfolio's latest-snapshot positions merged with
+/// their instrument_refs rows, de-duplicated by code across the whole
+/// fleet (e.g. an equity plus its dividend receivable, or the same
+/// instrument held by more than one portfolio) — the editor is per
+/// instrument, so where a code appears in several portfolios the first
+/// portfolio walked (by id) wins for display context fields (name,
+/// asset_type, effective_bucket via that portfolio's own liquidity
+/// defaults).
 pub async fn list(State(st): State<AppState>) -> Result<Json<Vec<RefRow>>, AppError> {
-    // `refs` is a global route (instrument reference data is shared across
-    // portfolios), but the "latest snapshot" and liquidity-default settings it
-    // reads from are portfolio-scoped. Pass portfolio 1 explicitly for now;
-    // Task 4 replaces this with a fleet-wide union.
-    let dates = db::repo::position_dates(&st.pool, 1).await?;
-    let Some(latest) = dates.first().copied() else { return Ok(Json(Vec::new())); };
-    let positions = db::repo::positions_for(&st.pool, 1, latest).await?;
     let refs = db::repo::refs_all(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool, 1).await?;
     let by_code: HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();
 
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut rows = Vec::new();
-    for p in &positions {
-        if !seen.insert(p.isin.as_str()) { continue; }
-        let name = p.name.clone().unwrap_or_default();
-        let r = by_code.get(p.isin.as_str());
-        let issuer_group_override = r.and_then(|r| r.issuer_group.clone());
-        let bucket_override = r.and_then(|r| r.liquidity_bucket.clone());
-        rows.push(RefRow {
-            code: p.isin.clone(),
-            effective_issuer_group: issuer_group_override
-                .clone()
-                .unwrap_or_else(|| analytics::default_issuer_group(&p.asset_type, &name)),
-            issuer_group_override,
-            effective_bucket: effective_bucket(&settings.liquidity_defaults, &p.asset_type, bucket_override.as_deref()),
-            bucket_override,
-            bond_coupon_pct: r.and_then(|r| r.bond_coupon_pct),
-            bond_maturity: r.and_then(|r| r.bond_maturity),
-            bond_coupon_freq: r.and_then(|r| r.bond_coupon_freq),
-            is_bond: p.asset_type == "Obligation",
-            asset_type: p.asset_type.clone(),
-            name,
-        });
+    for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
+        let dates = db::repo::position_dates(&st.pool, pf.id).await?;
+        let Some(latest) = dates.first().copied() else { continue };
+        let positions = db::repo::positions_for(&st.pool, pf.id, latest).await?;
+        let settings = db::settings::get_settings(&st.pool, pf.id).await?;
+        for p in &positions {
+            if !seen.insert(p.isin.clone()) { continue; }
+            let name = p.name.clone().unwrap_or_default();
+            let r = by_code.get(p.isin.as_str());
+            let issuer_group_override = r.and_then(|r| r.issuer_group.clone());
+            let bucket_override = r.and_then(|r| r.liquidity_bucket.clone());
+            rows.push(RefRow {
+                code: p.isin.clone(),
+                effective_issuer_group: issuer_group_override
+                    .clone()
+                    .unwrap_or_else(|| analytics::default_issuer_group(&p.asset_type, &name)),
+                issuer_group_override,
+                effective_bucket: effective_bucket(&settings.liquidity_defaults, &p.asset_type, bucket_override.as_deref()),
+                bucket_override,
+                bond_coupon_pct: r.and_then(|r| r.bond_coupon_pct),
+                bond_maturity: r.and_then(|r| r.bond_maturity),
+                bond_coupon_freq: r.and_then(|r| r.bond_coupon_freq),
+                is_bond: p.asset_type == "Obligation",
+                asset_type: p.asset_type.clone(),
+                name,
+            });
+        }
     }
     Ok(Json(rows))
 }

@@ -37,6 +37,56 @@ async fn put_json(app: &axum::Router, uri: &str, body: serde_json::Value) -> (St
     (status, body)
 }
 
+fn upload_req_to(uri: &str, bytes: &[u8]) -> Request<Body> {
+    let mut body = Vec::new();
+    body.extend_from_slice(format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"s.xlsx\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    ).as_bytes());
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    Request::post(uri)
+        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn refs_list_unions_instruments_held_only_by_another_portfolio() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    // Portfolio 1 stays empty for the whole test. The sample is imported
+    // into portfolio 2 only — the editor context must still show its
+    // instruments, since it walks every non-archived portfolio's latest
+    // snapshot, not just portfolio 1's.
+    let res = app.clone().oneshot(
+        Request::post("/api/portfolios")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name": "Mandat Alpha", "kind": "mandate"}).to_string()))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let created: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let pid2 = created["id"].as_i64().unwrap();
+    assert_eq!(pid2, 2);
+
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
+    let res = app.clone().oneshot(upload_req_to(&format!("/api/portfolios/{pid2}/imports"), &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (st, rows) = get_json(&app, "/api/refs").await;
+    assert_eq!(st, StatusCode::OK);
+    let rows = rows.as_array().unwrap();
+    assert!(rows.iter().any(|r| r["code"] == "FR0000121014"),
+        "instrument held only by portfolio 2 missing from the fleet-wide union: {rows:?}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 #[tokio::test]
 async fn refs_editor_flow() {
     let dir = tempfile::tempdir().unwrap();
