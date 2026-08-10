@@ -63,22 +63,38 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const getSummary = () => req<Summary>("/api/metrics/summary");
-export const getNav = () => req<NavRow[]>("/api/nav");
-export const getRolling = (window: number) => req<Rolling>(`/api/metrics/rolling?window=${window}`);
-export const getDrawdowns = () => req<Drawdowns>("/api/metrics/drawdowns");
-export const getCalendar = () => req<Calendar>("/api/metrics/calendar");
-export const getVar = (p: { confidence: number; horizon: number; window: number }) =>
-  req<VarResp>(`/api/metrics/var?confidence=${p.confidence}&horizon=${p.horizon}&window=${p.window}`);
-export const getPositions = (date?: string) => req<Positions>(`/api/positions${date ? `?date=${date}` : ""}`);
-export const getImports = () => req<ImportRec[]>("/api/imports");
-export const getSettings = () => req<Settings>("/api/settings");
-export const putSettings = (s: Settings) =>
-  req<Settings>("/api/settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(s) });
-export const uploadFile = (f: File) => {
+export interface Portfolio {
+  id: number; name: string; kind: "ucits" | "mandate"; archived: boolean;
+  latest_nav_date: string | null;
+}
+export const getPortfolios = () => req<Portfolio[]>("/api/portfolios");
+export const createPortfolio = (name: string, kind: "ucits" | "mandate") =>
+  req<Portfolio>("/api/portfolios", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, kind }),
+  });
+export const updatePortfolio = (id: number, name: string, archived: boolean) =>
+  req<Portfolio>(`/api/portfolios/${id}`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, archived }),
+  });
+
+export const getSummary = (pid: number) => req<Summary>(`/api/portfolios/${pid}/metrics/summary`);
+export const getNav = (pid: number) => req<NavRow[]>(`/api/portfolios/${pid}/nav`);
+export const getRolling = (pid: number, window: number) =>
+  req<Rolling>(`/api/portfolios/${pid}/metrics/rolling?window=${window}`);
+export const getDrawdowns = (pid: number) => req<Drawdowns>(`/api/portfolios/${pid}/metrics/drawdowns`);
+export const getCalendar = (pid: number) => req<Calendar>(`/api/portfolios/${pid}/metrics/calendar`);
+export const getVar = (pid: number, p: { confidence: number; horizon: number; window: number }) =>
+  req<VarResp>(`/api/portfolios/${pid}/metrics/var?confidence=${p.confidence}&horizon=${p.horizon}&window=${p.window}`);
+export const getPositions = (pid: number, date?: string) =>
+  req<Positions>(`/api/portfolios/${pid}/positions${date ? `?date=${date}` : ""}`);
+export const getImports = (pid: number) => req<ImportRec[]>(`/api/portfolios/${pid}/imports`);
+export const getSettings = (pid: number) => req<Settings>(`/api/portfolios/${pid}/settings`);
+export const putSettings = (pid: number, s: Settings) =>
+  req<Settings>(`/api/portfolios/${pid}/settings`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(s) });
+export const uploadFile = (pid: number, f: File) => {
   const fd = new FormData();
   fd.append("file", f);
-  return req<ImportOutcome>("/api/imports", { method: "POST", body: fd });
+  return req<ImportOutcome>(`/api/portfolios/${pid}/imports`, { method: "POST", body: fd });
 };
 
 export type Bucket = "d1" | "d2_7" | "d8_30" | "d30p";
@@ -164,18 +180,19 @@ export interface CtdRecord {
 }
 export interface CtdUploadOutcome { nav_date: string; rows: number; replaced: boolean }
 
-export const getDerivatives = (date?: string) =>
-  req<Derivatives>(`/api/metrics/derivatives${date ? `?date=${date}` : ""}`);
+export const getDerivatives = (pid: number, date?: string) =>
+  req<Derivatives>(`/api/portfolios/${pid}/metrics/derivatives${date ? `?date=${date}` : ""}`);
 export const getFuturesContracts = () => req<FuturesContract[]>("/api/futures-contracts");
 export const putFuturesContract = (root: string, body: Omit<FuturesContract, "contract_root">) =>
   req<FuturesContract>(`/api/futures-contracts/${root}`, {
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
-export const getCtd = (date?: string) => req<CtdRecord[]>(`/api/futures-analytics${date ? `?date=${date}` : ""}`);
-export const uploadCtd = (f: File) => {
+export const getCtd = (pid: number, date?: string) =>
+  req<CtdRecord[]>(`/api/portfolios/${pid}/futures-analytics${date ? `?date=${date}` : ""}`);
+export const uploadCtd = (pid: number, f: File) => {
   const fd = new FormData();
   fd.append("file", f);
-  return req<CtdUploadOutcome>("/api/futures-analytics", { method: "POST", body: fd });
+  return req<CtdUploadOutcome>(`/api/portfolios/${pid}/futures-analytics`, { method: "POST", body: fd });
 };
 
 export type PnlDimension =
@@ -216,8 +233,8 @@ export interface Pnl {
   warnings: string[];
 }
 
-export const getPnl = (p: { from: string; to: string; dimension: PnlDimension }) =>
-  req<Pnl>(`/api/pnl?from=${p.from}&to=${p.to}&dimension=${p.dimension}`);
+export const getPnl = (pid: number, p: { from: string; to: string; dimension: PnlDimension }) =>
+  req<Pnl>(`/api/portfolios/${pid}/pnl?from=${p.from}&to=${p.to}&dimension=${p.dimension}`);
 
 export const bloombergRequestUrl = "/api/bloomberg/request";
 export interface BloombergUpload {
@@ -230,13 +247,13 @@ export const uploadBloomberg = (f: File) => {
   return req<BloombergUpload>("/api/bloomberg/upload", { method: "POST", body: fd });
 };
 
-export const getConcentration = (date?: string) =>
-  req<Concentration>(`/api/metrics/concentration${date ? `?date=${date}` : ""}`);
-export const getLiquidity = (date?: string) =>
-  req<Liquidity>(`/api/metrics/liquidity${date ? `?date=${date}` : ""}`);
-export const getRates = (date?: string) =>
-  req<Rates>(`/api/metrics/rates${date ? `?date=${date}` : ""}`);
-export const getBacktest = () => req<Backtest>("/api/metrics/backtest");
+export const getConcentration = (pid: number, date?: string) =>
+  req<Concentration>(`/api/portfolios/${pid}/metrics/concentration${date ? `?date=${date}` : ""}`);
+export const getLiquidity = (pid: number, date?: string) =>
+  req<Liquidity>(`/api/portfolios/${pid}/metrics/liquidity${date ? `?date=${date}` : ""}`);
+export const getRates = (pid: number, date?: string) =>
+  req<Rates>(`/api/portfolios/${pid}/metrics/rates${date ? `?date=${date}` : ""}`);
+export const getBacktest = (pid: number) => req<Backtest>(`/api/portfolios/${pid}/metrics/backtest`);
 export const getRefs = () => req<RefRow[]>("/api/refs");
 export const putRef = (code: string, body: RefBody) =>
   req<unknown>(`/api/refs/${code}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -291,10 +308,10 @@ export interface EmirResponse {
   kpis?: EmirKpi[];
   otc_note?: string;
 }
-export const getEmir = (date?: string) =>
-  req<EmirResponse>(`/api/emir${date ? `?date=${date}` : ""}`);
-export const putEmirKpi = (month: string, body: Omit<EmirKpi, "month">) =>
-  req<EmirKpi>(`/api/emir/kpis/${month}`, {
+export const getEmir = (pid: number, date?: string) =>
+  req<EmirResponse>(`/api/portfolios/${pid}/emir${date ? `?date=${date}` : ""}`);
+export const putEmirKpi = (pid: number, month: string, body: Omit<EmirKpi, "month">) =>
+  req<EmirKpi>(`/api/portfolios/${pid}/emir/kpis/${month}`, {
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
-export const emirExportUrl = "/api/emir/export";
+export const emirExportUrl = (pid: number) => `/api/portfolios/${pid}/emir/export`;

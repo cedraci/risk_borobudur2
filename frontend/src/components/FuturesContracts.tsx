@@ -4,6 +4,7 @@ import {
   ApiError, type FuturesContract, type CtdRecord, type Category,
 } from "../api";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 import { CATEGORY_LABELS as LABELS, num } from "../fmt";
 
 const CATEGORIES: Category[] = ["equity", "interest_rate", "fx", "credit", "commodity", "other"];
@@ -17,8 +18,9 @@ const BLANK_SPEC: NewSpec = {
 };
 
 export default function FuturesContracts() {
+  const portfolio = usePortfolio();
   const contracts = useFetch(() => getFuturesContracts(), []);
-  const ctd = useFetch(() => getCtd(), []);
+  const ctd = useFetch(() => getCtd(portfolio.id), [portfolio.id]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [msg, setMsg] = useState<string | null>(null);
   const [savingRoot, setSavingRoot] = useState<string | null>(null);
@@ -111,7 +113,7 @@ export default function FuturesContracts() {
     setUploadMsg(null);
     setUploadErr(null);
     try {
-      const out = await uploadCtd(f);
+      const out = await uploadCtd(portfolio.id, f);
       setUploadMsg(`${out.rows} row(s) stored for ${out.nav_date}${out.replaced ? " (replaced)" : ""}.`);
       ctd.reload();
     } catch (e) {

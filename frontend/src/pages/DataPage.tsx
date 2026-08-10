@@ -6,18 +6,20 @@ import {
 import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 import { eur, num, pct } from "../fmt";
 
 export default function DataPage() {
+  const portfolio = usePortfolio();
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
   const [uploadErr, setUploadErr] = useState<{ msg: string; rows?: { sheet: string; row: number; message: string }[] } | null>(null);
   const [posDate, setPosDate] = useState<string | undefined>(undefined);
 
-  const imports = useFetch(() => getImports(), []);
-  const positions = useFetch(() => getPositions(posDate), [posDate]);
-  const settings = useFetch(() => getSettings(), []);
+  const imports = useFetch(() => getImports(portfolio.id), [portfolio.id]);
+  const positions = useFetch(() => getPositions(portfolio.id, posDate), [portfolio.id, posDate]);
+  const settings = useFetch(() => getSettings(portfolio.id), [portfolio.id]);
   const refs = useFetch(() => getRefs(), []);
 
   async function doUpload(f: File) {
@@ -25,7 +27,7 @@ export default function DataPage() {
     setOutcome(null);
     setUploadErr(null);
     try {
-      setOutcome(await uploadFile(f));
+      setOutcome(await uploadFile(portfolio.id, f));
       imports.reload();
       positions.reload();
     } catch (e) {
@@ -137,6 +139,7 @@ export default function DataPage() {
 }
 
 function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSaved: () => void }) {
+  const portfolio = usePortfolio();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const s = draft ?? settings;
@@ -161,7 +164,7 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
         <label>Redemption stress % <input type="number" step="5" value={(s.redemption_shock * 100).toFixed(0)}
           onChange={(e) => set({ redemption_shock: Number(e.target.value) / 100 })} /></label>
         <button disabled={!draft} onClick={() => {
-          putSettings(s).then(() => { setDraft(null); setMsg("Saved."); onSaved(); },
+          putSettings(portfolio.id, s).then(() => { setDraft(null); setMsg("Saved."); onSaved(); },
             (e) => setMsg(`Error: ${e.detail ?? e.message}`));
         }}>Save</button>
         {msg && <span>{msg}</span>}

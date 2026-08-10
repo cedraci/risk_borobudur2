@@ -1,9 +1,11 @@
 import { getDerivatives } from "../api";
 import { CATEGORY_LABELS as LABELS, eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 export default function DerivativesExposure({ date }: { date?: string }) {
-  const d = useFetch(() => getDerivatives(date), [date]);
+  const portfolio = usePortfolio();
+  const d = useFetch(() => getDerivatives(portfolio.id, date), [portfolio.id, date]);
   const data = d.data;
   // Any excluded contract is a position whose notional could not be computed,
   // so every figure below is a lower bound, not a total. Say so on the number

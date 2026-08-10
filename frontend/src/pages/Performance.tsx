@@ -1,6 +1,7 @@
 import { getCalendar, getDrawdowns, type PeriodReturn } from "../api";
 import { pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -21,8 +22,9 @@ function byYear(rows: PeriodReturn[]): Map<number, Map<number, number>> {
 }
 
 export default function Performance() {
-  const cal = useFetch(() => getCalendar(), []);
-  const dd = useFetch(() => getDrawdowns(), []);
+  const portfolio = usePortfolio();
+  const cal = useFetch(() => getCalendar(portfolio.id), [portfolio.id]);
+  const dd = useFetch(() => getDrawdowns(portfolio.id), [portfolio.id]);
   const monthly = byYear(cal.data?.monthly ?? []);
   const quarterly = byYear(cal.data?.quarterly ?? []);
   const annual = new Map((cal.data?.annual ?? []).map((r) => [r.year, r.value]));

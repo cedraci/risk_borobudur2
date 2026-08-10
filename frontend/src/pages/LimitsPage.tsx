@@ -3,6 +3,7 @@ import { getConcentration, getLiquidity, getRates, type Check, type CheckStatus 
 import EChart from "../components/EChart";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 const STATUS_LABEL: Record<CheckStatus, string> = { ok: "OK", watch: "WATCH", breach: "BREACH" };
 
@@ -47,10 +48,11 @@ const BUCKET_LABELS: Record<string, string> = {
 };
 
 export default function LimitsPage() {
+  const portfolio = usePortfolio();
   const [date, setDate] = useState<string | undefined>(undefined);
-  const conc = useFetch(() => getConcentration(date), [date]);
-  const liq = useFetch(() => getLiquidity(date), [date]);
-  const rates = useFetch(() => getRates(date), [date]);
+  const conc = useFetch(() => getConcentration(portfolio.id, date), [portfolio.id, date]);
+  const liq = useFetch(() => getLiquidity(portfolio.id, date), [portfolio.id, date]);
+  const rates = useFetch(() => getRates(portfolio.id, date), [portfolio.id, date]);
 
   return (
     <div>
