@@ -17,9 +17,9 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
         None => Vec::new(),
     };
     let refs = db::repo::refs_all(&st.pool).await?;
-    let classified: BTreeSet<&str> = refs.iter()
-        .filter(|r| r.country_of_risk.is_some() && r.gics_sector.is_some())
-        .map(|r| r.code.as_str())
+    // (has country, has sector) per instrument code.
+    let ref_state: std::collections::BTreeMap<&str, (bool, bool)> = refs.iter()
+        .map(|r| (r.code.as_str(), (r.country_of_risk.is_some(), r.gics_sector.is_some())))
         .collect();
 
     let mut items: Vec<RequestItem> = Vec::new();
@@ -32,7 +32,12 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
         // unclassified is exported — the workbook resolves its own ticker
         // from the ISIN, so nothing is skipped for lack of one.
         if !matches!(p.asset_type.as_str(), "Action" | "Fonds" | "Obligation") { continue; }
-        if classified.contains(p.isin.as_str()) { continue; }
+        // Bloomberg publishes no GICS classification for Corp/Govt
+        // securities, so a bond is fully classified once its country is
+        // known; requiring a sector would re-list every bond forever.
+        let (has_country, has_sector) =
+            ref_state.get(p.isin.as_str()).copied().unwrap_or((false, false));
+        if has_country && (has_sector || p.asset_type == "Obligation") { continue; }
         items.push(RequestItem {
             isin: p.isin.clone(),
             market_sector: market_sector_for(asset_class_of(&p.asset_type)).to_string(),

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use calamine::Reader;
+use calamine::{DataType, Reader};
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
@@ -82,6 +82,33 @@ async fn request_endpoint_returns_a_readable_workbook() {
     assert!(ctype.contains("spreadsheet"), "got {ctype}");
     let wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
     assert!(calamine::Reader::sheet_names(&wb).iter().any(|n| n == "REFS"));
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn bond_with_country_but_no_sector_is_not_re_requested() {
+    let (app, pool, edb) = app_with_sample().await;
+
+    // Bloomberg never returns a GICS sector for Corp/Govt securities, so a
+    // bond is as classified as it can get once its country is known. An
+    // equity in the same state is still missing real data and must stay in
+    // the request list.
+    sqlx::query("UPDATE instrument_refs SET country_of_risk = 'BR' WHERE code = 'US105756CL22'")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE instrument_refs SET country_of_risk = 'FR' WHERE code = 'FR0000121014'")
+        .execute(&pool).await.unwrap();
+
+    let (status, _, bytes) = get_bytes(&app, "/api/bloomberg/request").await;
+    assert_eq!(status, 200);
+    let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+    let range = wb.worksheet_range("REFS").unwrap();
+    let isins: Vec<String> = range.rows().skip(1)
+        .filter_map(|r| r.first().and_then(|c| c.get_string()).map(str::to_string))
+        .collect();
+    assert!(!isins.iter().any(|i| i == "US105756CL22"), "bond re-requested: {isins:?}");
+    assert!(isins.iter().any(|i| i == "FR0000121014"), "equity dropped: {isins:?}");
 
     pool.close().await;
     edb.stop().await;
