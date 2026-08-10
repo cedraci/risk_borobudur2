@@ -15,6 +15,7 @@ async fn contracts_round_trip() {
         curve: Some("DE-10y".into()),
         price_convention: "decimal".into(),
         confirmed: true,
+        otc: false,
     };
     db::repo::contracts_upsert(&pool, &c).await.unwrap();
 

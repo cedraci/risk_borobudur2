@@ -226,10 +226,10 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
 
 /// Futures positions for a snapshot, joined to their contract specs, with
 /// prices decoded.
-struct FuturesSnapshot {
-    positions: Vec<analytics::FuturePosition>,
+pub(crate) struct FuturesSnapshot {
+    pub(crate) positions: Vec<analytics::FuturePosition>,
     /// Roots whose spec exists but the user has not confirmed yet.
-    unconfirmed: Vec<String>,
+    pub(crate) unconfirmed: Vec<String>,
     /// Tickers of `Future` rows with no resolvable spec at all: the root is
     /// absent from `futures_contracts`, or the ticker would not parse into one.
     /// Such a row is neither `interest_rate` nor `unconfirmed`, so the rates
@@ -238,7 +238,7 @@ struct FuturesSnapshot {
     no_spec: Vec<String>,
 }
 
-fn future_positions(
+pub(crate) fn future_positions(
     rows: &[db::repo::PositionRecord],
     specs: &[db::repo::FuturesContract],
 ) -> FuturesSnapshot {

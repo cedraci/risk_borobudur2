@@ -1,4 +1,5 @@
 pub mod bloomberg;
+pub mod emir_file;
 pub mod futures_file;
 pub use futures_file::{CtdRow, parse_ctd_file};
 

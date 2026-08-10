@@ -13,7 +13,7 @@ type Draft = Partial<Omit<FuturesContract, "contract_root" | "confirmed">>;
 type NewSpec = { contract_root: string } & Omit<FuturesContract, "contract_root" | "confirmed">;
 const BLANK_SPEC: NewSpec = {
   contract_root: "", label: "", category: "other", point_value: null,
-  currency: "EUR", curve: null, price_convention: "decimal",
+  currency: "EUR", curve: null, price_convention: "decimal", otc: false,
 };
 
 export default function FuturesContracts() {
@@ -45,6 +45,7 @@ export default function FuturesContracts() {
       currency: d.currency !== undefined ? d.currency : r.currency,
       curve: d.curve !== undefined ? d.curve : r.curve,
       price_convention: d.price_convention !== undefined ? d.price_convention : r.price_convention,
+      otc: d.otc !== undefined ? d.otc : r.otc,
     };
   }
 
@@ -146,7 +147,7 @@ export default function FuturesContracts() {
         <thead>
           <tr>
             <th>Root</th><th>Label</th><th>Category</th><th>Point value</th>
-            <th>Ccy</th><th>Curve</th><th>Price convention</th><th>Status</th><th></th>
+            <th>Ccy</th><th>Curve</th><th>Price convention</th><th>OTC</th><th>Status</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -199,6 +200,14 @@ export default function FuturesContracts() {
                   </select>
                 </td>
                 <td>
+                  <input
+                    type="checkbox"
+                    checked={effective(r).otc}
+                    onChange={(e) => setDraft(r.contract_root, { otc: e.target.checked })}
+                    title="EMIR: tick if this contract is OTC (executed on a non-equivalent venue or bilaterally). Only OTC notional counts toward the clearing thresholds."
+                  />
+                </td>
+                <td>
                   {r.confirmed ? <span className="pos">confirmed</span> : <span className="warn-badge">unconfirmed</span>}
                 </td>
                 <td>
@@ -235,7 +244,7 @@ export default function FuturesContracts() {
             <thead>
               <tr>
                 <th>Root</th><th>Label</th><th>Category</th><th>Point value</th>
-                <th>Ccy</th><th>Curve</th><th>Price convention</th><th></th>
+                <th>Ccy</th><th>Curve</th><th>Price convention</th><th>OTC</th><th></th>
               </tr>
             </thead>
             <tbody>
@@ -286,6 +295,14 @@ export default function FuturesContracts() {
                     <option value="decimal">decimal</option>
                     <option value="th32">th32 (32nds)</option>
                   </select>
+                </td>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={adding.otc}
+                    onChange={(e) => setAdding({ ...adding, otc: e.target.checked })}
+                    title="EMIR: tick if this contract is OTC (executed on a non-equivalent venue or bilaterally). Only OTC notional counts toward the clearing thresholds."
+                  />
                 </td>
                 <td>
                   <button

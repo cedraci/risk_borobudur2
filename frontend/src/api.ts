@@ -156,6 +156,7 @@ export interface Derivatives {
 export interface FuturesContract {
   contract_root: string; label: string; category: Category; point_value: number | null;
   currency: string; curve: string | null; price_convention: "decimal" | "th32"; confirmed: boolean;
+  otc: boolean;
 }
 export interface CtdRecord {
   nav_date: string; ticker: string; ctd_isin: string; ctd_mod_duration: number;
@@ -239,3 +240,61 @@ export const getBacktest = () => req<Backtest>("/api/metrics/backtest");
 export const getRefs = () => req<RefRow[]>("/api/refs");
 export const putRef = (code: string, body: RefBody) =>
   req<unknown>(`/api/refs/${code}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+export type EmirVerdict = "ok" | "watch" | "breach";
+export interface EmirMonthCell {
+  month: string;
+  snapshot_date: string | null;
+  total_eur: number | null;
+  otc_eur: number | null;
+}
+export interface EmirClass {
+  class: string;
+  label: string;
+  threshold_eur: number;
+  months: EmirMonthCell[];
+  avg_total_eur: number;
+  avg_otc_eur: number;
+  pct_of_threshold: number;
+  verdict: EmirVerdict;
+}
+export interface EmirMonitors {
+  otc_open_contracts: number;
+  reconciliation: "not_triggered" | "quarterly" | "weekly" | "daily";
+  compression_required: boolean;
+}
+export interface EmirMarginLine {
+  name: string | null;
+  currency: string | null;
+  valuation_ccy: number | null;
+  valuation_eur: number | null;
+}
+export interface EmirKpi {
+  month: string;
+  unconfirmed_over_5d: number;
+  reconciliation: "done" | "not_done" | "not_applicable";
+  disputes: number;
+  note: string | null;
+}
+export interface EmirResponse {
+  empty?: boolean;
+  dates?: string[];
+  date?: string;
+  months_present?: number;
+  months_total?: number;
+  classes?: EmirClass[];
+  warnings: string[];
+  monitors?: EmirMonitors;
+  monitors_note?: string;
+  margin?: EmirMarginLine[];
+  futures_count?: number;
+  kpis?: EmirKpi[];
+  otc_note?: string;
+}
+export const getEmir = (date?: string) =>
+  req<EmirResponse>(`/api/emir${date ? `?date=${date}` : ""}`);
+export const putEmirKpi = (month: string, body: Omit<EmirKpi, "month">) =>
+  req<EmirKpi>(`/api/emir/kpis/${month}`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+export const emirExportUrl = "/api/emir/export";

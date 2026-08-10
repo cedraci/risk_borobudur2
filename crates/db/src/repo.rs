@@ -445,10 +445,11 @@ pub struct FuturesContract {
     pub curve: Option<String>,
     pub price_convention: String,
     pub confirmed: bool,
+    pub otc: bool,
 }
 
 const SELECT_CONTRACTS: &str = "SELECT contract_root, label, category,
-        point_value::float8 AS point_value, currency, curve, price_convention, confirmed
+        point_value::float8 AS point_value, currency, curve, price_convention, confirmed, otc
      FROM futures_contracts ORDER BY contract_root";
 
 pub async fn contracts_all(pool: &PgPool) -> anyhow::Result<Vec<FuturesContract>> {
@@ -459,8 +460,8 @@ pub async fn contracts_all(pool: &PgPool) -> anyhow::Result<Vec<FuturesContract>
 pub async fn contracts_upsert(pool: &PgPool, c: &FuturesContract) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO futures_contracts
-           (contract_root, label, category, point_value, currency, curve, price_convention, confirmed, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           (contract_root, label, category, point_value, currency, curve, price_convention, confirmed, otc, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
          ON CONFLICT (contract_root) DO UPDATE SET
            label = EXCLUDED.label,
            category = EXCLUDED.category,
@@ -469,10 +470,12 @@ pub async fn contracts_upsert(pool: &PgPool, c: &FuturesContract) -> anyhow::Res
            curve = EXCLUDED.curve,
            price_convention = EXCLUDED.price_convention,
            confirmed = EXCLUDED.confirmed,
+           otc = EXCLUDED.otc,
            updated_at = now()",
     )
     .bind(&c.contract_root).bind(&c.label).bind(&c.category).bind(c.point_value)
     .bind(&c.currency).bind(&c.curve).bind(&c.price_convention).bind(c.confirmed)
+    .bind(c.otc)
     .execute(pool)
     .await?;
     Ok(())
@@ -646,6 +649,49 @@ pub async fn classify_upsert_many(
     }
     tx.commit().await?;
     Ok(n)
+}
+
+// ---- EMIR monthly KPIs ----
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct EmirKpi {
+    /// First day of the calendar month the record describes.
+    pub month: NaiveDate,
+    pub unconfirmed_over_5d: i32,
+    pub reconciliation: String,
+    pub disputes: i32,
+    pub note: Option<String>,
+}
+
+pub async fn emir_kpis_all(pool: &PgPool) -> anyhow::Result<Vec<EmirKpi>> {
+    Ok(sqlx::query_as::<_, EmirKpi>(
+        "SELECT month, unconfirmed_over_5d, reconciliation, disputes, note
+         FROM emir_kpis ORDER BY month DESC",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Full-row replace, like `contracts_upsert`: every field is written as given.
+pub async fn emir_kpi_upsert(pool: &PgPool, k: &EmirKpi) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO emir_kpis (month, unconfirmed_over_5d, reconciliation, disputes, note)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (month) DO UPDATE SET
+           unconfirmed_over_5d = EXCLUDED.unconfirmed_over_5d,
+           reconciliation = EXCLUDED.reconciliation,
+           disputes = EXCLUDED.disputes,
+           note = EXCLUDED.note,
+           updated_at = now()",
+    )
+    .bind(k.month)
+    .bind(k.unconfirmed_over_5d)
+    .bind(&k.reconciliation)
+    .bind(k.disputes)
+    .bind(&k.note)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

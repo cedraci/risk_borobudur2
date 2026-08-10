@@ -35,7 +35,7 @@ async fn put_json(app: &axum::Router, uri: &str, payload: serde_json::Value) -> 
 fn spec(cat: &str, pv: f64, ccy: &str, conv: &str) -> serde_json::Value {
     serde_json::json!({
         "label": "x", "category": cat, "point_value": pv, "currency": ccy,
-        "curve": null, "price_convention": conv, "confirmed": true,
+        "curve": null, "price_convention": conv, "confirmed": true, "otc": false,
     })
 }
 

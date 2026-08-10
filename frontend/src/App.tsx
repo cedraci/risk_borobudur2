@@ -5,6 +5,7 @@ import PnlPage from "./pages/PnlPage";
 import Risk from "./pages/Risk";
 import VarPage from "./pages/VarPage";
 import LimitsPage from "./pages/LimitsPage";
+import DerivativesPage from "./pages/DerivativesPage";
 import DataPage from "./pages/DataPage";
 
 const links = [
@@ -14,6 +15,7 @@ const links = [
   { to: "/risk", label: "Risk" },
   { to: "/var", label: "VaR / ES" },
   { to: "/limits", label: "Limits" },
+  { to: "/derivatives", label: "Derivatives" },
   { to: "/data", label: "Data" },
 ];
 
@@ -35,6 +37,7 @@ export default function App() {
             <Route path="/risk" element={<Risk />} />
             <Route path="/var" element={<VarPage />} />
             <Route path="/limits" element={<LimitsPage />} />
+            <Route path="/derivatives" element={<DerivativesPage />} />
             <Route path="/data" element={<DataPage />} />
           </Routes>
         </main>
