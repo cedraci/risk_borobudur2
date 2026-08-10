@@ -387,6 +387,10 @@ mod tests {
         assert_eq!(eq.months[1].snapshot_date, None);
         assert!((eq.avg_total_eur - 250.0).abs() < 1e-9); // (140+360)/2
         assert!((eq.avg_otc_eur - 50.0).abs() < 1e-9); // (40+60)/2
+        // pct_of_threshold is avg_otc_eur / threshold_eur, not avg_total_eur /
+        // threshold_eur — avg_total_eur (250.0) is distinct and non-zero here,
+        // so a total<->OTC mixup in the pct calculation would fail this.
+        assert_eq!(eq.pct_of_threshold, 50.0 / 1e9);
         assert!(r.warnings.iter().any(|w| w.contains("2026-06") && w.contains("no snapshot")));
         // A class with no positions averages to zero, verdict OK.
         let fx = r.classes.iter().find(|c| c.class == ThresholdClass::Fx).unwrap();

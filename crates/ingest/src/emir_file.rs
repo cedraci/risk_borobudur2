@@ -59,6 +59,7 @@ pub struct EmirEvidence {
 pub fn build_evidence(e: &EmirEvidence) -> anyhow::Result<Vec<u8>> {
     let mut wb = Workbook::new();
     let bold = Format::new().set_bold();
+    let pct_fmt = Format::new().set_num_format("0.0%");
 
     // ---- Seuils ----
     let s = wb.add_worksheet();
@@ -81,7 +82,7 @@ pub fn build_evidence(e: &EmirEvidence) -> anyhow::Result<Vec<u8>> {
         s.write_string(row, 0, &r.label)?;
         s.write_number(row, 1, r.threshold_eur)?;
         s.write_number(row, 2, r.avg_otc_eur)?;
-        s.write_number(row, 3, r.pct_of_threshold)?;
+        s.write_number_with_format(row, 3, r.pct_of_threshold, &pct_fmt)?;
         s.write_string(row, 4, &r.verdict)?;
         s.write_number(row, 5, r.avg_total_eur)?;
         row += 1;

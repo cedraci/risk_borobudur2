@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use calamine::Reader;
+use calamine::{DataType, Reader};
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
@@ -156,6 +156,53 @@ async fn evidence_export_round_trips() {
     let c = calamine::Reader::worksheet_range(&mut wb, "Contrats").unwrap();
     // Header + the 8 seeded contracts.
     assert_eq!(c.rows().count(), 9, "{:?}", c.rows().collect::<Vec<_>>());
+
+    // Flag RX (interest-rate) OTC and confirmed, as in emir_report_on_sample,
+    // so the interest-rate class carries a non-zero, non-degenerate avg OTC
+    // that differs from its avg total. Then tie the server-computed figures
+    // through to the exported Seuils summary row: a swap of avg_otc/avg_total
+    // in the server->emir_file mapping (handlers/emir.rs `export`) would flip
+    // these two numbers and fail this assertion.
+    let (status, _) = put_json(&app, "/api/futures-contracts/RX", serde_json::json!({
+        "label": "Euro-Bund", "category": "interest_rate", "point_value": 1000.0,
+        "currency": "EUR", "curve": null, "price_convention": "decimal",
+        "confirmed": true, "otc": true,
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    // Also put the US 10yr note future (TY) in the interest-rate class, but
+    // NOT OTC, so the class's avg total genuinely exceeds its avg OTC (both
+    // non-zero and distinct) rather than the two collapsing onto the same
+    // number, which would make a swapped-column bug invisible to this test.
+    let (status, _) = put_json(&app, "/api/futures-contracts/TY", serde_json::json!({
+        "label": "US 10YR NOTE", "category": "interest_rate", "point_value": 1081.73076923078,
+        "currency": "USD", "curve": null, "price_convention": "decimal",
+        "confirmed": true, "otc": false,
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get_json(&app, "/api/emir").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ir = body["classes"].as_array().unwrap().iter().find(|c| c["class"] == "interest_rate").unwrap();
+    let payload_avg_otc = ir["avg_otc_eur"].as_f64().unwrap();
+    let payload_avg_total = ir["avg_total_eur"].as_f64().unwrap();
+    assert!(payload_avg_otc > 0.0, "{ir}");
+    assert_ne!(payload_avg_otc, payload_avg_total, "{ir}");
+
+    let (status, ctype, bytes) = get_bytes(&app, "/api/emir/export").await;
+    assert_eq!(status, 200);
+    assert!(ctype.contains("spreadsheet"), "got {ctype}");
+    let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
+    let s = calamine::Reader::worksheet_range(&mut wb, "Seuils").unwrap();
+    // The summary block lists each class once, in ThresholdClass::ALL order
+    // (Credit, Equity, InterestRate, Fx, CommodityOther), before the detail
+    // block repeats the label per month — so the first row whose label
+    // matches is the summary row.
+    let ir_row = s.rows().find(|r| matches!(&r[0], calamine::Data::String(s) if s == "Interest-rate derivatives"))
+        .expect("Interest-rate derivatives summary row");
+    let sheet_avg_otc = ir_row[2].as_f64().expect("avg OTC cell is numeric");
+    let sheet_avg_total = ir_row[5].as_f64().expect("avg total cell is numeric");
+    assert_eq!(sheet_avg_otc, payload_avg_otc, "avg-OTC column mismatch: {ir_row:?}");
+    assert_eq!(sheet_avg_total, payload_avg_total, "avg-total column mismatch: {ir_row:?}");
 
     pool.close().await;
     edb.stop().await;
