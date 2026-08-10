@@ -91,7 +91,7 @@ export default function DerivativesPage() {
             {(data?.dates ?? []).map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         </label>
-        <a href={emirExportUrl} download>Export evidence workbook</a>
+        <a href={date ? `${emirExportUrl}?date=${date}` : emirExportUrl} download>Export evidence workbook</a>
       </div>
       {emir.error && <p className="neg">{emir.error}</p>}
       {!data && !emir.error && <p>Loading…</p>}
