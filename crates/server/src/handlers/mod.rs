@@ -6,5 +6,6 @@ pub mod imports;
 pub mod limits;
 pub mod metrics;
 pub mod pnl;
+pub mod portfolios;
 pub mod refs;
 pub mod settings;

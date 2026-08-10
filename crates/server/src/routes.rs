@@ -34,6 +34,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/bloomberg/request", get(handlers::bloomberg::request))
         .route("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload))
+        .route("/api/portfolios", get(handlers::portfolios::list).post(handlers::portfolios::create))
+        .route("/api/portfolios/{id}", axum::routing::put(handlers::portfolios::update))
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .fallback(crate::static_assets::static_handler)
         .with_state(state)

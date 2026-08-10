@@ -694,6 +694,45 @@ pub async fn emir_kpi_upsert(pool: &PgPool, k: &EmirKpi) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- portfolios ----
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct Portfolio {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub archived: bool,
+    /// Latest imported NAV date, the freshness signal for selector/overview.
+    pub latest_nav_date: Option<chrono::NaiveDate>,
+}
+
+const SELECT_PORTFOLIO: &str = "SELECT p.id, p.name, p.kind, p.archived,
+    (SELECT max(nav_date) FROM imports i WHERE i.portfolio_id = p.id) AS latest_nav_date
+ FROM portfolios p";
+
+pub async fn portfolios_list(pool: &PgPool) -> anyhow::Result<Vec<Portfolio>> {
+    Ok(sqlx::query_as(&format!("{SELECT_PORTFOLIO} ORDER BY p.id")).fetch_all(pool).await?)
+}
+
+pub async fn portfolio_get(pool: &PgPool, id: i64) -> anyhow::Result<Option<Portfolio>> {
+    Ok(sqlx::query_as(&format!("{SELECT_PORTFOLIO} WHERE p.id = $1"))
+        .bind(id).fetch_optional(pool).await?)
+}
+
+pub async fn portfolio_create(pool: &PgPool, name: &str, kind: &str) -> anyhow::Result<Portfolio> {
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO portfolios (name, kind) VALUES ($1, $2) RETURNING id")
+        .bind(name).bind(kind).fetch_one(pool).await?;
+    Ok(portfolio_get(pool, id).await?.expect("just inserted"))
+}
+
+pub async fn portfolio_update(pool: &PgPool, id: i64, name: &str, archived: bool) -> anyhow::Result<Option<Portfolio>> {
+    let n = sqlx::query("UPDATE portfolios SET name = $2, archived = $3 WHERE id = $1")
+        .bind(id).bind(name).bind(archived).execute(pool).await?.rows_affected();
+    if n == 0 { return Ok(None); }
+    portfolio_get(pool, id).await
+}
+
 #[cfg(test)]
 mod pam_warnings_tests {
     //! Unit-level pin for the two silent-skip paths in `pam_warnings`, using
