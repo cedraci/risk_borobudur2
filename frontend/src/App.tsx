@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import {
-  BrowserRouter, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams,
+  BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams,
 } from "react-router-dom";
 import { getPortfolios, type Portfolio } from "./api";
 import { useFetch } from "./hooks";
@@ -30,10 +30,12 @@ const links = [
 function RootRedirect({ portfolios }: { portfolios: Portfolio[] }) {
   const active = portfolios.filter((p) => !p.archived);
   if (active.length === 0) {
+    const first = portfolios[0];
     return (
       <div className="layout">
         <main className="content">
           <p>No active portfolios yet.</p>
+          {first && <p><Link to={`/p/${first.id}/data`}>Manage portfolios</Link></p>}
         </main>
       </div>
     );
@@ -78,7 +80,7 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
             <NavLink key={l.to} to={`${prefix}${l.to}`} end={l.to === ""}>{l.label}</NavLink>
           ))}
         </nav>
-        <main className="content">
+        <main className="content" key={portfolio.id}>
           <Routes>
             <Route path="" element={<Overview />} />
             <Route path="performance" element={<Performance />} />
