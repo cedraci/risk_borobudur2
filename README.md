@@ -1,9 +1,10 @@
 # Borobudur Risk
 
-Local risk-monitoring dashboard for the Borobudur UCITS fund. Imports the
-periodic "NAV Recap" .xlsx into an embedded PostgreSQL and serves analytics
-(YTD, volatility, Sharpe, drawdowns, monthly/quarterly tables, VaR/ES with
-UCITS 99%/20d monitoring) at http://127.0.0.1:8787.
+Local risk-monitoring dashboard for several portfolios — UCITS funds and
+mandates, each analyzed independently. Imports the periodic "NAV Recap" .xlsx
+into an embedded PostgreSQL and serves analytics (YTD, volatility, Sharpe,
+drawdowns, monthly/quarterly tables, VaR/ES with UCITS 99%/20d monitoring) at
+http://127.0.0.1:8787. Existing data lives on the built-in Borobudur portfolio.
 
 ## Build
 
@@ -21,6 +22,7 @@ automatically; go to the Data page and upload the NAV Recap workbook.
 
 ## Weekly workflow
 
+0. Pick the portfolio in the nav. Uploads land in the portfolio you are viewing.
 1. Upload the NAV Recap on the Data page. New futures contracts are seeded with a
    point value derived from the file and flagged unconfirmed; confirm each one
    once, setting its category, curve and price convention. US Treasury futures are
@@ -69,6 +71,15 @@ re-uploaded — nothing is stored until every row passes.
 
 ## Features
 
+- **Portfolios**: create, rename, and archive/restore portfolios on the Data
+  page. Everything under a portfolio — imports, NAV history, positions,
+  dividends, operations, CTD analytics, EMIR KPIs, settings including
+  redemption stress — is scoped to it; instrument reference data (classifications,
+  issuer groups, liquidity, bond statics, futures contract specs, FX rates) is
+  shared across all portfolios. The Bloomberg request workbook and its FX
+  cross-check on upload cover every active portfolio's latest snapshot in one
+  pass. An archived portfolio stays readable but refuses new data, and drops
+  out of the nav selector.
 - **Limits page**: UCITS concentration checks (issuer 5/10/40, connected group 20%,
   target fund 20%, deposits 20% per bank) with OK/WATCH/BREACH statuses; liquidity
   bucketing (1d / 2–7d / 8–30d / >30d) with a configurable redemption stress; bond
@@ -91,8 +102,9 @@ re-uploaded — nothing is stored until every row passes.
   compression trigger from the OTC contract count (conservatively assuming a
   single counterparty), shows margin-account balances, records monthly
   middle-office KPIs (confirmations > 5 days, reconciliation status,
-  disputes), and exports the full calculation as an `.xlsx` evidence file for
-  archiving per the EMIR procedure.
+  disputes), and exports the full calculation as an `.xlsx` evidence file
+  (`EMIR - seuils - {portfolio name} - {anchor}.xlsx`) for archiving per the
+  EMIR procedure.
 - **NAV sensitivity per +100bp**: signed as profit and loss, `-100 × Σ DV01 ÷ AUM`
   at the snapshot's own NAV date. Negative means net assets fall if yields rise
   100bp (the book is long rates); positive means they rise. It covers the cash
