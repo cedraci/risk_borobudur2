@@ -31,8 +31,10 @@ automatically; go to the Data page and upload the NAV Recap workbook.
 2. Upload the CTD companion file for the same NAV date. Re-uploading replaces that
    date's rows, so a corrected pull simply overwrites.
 3. On the Data page's Bloomberg classification panel, export the request workbook.
-   It lists every equity/fund/bond position still missing a country or sector plus
-   every non-EUR currency held, with `BDP`/`BDH` formulas that only resolve on a
+   It lists every equity/fund/bond position still missing a country or sector
+   (bonds only need a country — Bloomberg publishes no GICS classification for
+   Corp/Govt securities, so they graduate off the list once the country is
+   stored) plus every non-EUR currency held, with `BDP`/`BDH` formulas that only resolve on a
    machine with a logged-in Bloomberg Terminal add-in — open the file in Excel
    there, let the formulas fill in, save, and upload the result back. The upload
    classifies instruments by country/region/sector/industry, stores the FX rates,
