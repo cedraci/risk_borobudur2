@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
-  ApiError, getImports, getPositions, getSettings, getRefs, putRef, putSettings, uploadFile,
-  type ImportOutcome, type Settings,
+  ApiError, getImports, getPositions, getSettings, getRefs, putRef, putSettings, uploadFiles,
+  type FileImportResult, type Settings,
 } from "../api";
 import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
@@ -15,8 +15,8 @@ export default function DataPage() {
   const reloadPortfolios = useReloadPortfolios();
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
-  const [uploadErr, setUploadErr] = useState<{ msg: string; rows?: { sheet: string; row: number; message: string }[] } | null>(null);
+  const [results, setResults] = useState<FileImportResult[] | null>(null);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
   const [posDate, setPosDate] = useState<string | undefined>(undefined);
 
   const imports = useFetch(() => getImports(portfolio.id), [portfolio.id]);
@@ -24,17 +24,18 @@ export default function DataPage() {
   const settings = useFetch(() => getSettings(portfolio.id), [portfolio.id]);
   const refs = useFetch(() => getRefs(), []);
 
-  async function doUpload(f: File) {
+  async function doUpload(files: File[]) {
+    if (files.length === 0) return;
     setBusy(true);
-    setOutcome(null);
+    setResults(null);
     setUploadErr(null);
     try {
-      setOutcome(await uploadFile(portfolio.id, f));
+      setResults(await uploadFiles(portfolio.id, files));
       imports.reload();
       positions.reload();
     } catch (e) {
       const ae = e as ApiError;
-      setUploadErr({ msg: ae.detail ?? ae.message, rows: ae.rows });
+      setUploadErr(ae.detail ?? ae.message);
     } finally {
       setBusy(false);
     }
@@ -53,41 +54,55 @@ export default function DataPage() {
         onDrop={(e) => {
           e.preventDefault();
           setOver(false);
-          const f = e.dataTransfer.files[0];
-          if (f) void doUpload(f);
+          void doUpload(Array.from(e.dataTransfer.files));
         }}
       >
-        <h3>NAV Recap — {portfolio.name}</h3>
-        <p>{busy ? "Importing…" : "Drop the NAV Recap .xlsx here, or"}</p>
+        <h3>Import — {portfolio.name}</h3>
+        <p>{busy ? "Importing…" : "Drop files here (NAV Recap .xlsx, CACEIS HISINVLUX / HISTOVLLUX .csv) — CACEIS files auto-route to the portfolio mapped to their fund code."}</p>
         <input
           type="file"
-          accept=".xlsx"
+          accept=".xlsx,.csv"
+          multiple
           disabled={busy}
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) void doUpload(f); }}
+          onChange={(e) => void doUpload(Array.from(e.target.files ?? []))}
         />
-        {outcome && (
-          <>
-            <p className="pos">
-              {outcome.duplicate
-                ? outcome.warnings.length > 0
-                  ? "Already imported (identical file) — nothing re-imported, but futures contract specs were checked and any missing ones seeded (see below)."
-                  : "Already imported (identical file) — nothing changed."
-                : `Imported: ${outcome.nav_rows} NAV rows, ${outcome.positions} positions, ${outcome.dividends} dividends, ${outcome.operations} operations${outcome.div_ops_replaced ? "" : " (older file: dividends/operations left untouched)"}.`}
-            </p>
-            {outcome.warnings.map((w, i) => <p key={i} className="warn-badge">{w}</p>)}
-          </>
-        )}
-        {uploadErr && (
-          <div className="neg">
-            <p>Import failed: {uploadErr.msg}</p>
-            {uploadErr.rows && (
-              <table className="tbl"><tbody>
-                {uploadErr.rows.slice(0, 20).map((r, i) => (
-                  <tr key={i}><td>{r.sheet}</td><td>row {r.row}</td><td>{r.message}</td></tr>
-                ))}
-              </tbody></table>
-            )}
-          </div>
+        {uploadErr && <p className="neg">Upload failed: {uploadErr}</p>}
+        {results && (
+          <table className="tbl">
+            <thead><tr><th>File</th><th>Kind</th><th>Portfolio</th><th>Result</th></tr></thead>
+            <tbody>
+              {results.map((r, i) => (
+                <tr key={i}>
+                  <td>{r.filename}</td>
+                  <td>{r.kind ?? "—"}</td>
+                  <td>{r.portfolio_name ?? "—"}</td>
+                  <td>
+                    {r.error ? (
+                      <>
+                        <span className="neg">{r.error}</span>
+                        {r.error_rows && (
+                          <table className="tbl"><tbody>
+                            {r.error_rows.slice(0, 10).map((er, j) => (
+                              <tr key={j}><td>{er.sheet}</td><td>row {er.row}</td><td>{er.message}</td></tr>
+                            ))}
+                          </tbody></table>
+                        )}
+                      </>
+                    ) : r.outcome ? (
+                      <>
+                        <span className="pos">
+                          {r.outcome.duplicate
+                            ? "Already imported (identical file)."
+                            : `Imported: ${r.outcome.nav_rows} NAV rows, ${r.outcome.positions} positions, ${r.outcome.dividends} dividends, ${r.outcome.operations} operations.`}
+                        </span>
+                        {r.outcome.warnings.map((w, j) => <p key={j} className="warn-badge">{w}</p>)}
+                      </>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 

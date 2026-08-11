@@ -91,11 +91,25 @@ export const getImports = (pid: number) => req<ImportRec[]>(`/api/portfolios/${p
 export const getSettings = (pid: number) => req<Settings>(`/api/portfolios/${pid}/settings`);
 export const putSettings = (pid: number, s: Settings) =>
   req<Settings>(`/api/portfolios/${pid}/settings`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(s) });
-export const uploadFile = (pid: number, f: File) => {
+export interface FileImportResult {
+  filename: string;
+  kind: string | null;
+  portfolio_id: number | null;
+  portfolio_name: string | null;
+  outcome: ImportOutcome | null;
+  error: string | null;
+  error_rows: { sheet: string; row: number; message: string }[] | null;
+}
+export const uploadFiles = (pid: number, files: File[]) => {
   const fd = new FormData();
-  fd.append("file", f);
-  return req<ImportOutcome>(`/api/portfolios/${pid}/imports`, { method: "POST", body: fd });
+  for (const f of files) fd.append("file", f);
+  return req<FileImportResult[]>(`/api/portfolios/${pid}/imports`, { method: "POST", body: fd });
 };
+
+export interface PortfolioCode { portfolio_id: number; source: string; code: string }
+export const getCodes = (pid: number) => req<PortfolioCode[]>(`/api/portfolios/${pid}/codes`);
+export const putCodes = (pid: number, codes: { source: string; code: string }[]) =>
+  req<PortfolioCode[]>(`/api/portfolios/${pid}/codes`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(codes) });
 
 export type Bucket = "d1" | "d2_7" | "d8_30" | "d30p";
 export type CheckStatus = "ok" | "watch" | "breach";

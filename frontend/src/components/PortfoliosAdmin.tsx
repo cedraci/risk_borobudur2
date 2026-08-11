@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ApiError, createPortfolio, getPortfolios, updatePortfolio, type Portfolio } from "../api";
+import { ApiError, createPortfolio, getCodes, getPortfolios, putCodes, updatePortfolio, type Portfolio } from "../api";
 import { useFetch } from "../hooks";
 
 const KINDS: Portfolio["kind"][] = ["ucits", "mandate"];
@@ -102,7 +102,7 @@ export default function PortfoliosAdmin({ onChange }: { onChange?: () => void })
 
       <table className="tbl">
         <thead>
-          <tr><th>Name</th><th>Kind</th><th>Latest NAV</th><th>Status</th><th></th></tr>
+          <tr><th>Name</th><th>Kind</th><th>CACEIS code</th><th>Latest NAV</th><th>Status</th><th></th></tr>
         </thead>
         <tbody>
           {rows.map((p) => {
@@ -125,6 +125,7 @@ export default function PortfoliosAdmin({ onChange }: { onChange?: () => void })
                   )}
                 </td>
                 <td>{p.kind}</td>
+                <td><CodeCell portfolioId={p.id} /></td>
                 <td>{p.latest_nav_date ?? "—"}</td>
                 <td>
                   {p.archived ? <span className="warn-badge">archived</span> : <span className="pos">active</span>}
@@ -161,5 +162,40 @@ export default function PortfoliosAdmin({ onChange }: { onChange?: () => void })
         <button disabled={creating || !newName.trim()} onClick={() => void doCreate()}>Create</button>
       </div>
     </div>
+  );
+}
+
+function CodeCell({ portfolioId }: { portfolioId: number }) {
+  const codes = useFetch(() => getCodes(portfolioId), [portfolioId]);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const current = codes.data?.find((c) => c.source === "caceis")?.code ?? "";
+  const value = draft ?? current;
+  const dirty = draft !== null && draft.trim() !== current;
+  async function save() {
+    setErr(null);
+    try {
+      const others = (codes.data ?? []).filter((c) => c.source !== "caceis")
+        .map((c) => ({ source: c.source, code: c.code }));
+      const next = value.trim() ? [...others, { source: "caceis", code: value.trim() }] : others;
+      await putCodes(portfolioId, next);
+      setDraft(null);
+      codes.reload();
+    } catch (e) {
+      const ae = e as ApiError;
+      setErr(ae.detail ?? ae.message);
+    }
+  }
+  return (
+    <>
+      <input
+        style={{ width: 80 }}
+        placeholder="fund code"
+        value={value}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <button disabled={!dirty} onClick={() => void save()}>Save</button>
+      {err && <span className="neg"> {err}</span>}
+    </>
   );
 }
