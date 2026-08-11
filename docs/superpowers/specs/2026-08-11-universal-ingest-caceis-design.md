@@ -29,9 +29,15 @@ Decisions taken during brainstorming:
   decomposition). JOUROPLUX (transaction journal) is NOT received.
 - INVXDVLUX duplicates HISINVLUX for our needs → recognized but rejected
   as "not needed" in v1.
-- Operations (subscriptions/redemptions) are **derived** from HISTOVLLUX
-  day-over-day share deltas; dividends are **derived** from HISINVLUX CPON
-  receivable deltas (user's explicit choice over requesting JOUROPLUX).
+- The tool's `operations` are instrument trades (Achat/Vente) feeding
+  realized P&L — not subscriptions/redemptions, which nothing consumes.
+  The user will **request JOUROPLUX** (transaction journal) from CACEIS to
+  feed trades exactly; until a sample file exists its parser cannot be
+  written, so the adapter reserves the slot (recognized by filename,
+  rejected with "parser pending — provide a sample file"). Until then
+  CSV-fed portfolios carry no trade journal: P&L shows price/FX effects
+  and flags missing trade history via its existing warnings. Dividends are
+  **derived** from HISINVLUX CPON receivable deltas (sample-verified).
 - The NAV Recap remains supported as adapter #1 (refactored behind the same
   contract) — not needed in the daily CSV flow, useful for history
   backfill. Daily operation needs only HISINVLUX + HISTOVLLUX.
@@ -52,14 +58,17 @@ In scope:
 3. Auto-routing of self-identifying files via a new `portfolio_codes`
    mapping table, editable in the Portfolios admin card.
 4. Multi-file upload (one request, per-file results).
-5. Derived operations and dividends with a `derived` flag; explicit rows
-   always win.
+5. Derived dividends (from CPON deltas) with a `derived` flag; explicit
+   rows always win. No derived operations: trades await JOUROPLUX
+   (recognized, parser pending a sample file).
 6. Reference hints: risk country + Bloomberg ticker from CACEIS lines
    pre-fill `instrument_refs` where NULL.
 7. Cross-file TNA consistency check (warning).
 
 Out of scope: any other depositary; a mapping-config UI; multi share
-class portfolios (hard error for now); JOUROPLUX/INVXDVLUX parsing;
+class portfolios (hard error for now); JOUROPLUX parsing (no sample file
+yet — the user is requesting the feed from CACEIS; the adapter recognizes
+the filename and rejects it with "parser pending"); INVXDVLUX parsing;
 multi-currency portfolio bases (EUR assumption unchanged); mandate limit
 profiles (phase 3).
 
@@ -74,8 +83,13 @@ pipeline writes to the database:
   `PositionRow` is the existing struct, unchanged: asset_type, isin/code,
   name, currency, quantity, avg_cost, price, valuation_ccy,
   accrued_interest, fx_rate, valuation_eur, weight, ticker.
-- `operations`: `{date, label, amount}`.
-- `dividends`: `{date, isin, name, amount}`.
+- `operations`: the existing trade rows (`trade_date, side, ticker, isin,
+  name, currency, quantity, price, gross_amount, fees, net_price,
+  net_amount`) — Achat/Vente journal feeding realized P&L. Produced today
+  only by the NAV Recap adapter; the future JOUROPLUX parser feeds it for
+  CSV portfolios.
+- `dividends`: the existing rows (`provision_date, payment_date, issuer,
+  amount, currency`).
 - `ref_hints`: `{isin, country_of_risk?, ticker?}` — optional enrichment
   applied to the shared `instrument_refs` **only where the target field is
   currently NULL**; Bloomberg-sourced data is never overwritten. Bonds
@@ -99,7 +113,8 @@ Each source is a module in `crates/ingest` implementing:
 
 - `detect(filename, bytes) -> Option<FileKind>` — "is this file mine,
   which family?" CACEIS claims `HISINVLUX_*.csv` / `HISTOVLLUX_*.csv`
-  (and recognizes `INVXDVLUX_*.csv` to reject it with "not needed"),
+  (and recognizes `INVXDVLUX_*.csv` to reject it with "not needed", and
+  `JOUROPLUX_*.csv` to reject it with "parser pending a sample file"),
   with a content sanity check (semicolon count, `yyyymmdd` dates) so a
   renamed random file cannot slip through. The NAV Recap adapter claims
   `.xlsx` with the `PORTEFEUILLE_NAV`/`HISTO_NAV` sheet set. Unrecognized
@@ -188,27 +203,32 @@ class not supported yet"), never a silent sum.
 
 ## Derived datasets
 
-**Operations (from HISTOVLLUX).** A pure function of the NAV series: for
-each pair of consecutive NAV points, a shares-outstanding change beyond
-0.001 share produces an operation of `delta_shares × new NAV`, labeled
-Souscription (delta > 0) or Rachat (delta < 0), dated at the newer point.
-Every HISTOVLLUX import **re-derives the whole derived set** for that
-portfolio from the series in the database — deterministic and
-order-independent: uploading a backlog in any order converges. Derived
-rows carry `derived = true`; a date holding an explicit (file-sourced)
-operation is skipped, so sources never double-count.
+**Trades: none derived.** The `operations` journal is fed only by explicit
+sources (NAV Recap today; JOUROPLUX once CACEIS delivers it and a sample
+file lets the parser be written). CSV-fed portfolios meanwhile run P&L
+without trades — price/FX effects only, with the engine's existing
+missing-history warnings signaling the gap. No inference of trades from
+snapshot deltas (considered, rejected by the user in favor of the real
+journal).
 
-**Dividends (from CPON deltas).** Same recompute-from-consecutive-
-snapshots principle: a CPON line that appears or grows produces a dividend
-event for that ISIN, dated at the newer snapshot. Change detection runs on
-the **local-currency value** (col 51), so FX moves on a foreign-currency
-receivable emit nothing; the recorded amount is the EUR delta.
-Disappearance of a receivable (payment settled to cash) emits nothing.
-Derived rows flagged and skipped where explicit NAV Recap dividends exist,
-same rule as operations.
+**Dividends (from CPON deltas).** A pure function of consecutive
+HISINVLUX snapshots: a CPON line that appears or grows produces a dividend
+event, dated at the newer snapshot — `provision_date` = snapshot date,
+`payment_date` = NULL, `issuer` = the CPON line's name, `currency` = its
+asset currency. Change detection runs on the **local-currency value**
+(col 51), so FX moves on a foreign-currency receivable emit nothing; the
+recorded amount is the local-currency delta. Disappearance of a receivable
+(payment settled to cash) emits nothing. Every HISINVLUX import
+**re-derives the whole derived set** for the portfolio from the snapshots
+in the database — deterministic and order-independent: uploading a backlog
+in any order converges. Derived rows carry `derived = true`; a portfolio
+date holding explicit (NAV Recap) dividends is skipped, so sources never
+double-count. The CPON snapshot row itself is the `Dividendes`
+balance-sheet receivable the P&L reconciliation already expects, so the
+accrual and its receivable stay in step.
 
 Schema changes for this phase, in full: `portfolio_codes` table +
-`derived BOOLEAN NOT NULL DEFAULT false` on `operations` and `dividends`.
+`derived BOOLEAN NOT NULL DEFAULT false` on `dividends`.
 
 ## Error handling
 
@@ -232,10 +252,11 @@ Schema changes for this phase, in full: `portfolio_codes` table +
 - **Adapter units:** detection accepts/rejects correctly; every transposed
   column asserted against known fixture values; Latin-1, trailing-dot
   numbers, `yyyymmdd`; unmappable GP3 → row error; multi share class →
-  rejection; INVXDVLUX → "not needed" rejection.
-- **Derivation units:** share-delta ops incl. out-of-order convergence;
-  CPON dividends incl. FX-only move emitting nothing; explicit-beats-
-  derived on both.
+  rejection; INVXDVLUX → "not needed" rejection; JOUROPLUX → "parser
+  pending" rejection.
+- **Derivation units:** CPON dividends incl. out-of-order convergence,
+  the FX-only move emitting nothing, receivable disappearance emitting
+  nothing, and explicit-beats-derived.
 - **API tests:** one multipart request routing files to two portfolios via
   `portfolio_codes`; unknown code → clean error, nothing written; routed
   file to archived portfolio → 409; per-portfolio hash dedupe; TNA
