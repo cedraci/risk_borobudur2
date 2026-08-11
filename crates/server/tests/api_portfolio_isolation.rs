@@ -93,21 +93,21 @@ async fn same_file_imports_independently_per_portfolio() {
     // Upload to portfolio 1: fresh import, real rows.
     let (st, body) = upload(&app, "/api/portfolios/1/imports", "s.xlsx", &bytes).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["duplicate"], false, "{body}");
-    let nav_rows_1 = body["nav_rows"].as_u64().unwrap();
+    assert_eq!(body[0]["outcome"]["duplicate"], false, "{body}");
+    let nav_rows_1 = body[0]["outcome"]["nav_rows"].as_u64().unwrap();
     assert!(nav_rows_1 > 0, "{body}");
 
     // Re-upload the same file to portfolio 1: dedupe kicks in.
     let (st, body) = upload(&app, "/api/portfolios/1/imports", "s.xlsx", &bytes).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["duplicate"], true, "{body}");
+    assert_eq!(body[0]["outcome"]["duplicate"], true, "{body}");
 
     // Upload the SAME bytes to portfolio 2: dedupe is per-portfolio, so this
     // must succeed as a fresh import there, not bounce off portfolio 1's row.
     let (st, body) = upload(&app, "/api/portfolios/2/imports", "s.xlsx", &bytes).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["duplicate"], false, "{body}");
-    assert_eq!(body["nav_rows"].as_u64().unwrap(), nav_rows_1, "{body}");
+    assert_eq!(body[0]["outcome"]["duplicate"], false, "{body}");
+    assert_eq!(body[0]["outcome"]["nav_rows"].as_u64().unwrap(), nav_rows_1, "{body}");
 
     // Positions: same file imported into both portfolios must yield the same
     // meaningful content (asset_type/isin/quantity/valuation/... - none of

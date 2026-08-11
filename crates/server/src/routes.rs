@@ -14,6 +14,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload))
         .route("/api/portfolios", get(handlers::portfolios::list).post(handlers::portfolios::create))
         .route("/api/portfolios/{id}", axum::routing::put(handlers::portfolios::update))
+        .route("/api/portfolios/{id}/codes", get(handlers::portfolios::codes_list).put(handlers::portfolios::codes_put))
         .route("/api/portfolios/{id}/settings", get(handlers::settings::get).put(handlers::settings::put))
         .route("/api/portfolios/{id}/imports", get(handlers::imports::list).post(handlers::imports::upload))
         .route("/api/portfolios/{id}/nav", get(handlers::data::nav))

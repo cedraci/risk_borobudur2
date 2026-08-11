@@ -41,18 +41,22 @@ async fn upload_then_read_back() {
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["positions"], 111);
-    assert_eq!(body["duplicate"], false);
+    assert_eq!(body[0]["outcome"]["positions"], 111, "{body}");
+    assert_eq!(body[0]["outcome"]["duplicate"], false, "{body}");
 
     // duplicate upload
     let res = app.clone().oneshot(upload_req(&sample_bytes(), "sample.xlsx")).await.unwrap();
     let body: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["duplicate"], true);
+    assert_eq!(body[0]["outcome"]["duplicate"], true, "{body}");
 
-    // garbage upload -> 400
+    // garbage upload -> 200, per-file error reported instead of a request failure
     let res = app.clone().oneshot(upload_req(b"not an xlsx", "junk.xlsx")).await.unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body[0]["error"].as_str().is_some(), "{body}");
+    assert!(body[0]["outcome"].is_null(), "{body}");
 
     let res = app.clone().oneshot(Request::get("/api/portfolios/1/nav").body(Body::empty()).unwrap()).await.unwrap();
     let nav: serde_json::Value =

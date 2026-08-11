@@ -75,3 +75,40 @@ pub async fn ensure(pool: &sqlx::PgPool, id: i64, mutating: bool)
     }
     Ok(p)
 }
+
+#[derive(serde::Deserialize)]
+pub struct CodeBody {
+    pub source: String,
+    pub code: String,
+}
+
+pub async fn codes_list(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
+    ensure(&st.pool, pid, false).await?;
+    Ok(Json(db::repo::portfolio_codes_for(&st.pool, pid).await?))
+}
+
+/// Replace the portfolio's full code set. Codes are trimmed; empty entries
+/// are 422; a code already claimed by another portfolio is 422 too.
+pub async fn codes_put(State(st): State<AppState>, Path(pid): Path<i64>, Json(body): Json<Vec<CodeBody>>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
+    ensure(&st.pool, pid, true).await?;
+    let mut codes: Vec<(String, String)> = Vec::with_capacity(body.len());
+    for c in &body {
+        let source = c.source.trim().to_lowercase();
+        let code = c.code.trim().to_string();
+        if source.is_empty() || code.is_empty() {
+            return Err(AppError::Unprocessable("source and code must be non-empty".into()));
+        }
+        codes.push((source, code));
+    }
+    db::repo::portfolio_codes_replace(&st.pool, pid, &codes).await.map_err(|e| {
+        let is_unique = e.downcast_ref::<sqlx::Error>()
+            .and_then(|se| se.as_database_error())
+            .is_some_and(|de| de.is_unique_violation());
+        if is_unique {
+            AppError::Unprocessable("one of these codes is already mapped to another portfolio".into())
+        } else {
+            AppError::Internal(e)
+        }
+    })?;
+    Ok(Json(db::repo::portfolio_codes_for(&st.pool, pid).await?))
+}

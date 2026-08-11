@@ -87,9 +87,9 @@ async fn duplicate_import_restores_exposure_on_a_pre_existing_database() {
     assert_eq!(res.status(), StatusCode::OK);
     let out: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(out["duplicate"], true, "still recognised as a duplicate: {out}");
-    assert_eq!(out["positions"], 0, "and nothing is re-ingested");
-    assert_eq!(out["warnings"].as_array().unwrap().len(), 8, "eight roots re-seeded: {out}");
+    assert_eq!(out[0]["outcome"]["duplicate"], true, "still recognised as a duplicate: {out}");
+    assert_eq!(out[0]["outcome"]["positions"], 0, "and nothing is re-ingested");
+    assert_eq!(out[0]["outcome"]["warnings"].as_array().unwrap().len(), 8, "eight roots re-seeded: {out}");
 
     let (_, seeded) = get_json(&app, "/api/portfolios/1/metrics/derivatives").await;
     assert_eq!(seeded["unconfirmed"].as_array().unwrap().len(), 8, "seeded, needing confirmation");
