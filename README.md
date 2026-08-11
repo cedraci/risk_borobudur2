@@ -2,7 +2,8 @@
 
 Local risk-monitoring dashboard for several portfolios — UCITS funds and
 mandates, each analyzed independently. Imports the periodic "NAV Recap" .xlsx
-into an embedded PostgreSQL and serves analytics (YTD, volatility, Sharpe,
+workbook, and/or the depositary's own CACEIS Bank Luxembourg CSV exports, into
+an embedded PostgreSQL and serves analytics (YTD, volatility, Sharpe,
 drawdowns, monthly/quarterly tables, VaR/ES with UCITS 99%/20d monitoring) at
 http://127.0.0.1:8787. Existing data lives on the built-in Borobudur portfolio.
 
@@ -18,11 +19,16 @@ Requires Rust (stable) and Node.js (build-time only).
 
 First start downloads a portable PostgreSQL 17 into
 %LOCALAPPDATA%\borobudur-risk (one-time, needs network). The browser opens
-automatically; go to the Data page and upload the NAV Recap workbook.
+automatically; go to the Data page and upload the NAV Recap workbook, or drop
+CACEIS CSV exports for a custodian-fed portfolio (see "CACEIS CSV feed"
+below).
 
 ## Weekly workflow
 
-0. Pick the portfolio in the nav. Uploads land in the portfolio you are viewing.
+0. Pick the portfolio in the nav. Uploads land in the portfolio you are viewing
+   — except CACEIS CSVs, which self-identify their fund and route by the
+   Portfolios panel's code mapping regardless of which portfolio is selected
+   (see "CACEIS CSV feed" below).
 1. Upload the NAV Recap on the Data page. New futures contracts are seeded with a
    point value derived from the file and flagged unconfirmed; confirm each one
    once, setting its category, curve and price convention. US Treasury futures are
@@ -68,6 +74,38 @@ Upload it on the Data page, in the "Weekly CTD analytics" panel below the future
 contract table. A successful upload confirms the row count and NAV date; a bad
 file is rejected with the offending row and column named so it can be fixed and
 re-uploaded — nothing is stored until every row passes.
+
+## CACEIS CSV feed
+
+A portfolio administered by CACEIS Bank Luxembourg can be fed directly from
+the depositary's own exports instead of (or alongside) the NAV Recap workbook.
+Drop one or more files onto the Data page in one go — `HISINVLUX_<fund
+code>_<yyyymmdd>_<timestamp>.csv` (positions) and `HISTOVLLUX_<fund
+code>_<yyyymmdd>_<timestamp>.csv` (NAV, TNA, shares outstanding) — and each
+file comes back with its own result: format detected, portfolio routed to,
+rows imported, or the rejection reason. A CACEIS file self-identifies its fund
+from the code embedded in its filename and routes through the code mapping
+set once per portfolio on the Portfolios panel (a "CACEIS code" column next
+to each portfolio); an unmapped code is rejected with a message pointing back
+there. `INVXDVLUX` is recognized and declined as redundant — HISINVLUX already
+carries the positions. `JOUROPLUX`, the trade journal, is recognized and
+declined pending a sample file to build its parser against; until it flows,
+a CSV-fed portfolio has no trade journal, so the P&L page shows price/FX
+effects on it without realized-trade attribution.
+
+Every HISINVLUX/HISTOVLLUX import cross-checks the position total against the
+NAV file's own AUM for any date where both now exist, and reports a warning
+when the two drift apart by more than 0.1%. Dividends for a CACEIS-fed
+portfolio have no explicit journal, so they are derived instead from the
+growth of CPON receivable positions between consecutive snapshots and stored
+flagged as derived; an explicit dividend journal for the same date (e.g. from
+a NAV Recap import) always wins and suppresses the derived entry. CACEIS rows
+that carry a risk country or Bloomberg ticker pre-fill those fields — plus the
+region implied by the country — into the shared reference data, but only
+where the field is still empty, so a value already confirmed via Bloomberg is
+never overwritten. A bond classified this way needs no GICS sector to count
+as done (Bloomberg publishes none for Corp/Govt securities), so it drops out
+of the Bloomberg request workbook as soon as its country is known.
 
 ## Features
 
@@ -119,6 +157,8 @@ re-uploaded — nothing is stored until every row passes.
   Basel traffic-light zones and Kupiec proportion-of-failures test.
 - **Reference data** (Data page): editable issuer groups, liquidity bucket overrides
   and bond statics (coupon/maturity/frequency, auto-parsed from position names on import).
+  CACEIS imports additionally pre-fill country of risk, region and Bloomberg ticker
+  where those fields are still empty (see "CACEIS CSV feed" above).
 - **P&L page**: attributes period P&L per instrument into realized/unrealized price
   and realized/unrealized FX, grouped by asset class, country, region, sector,
   industry, currency or issuer group, with a reconciliation to the fund's own AUM
