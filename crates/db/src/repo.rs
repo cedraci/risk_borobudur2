@@ -155,7 +155,13 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
     let mut warnings = b.warnings.clone();
     warnings.extend(seed_futures_contracts(&mut tx, &positions).await?);
     if let Some(ops) = &b.operations {
-        warnings.extend(pam_warnings(&positions, ops));
+        // Per snapshot, not over the flattened `positions`: the walk's upper
+        // bound must be that snapshot's own nav_date, so a position from an
+        // earlier snapshot is never checked against a walk that can include
+        // trades dated after it (see task-2 review fix round 1).
+        for snap in &b.snapshots {
+            warnings.extend(pam_warnings(snap.nav_date, &snap.positions, ops));
+        }
     }
 
     if replace_div_ops {
@@ -338,7 +344,7 @@ async fn seed_futures_contracts(
 /// compared against PAM (a "PAM drift" warning), which reports a genuine
 /// mismatch between the administrator's file and the trade walk. Non-fatal:
 /// it warns, it never blocks the weekly import.
-fn pam_warnings(positions: &[ingest::PositionRow], operations: &[ingest::OperationRow]) -> Vec<String> {
+fn pam_warnings(nav_date: NaiveDate, positions: &[ingest::PositionRow], operations: &[ingest::OperationRow]) -> Vec<String> {
     use analytics::pnl::{Trade, is_buy, walk_instrument};
 
     let mut trades: Vec<Trade> = Vec::new();
@@ -368,10 +374,12 @@ fn pam_warnings(positions: &[ingest::PositionRow], operations: &[ingest::Operati
         // `walk_instrument` on an empty slice returns a zero `basis_end`, so an
         // ISIN entirely absent from OPERATIONS - the most severe form of
         // incomplete history - falls out of this call naturally rather than
-        // needing its own branch. No single reference date applies to a
-        // batch that may carry positions from more than one snapshot, so the
-        // walk is unbounded above (every recorded trade counts).
-        let w = walk_instrument(&mine, chrono::NaiveDate::MIN, chrono::NaiveDate::MAX);
+        // needing its own branch. The walk is bounded above by this
+        // position's own snapshot date: a trade dated after `nav_date` must
+        // not feed the cost-basis comparison for a position taken as of
+        // `nav_date` (restores the pre-UniversalBatch single-snapshot
+        // behavior exactly; see task-2 review fix round 1).
+        let w = walk_instrument(&mine, chrono::NaiveDate::MIN, nav_date);
         if w.oversold {
             // A sell exceeding the running quantity is itself unambiguous
             // evidence of a broken history; it gets its own warning and is not
@@ -918,7 +926,7 @@ mod pam_warnings_tests {
                 op("SOME_OTHER_ISIN", "achat", d(2026, 1, 5), 10.0, 5.0),
             ],
         );
-        let warnings = pam_warnings(&wb.positions, &wb.operations);
+        let warnings = pam_warnings(wb.nav_date, &wb.positions, &wb.operations);
         assert!(
             warnings.iter().any(|w| w.starts_with("T1_NO_TRADES") && w.contains("incomplete trade history")),
             "an ISIN with zero OPERATIONS rows but a non-zero workbook holding must warn \
@@ -939,7 +947,7 @@ mod pam_warnings_tests {
                 op("T2_FLAT", "vente", d(2026, 1, 10), 100.0, 11.0),
             ],
         );
-        let warnings = pam_warnings(&wb.positions, &wb.operations);
+        let warnings = pam_warnings(wb.nav_date, &wb.positions, &wb.operations);
         assert!(
             warnings.iter().any(|w| w.starts_with("T2_FLAT") && w.contains("incomplete trade history")),
             "a history that round-trips to exactly flat against a non-zero workbook holding must \
@@ -962,7 +970,7 @@ mod pam_warnings_tests {
                 op("T3_OVERSOLD", "vente", d(2026, 1, 10), 100.0, 11.0),
             ],
         );
-        let warnings = pam_warnings(&wb.positions, &wb.operations);
+        let warnings = pam_warnings(wb.nav_date, &wb.positions, &wb.operations);
         assert!(
             warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("sells exceed recorded buys")),
             "an oversold position must warn 'sells exceed recorded buys', got: {warnings:?}"
@@ -970,6 +978,52 @@ mod pam_warnings_tests {
         assert!(
             !warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("incomplete trade history")),
             "an oversold position must not also be tagged 'incomplete trade history', got: {warnings:?}"
+        );
+    }
+
+    /// A trade dated after the position's own snapshot date must not affect
+    /// its PAM walk. Pins the review fix for a regression introduced while
+    /// generalizing `pam_warnings` to `UniversalBatch`: the walk's upper
+    /// bound had transiently become unbounded (`NaiveDate::MAX`), so a trade
+    /// dated after `nav_date` would still feed `basis_end`. Without the date
+    /// bound, the second buy here (at 20.0) would move the walked avg_cost
+    /// off the PAM-matching 10.0 and both change the walked quantity (100 ->
+    /// 150, vs. the workbook's 100) and warn "PAM drift" / "incomplete trade
+    /// history". The date-bounded walk must exclude it entirely, leaving the
+    /// outcome identical to the same batch without that trade.
+    #[test]
+    fn trade_after_nav_date_excluded_from_walk() {
+        let with_future_trade = workbook(
+            vec![position("T4_AFTER_NAV", 100.0, 10.0)],
+            vec![
+                op("T4_AFTER_NAV", "achat", d(2026, 1, 5), 100.0, 10.0),
+                // Dated after nav_date (2026-01-31): must not enter the walk.
+                op("T4_AFTER_NAV", "achat", d(2026, 2, 15), 50.0, 20.0),
+            ],
+        );
+        let without_future_trade = workbook(
+            vec![position("T4_AFTER_NAV", 100.0, 10.0)],
+            vec![op("T4_AFTER_NAV", "achat", d(2026, 1, 5), 100.0, 10.0)],
+        );
+
+        let warnings_with = pam_warnings(
+            with_future_trade.nav_date,
+            &with_future_trade.positions,
+            &with_future_trade.operations,
+        );
+        let warnings_without = pam_warnings(
+            without_future_trade.nav_date,
+            &without_future_trade.positions,
+            &without_future_trade.operations,
+        );
+
+        assert!(
+            !warnings_with.iter().any(|w| w.starts_with("T4_AFTER_NAV")),
+            "a trade dated after nav_date must not produce a warning (PAM matches the pre-future-trade walk), got: {warnings_with:?}"
+        );
+        assert_eq!(
+            warnings_with, warnings_without,
+            "including a trade dated after nav_date must not change the warning outcome"
         );
     }
 }
