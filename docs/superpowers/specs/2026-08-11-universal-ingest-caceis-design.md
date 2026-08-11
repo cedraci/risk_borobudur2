@@ -135,7 +135,8 @@ Borobudur ↔ CACEIS `165878`).
   the selected portfolio** — a CSV cannot be misfiled. Unknown code →
   file-level error naming the code ("unknown CACEIS code 165878 — map it
   in the Portfolios panel"); nothing written. Routed-to archived
-  portfolio → 409, like any mutation.
+  portfolio → per-file error entry (the URL portfolio's archived guard
+  stays a request-level 409, preserving the existing contract).
 - Non-identifying file (NAV Recap): lands in the selected portfolio,
   current behavior, existing archived-guard applies.
 
@@ -168,8 +169,8 @@ space-padded with trailing dots (`8336.23333333`, `-12.`).
 | valuation_ccy | 51 (Market value, local ccy) |
 | valuation_eur | 32 (Market value, fund ccy) |
 | accrued_interest | 33 |
-| weight | 35 (MV/TNA, already %) |
-| fx_rate | derived: col 51 ÷ col 32 (ccy per EUR, NAV Recap convention); 1.0 for EUR |
+| weight | 35 ÷ 100 (CACEIS stores percent; the universal model stores fractions — STRABAG 1.01 → 0.0101) |
+| fx_rate | derived: col 32 ÷ col 51 (EUR per unit of local currency — the convention the P&L engine's `snap_rate` fallback `valuation_eur/valuation_ccy` implies; GKP: 306425.21/262468.51 = 1.1675 EUR/GBP, matching the file's own BK001GBP conversion rate); 1.0 for EUR, None when col 51 is 0 or missing |
 | ticker | 65 (Bloomberg Code; `-1`/blank → none) |
 | ref hint: country_of_risk | 41 (Risk country, ISO alpha-3 → alpha-2) |
 | ref hint: ticker | 65 |
@@ -235,9 +236,12 @@ Schema changes for this phase, in full: `portfolio_codes` table +
 - **File-level — reject, nothing written:** unrecognized format; unknown
   fund code; filename date ≠ row dates; multi share class; wrong column
   count. Response says exactly what is wrong.
-- **Row-level — import with visible warnings:** unmappable asset-type
-  code, unparsable number/date, missing ISIN where expected. Stored with
-  the import, shown in the imports list like today's cell errors.
+- **Row-level — import with visible warnings (CACEIS):** unmappable
+  asset-type code, unparsable number/date — the row is dropped, a warning
+  names it, and the TNA cross-check catches any material resulting drift.
+  Warnings ride the import response and are persisted inside the import's
+  `row_counts` JSON so the history shows them. (The NAV Recap keeps its
+  existing stricter behavior: cell errors reject the file — unchanged.)
 - **Cross-file consistency (warning):** once both files for a date are
   in, sum of HISINVLUX market values vs HISTOVLLUX TNA; drift beyond
   0.1% flags the import — catches truncated position files and stale NAVs.
