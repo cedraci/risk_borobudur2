@@ -754,6 +754,40 @@ pub async fn portfolio_update(pool: &PgPool, id: i64, name: &str, archived: bool
     portfolio_get(pool, id).await
 }
 
+// ---- portfolio codes (external identifiers for upload auto-routing) ----
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct PortfolioCode {
+    pub portfolio_id: i64,
+    pub source: String,
+    pub code: String,
+}
+
+pub async fn portfolio_codes_for(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<PortfolioCode>> {
+    Ok(sqlx::query_as("SELECT portfolio_id, source, code FROM portfolio_codes WHERE portfolio_id = $1 ORDER BY source, code")
+        .bind(portfolio_id).fetch_all(pool).await?)
+}
+
+/// Replace the full code set for one portfolio. A `(source, code)` already
+/// claimed by ANOTHER portfolio surfaces as a unique violation the caller
+/// maps to 422.
+pub async fn portfolio_codes_replace(pool: &PgPool, portfolio_id: i64, codes: &[(String, String)]) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM portfolio_codes WHERE portfolio_id = $1")
+        .bind(portfolio_id).execute(&mut *tx).await?;
+    for (source, code) in codes {
+        sqlx::query("INSERT INTO portfolio_codes (portfolio_id, source, code) VALUES ($1, $2, $3)")
+            .bind(portfolio_id).bind(source).bind(code).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn portfolio_by_code(pool: &PgPool, source: &str, code: &str) -> anyhow::Result<Option<i64>> {
+    Ok(sqlx::query_scalar("SELECT portfolio_id FROM portfolio_codes WHERE source = $1 AND code = $2")
+        .bind(source).bind(code).fetch_optional(pool).await?)
+}
+
 #[cfg(test)]
 mod pam_warnings_tests {
     //! Unit-level pin for the two silent-skip paths in `pam_warnings`, using
