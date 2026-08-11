@@ -3,6 +3,7 @@ import { getDrawdowns, getRolling, type NavPoint } from "../api";
 import EChart from "../components/EChart";
 import { num, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 function line(points: NavPoint[], name: string, percent: boolean, color?: string) {
   return {
@@ -15,9 +16,10 @@ function line(points: NavPoint[], name: string, percent: boolean, color?: string
 }
 
 export default function Risk() {
+  const portfolio = usePortfolio();
   const [window, setWindow] = useState(60);
-  const rolling = useFetch(() => getRolling(window), [window]);
-  const dd = useFetch(() => getDrawdowns(), []);
+  const rolling = useFetch(() => getRolling(portfolio.id, window), [portfolio.id, window]);
+  const dd = useFetch(() => getDrawdowns(portfolio.id), [portfolio.id]);
 
   return (
     <div>

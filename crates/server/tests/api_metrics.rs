@@ -12,7 +12,7 @@ fn upload_req(bytes: &[u8]) -> Request<Body> {
     ).as_bytes());
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    Request::post("/api/imports")
+    Request::post("/api/portfolios/1/imports")
         .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
         .body(Body::from(body))
         .unwrap()
@@ -33,7 +33,7 @@ async fn metrics_pipeline_on_sample() {
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     // empty state first
-    let (st, body) = get_json(&app, "/api/metrics/summary").await;
+    let (st, body) = get_json(&app, "/api/portfolios/1/metrics/summary").await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["empty"], true);
 
@@ -41,7 +41,7 @@ async fn metrics_pipeline_on_sample() {
     let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let (_, s) = get_json(&app, "/api/metrics/summary").await;
+    let (_, s) = get_json(&app, "/api/portfolios/1/metrics/summary").await;
     assert_eq!(s["empty"], false);
     assert_eq!(s["as_of"], "2026-07-24");
     assert!((s["nav"].as_f64().unwrap() - 104.42).abs() < 1e-9);
@@ -53,29 +53,29 @@ async fn metrics_pipeline_on_sample() {
     assert!(var["historical"]["var"].as_f64().unwrap() > 0.0);
     assert!(var["gaussian"]["es"].as_f64().unwrap() >= var["gaussian"]["var"].as_f64().unwrap());
 
-    let (_, r) = get_json(&app, "/api/metrics/rolling?window=60").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rolling?window=60").await;
     assert_eq!(r["window"], 60);
     assert!(!r["vol"].as_array().unwrap().is_empty());
     assert_eq!(r["vol"].as_array().unwrap().len(), r["sharpe"].as_array().unwrap().len());
 
-    let (_, dd) = get_json(&app, "/api/metrics/drawdowns").await;
+    let (_, dd) = get_json(&app, "/api/portfolios/1/metrics/drawdowns").await;
     assert_eq!(dd["underwater"].as_array().unwrap().len(), 344);
     assert!(!dd["yearly"].as_array().unwrap().is_empty());
     assert!(dd["top_short"].as_array().unwrap().len() <= 5);
 
-    let (_, cal) = get_json(&app, "/api/metrics/calendar").await;
+    let (_, cal) = get_json(&app, "/api/portfolios/1/metrics/calendar").await;
     let monthly = cal["monthly"].as_array().unwrap();
     assert!(monthly.len() >= 17); // Feb 2025 .. Jul 2026
     assert_eq!(monthly[0]["year"], 2025);
     assert_eq!(monthly[0]["period"], 2);
 
-    let (_, v) = get_json(&app, "/api/metrics/var?confidence=0.95&horizon=1&window=252").await;
+    let (_, v) = get_json(&app, "/api/portfolios/1/metrics/var?confidence=0.95&horizon=1&window=252").await;
     assert_eq!(v["confidence"].as_f64().unwrap(), 0.95);
     assert!(v["methods"]["historical"]["var"].as_f64().unwrap() > 0.0);
     assert!(!v["rolling"].as_array().unwrap().is_empty());
 
     // boundary: confidence == 0.5 is out of the strict (0.5, 1) range -> 400
-    let (st, _) = get_json(&app, "/api/metrics/var?confidence=0.5&horizon=1&window=252").await;
+    let (st, _) = get_json(&app, "/api/portfolios/1/metrics/var?confidence=0.5&horizon=1&window=252").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     pool.close().await;

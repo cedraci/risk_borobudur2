@@ -57,7 +57,7 @@ async fn app_with_sample() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
     let bytes = std::fs::read(SAMPLE).unwrap();
     assert_eq!(
-        app.clone().oneshot(upload_req("/api/imports", "s.xlsx", &bytes)).await.unwrap().status(),
+        app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &bytes)).await.unwrap().status(),
         StatusCode::OK
     );
     (app, pool, edb)
@@ -69,7 +69,7 @@ async fn emir_empty_before_any_import() {
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
-    let (status, body) = get_json(&app, "/api/emir").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/emir").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["empty"], true, "{body}");
     pool.close().await;
@@ -80,7 +80,7 @@ async fn emir_empty_before_any_import() {
 async fn emir_report_on_sample() {
     let (app, pool, edb) = app_with_sample().await;
 
-    let (status, body) = get_json(&app, "/api/emir").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/emir").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["date"], "2026-07-24", "{body}");
     assert_eq!(body["months_total"], 12);
@@ -117,7 +117,7 @@ async fn emir_report_on_sample() {
         "confirmed": true, "otc": true,
     })).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, body) = get_json(&app, "/api/emir").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/emir").await;
     assert_eq!(status, StatusCode::OK);
     let ir = body["classes"].as_array().unwrap().iter().find(|c| c["class"] == "interest_rate").unwrap();
     assert!(ir["avg_otc_eur"].as_f64().unwrap() > 0.0, "{ir}");
@@ -126,7 +126,7 @@ async fn emir_report_on_sample() {
     assert_eq!(body["monitors"]["reconciliation"], "quarterly", "{body}");
 
     // Bad date is a 400.
-    let (status, _) = get_json(&app, "/api/emir?date=garbage").await;
+    let (status, _) = get_json(&app, "/api/portfolios/1/emir?date=garbage").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     pool.close().await;
@@ -137,7 +137,7 @@ async fn emir_report_on_sample() {
 async fn evidence_export_round_trips() {
     let (app, pool, edb) = app_with_sample().await;
 
-    let (status, ctype, bytes) = get_bytes(&app, "/api/emir/export").await;
+    let (status, ctype, bytes) = get_bytes(&app, "/api/portfolios/1/emir/export").await;
     assert_eq!(status, 200);
     assert!(ctype.contains("spreadsheet"), "got {ctype}");
     let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
@@ -180,7 +180,7 @@ async fn evidence_export_round_trips() {
     })).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, body) = get_json(&app, "/api/emir").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/emir").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let ir = body["classes"].as_array().unwrap().iter().find(|c| c["class"] == "interest_rate").unwrap();
     let payload_avg_otc = ir["avg_otc_eur"].as_f64().unwrap();
@@ -188,7 +188,7 @@ async fn evidence_export_round_trips() {
     assert!(payload_avg_otc > 0.0, "{ir}");
     assert_ne!(payload_avg_otc, payload_avg_total, "{ir}");
 
-    let (status, ctype, bytes) = get_bytes(&app, "/api/emir/export").await;
+    let (status, ctype, bytes) = get_bytes(&app, "/api/portfolios/1/emir/export").await;
     assert_eq!(status, 200);
     assert!(ctype.contains("spreadsheet"), "got {ctype}");
     let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
@@ -214,7 +214,7 @@ async fn evidence_export_refuses_empty_db() {
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
-    let res = app.clone().oneshot(Request::get("/api/emir/export").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.clone().oneshot(Request::get("/api/portfolios/1/emir/export").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     pool.close().await;
     edb.stop().await;
@@ -227,7 +227,7 @@ async fn kpi_upsert_validation_and_echo_in_report() {
     let good = serde_json::json!({
         "unconfirmed_over_5d": 1, "reconciliation": "done", "disputes": 0, "note": "  trimmed  ",
     });
-    let (status, body) = put_json(&app, "/api/emir/kpis/2026-07-01", good.clone()).await;
+    let (status, body) = put_json(&app, "/api/portfolios/1/emir/kpis/2026-07-01", good.clone()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["month"], "2026-07-01");
     assert_eq!(body["note"], "trimmed"); // trimmed, not stored raw
@@ -236,26 +236,26 @@ async fn kpi_upsert_validation_and_echo_in_report() {
     let blank = serde_json::json!({
         "unconfirmed_over_5d": 0, "reconciliation": "not_applicable", "disputes": 0, "note": "   ",
     });
-    let (status, body) = put_json(&app, "/api/emir/kpis/2026-06-01", blank).await;
+    let (status, body) = put_json(&app, "/api/portfolios/1/emir/kpis/2026-06-01", blank).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["note"], serde_json::Value::Null);
 
     // Mid-month date, unknown status and negative counts are rejected.
-    let (status, _) = put_json(&app, "/api/emir/kpis/2026-07-15", good.clone()).await;
+    let (status, _) = put_json(&app, "/api/portfolios/1/emir/kpis/2026-07-15", good.clone()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = put_json(&app, "/api/emir/kpis/2026-07-01", serde_json::json!({
+    let (status, _) = put_json(&app, "/api/portfolios/1/emir/kpis/2026-07-01", serde_json::json!({
         "unconfirmed_over_5d": 0, "reconciliation": "maybe", "disputes": 0, "note": null,
     })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = put_json(&app, "/api/emir/kpis/2026-07-01", serde_json::json!({
+    let (status, _) = put_json(&app, "/api/portfolios/1/emir/kpis/2026-07-01", serde_json::json!({
         "unconfirmed_over_5d": -1, "reconciliation": "done", "disputes": 0, "note": null,
     })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = put_json(&app, "/api/emir/kpis/garbage", good).await;
+    let (status, _) = put_json(&app, "/api/portfolios/1/emir/kpis/garbage", good).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Both records come back in the report, newest first.
-    let (status, body) = get_json(&app, "/api/emir").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/emir").await;
     assert_eq!(status, StatusCode::OK);
     let kpis = body["kpis"].as_array().unwrap();
     assert_eq!(kpis.len(), 2, "{body}");

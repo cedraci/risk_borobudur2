@@ -6,7 +6,7 @@ use analytics::{
     rolling_vol, rolling_yield_vol, sharpe_ratio, top_short_drawdowns, var_es,
     yearly_max_drawdowns, yield_vol_ratio, ytd_performance, NavPoint, VarMethod,
 };
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 
 pub const MIN_OBS: usize = 30;
@@ -76,9 +76,10 @@ fn var_block(rets: &[f64], confidence: f64, horizon: u32, window: u32, limit: f6
     Some(VarBlock { confidence, horizon_days: horizon, window_days: window, historical, gaussian, cornish_fisher, limit, utilization, var_eur })
 }
 
-pub async fn summary(State(st): State<AppState>) -> Result<Json<SummaryResponse>, AppError> {
-    let rows = db::repo::nav_rows(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+pub async fn summary(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<SummaryResponse>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let rows = db::repo::nav_rows(&st.pool, pid).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
     if rows.is_empty() {
         return Ok(Json(SummaryResponse {
             empty: true, as_of: None, nav: None, aum: None, ytd: None, vol_1y: None,
@@ -128,9 +129,10 @@ pub async fn summary(State(st): State<AppState>) -> Result<Json<SummaryResponse>
 #[derive(serde::Deserialize)]
 pub struct RollingQuery { window: Option<usize> }
 
-pub async fn rolling(State(st): State<AppState>, Query(q): Query<RollingQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    let rows = db::repo::nav_rows(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+pub async fn rolling(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<RollingQuery>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let rows = db::repo::nav_rows(&st.pool, pid).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
     let window = q.window.unwrap_or(60).clamp(2, 1000);
     let nav = to_points(&rows);
     Ok(Json(serde_json::json!({
@@ -142,9 +144,10 @@ pub async fn rolling(State(st): State<AppState>, Query(q): Query<RollingQuery>) 
     })))
 }
 
-pub async fn drawdowns(State(st): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
-    let rows = db::repo::nav_rows(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+pub async fn drawdowns(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let rows = db::repo::nav_rows(&st.pool, pid).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
     let nav = to_points(&rows);
     let underwater = drawdown_series(&nav);
     let overall_max = underwater.iter().map(|p| p.value).fold(0.0f64, f64::min);
@@ -158,8 +161,9 @@ pub async fn drawdowns(State(st): State<AppState>) -> Result<Json<serde_json::Va
     })))
 }
 
-pub async fn calendar(State(st): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
-    let rows = db::repo::nav_rows(&st.pool).await?;
+pub async fn calendar(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let rows = db::repo::nav_rows(&st.pool, pid).await?;
     let nav = to_points(&rows);
     Ok(Json(serde_json::json!({
         "empty": rows.is_empty(),
@@ -172,9 +176,10 @@ pub async fn calendar(State(st): State<AppState>) -> Result<Json<serde_json::Val
 #[derive(serde::Deserialize)]
 pub struct VarQuery { confidence: Option<f64>, horizon: Option<u32>, window: Option<u32> }
 
-pub async fn var(State(st): State<AppState>, Query(q): Query<VarQuery>) -> Result<Json<VarResponse>, AppError> {
-    let rows = db::repo::nav_rows(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+pub async fn var(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<VarQuery>) -> Result<Json<VarResponse>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let rows = db::repo::nav_rows(&st.pool, pid).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
     let confidence = q.confidence.unwrap_or(settings.var_confidence);
     if !(confidence > 0.5 && confidence < 1.0) {
         return Err(AppError::BadRequest("confidence must be in (0.5, 1)".into()));
@@ -199,9 +204,10 @@ pub async fn var(State(st): State<AppState>, Query(q): Query<VarQuery>) -> Resul
     }))
 }
 
-pub async fn backtest(State(st): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
-    let rows = db::repo::nav_rows(&st.pool).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+pub async fn backtest(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let rows = db::repo::nav_rows(&st.pool, pid).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
     let nav = to_points(&rows);
     let window = settings.var_window_days as usize;
     let report = analytics::backtest(&nav, window, 0.99);

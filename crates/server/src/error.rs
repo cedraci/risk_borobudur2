@@ -7,6 +7,8 @@ pub enum AppError {
     BadRequest(String),
     UnprocessableRows(Vec<ingest::RowError>),
     Unprocessable(String),
+    NotFound(String),
+    Conflict(String),
 }
 
 impl<E: Into<anyhow::Error>> From<E> for AppError {
@@ -39,6 +41,16 @@ impl IntoResponse for AppError {
             AppError::Unprocessable(msg) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({"title": "Unprocessable Entity", "status": 422, "detail": msg})),
+            )
+                .into_response(),
+            AppError::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"title": "Not Found", "status": 404, "detail": msg})),
+            )
+                .into_response(),
+            AppError::Conflict(msg) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"title": "Conflict", "status": 409, "detail": msg})),
             )
                 .into_response(),
         }

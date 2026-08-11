@@ -14,7 +14,7 @@ async fn test_app() -> (axum::Router, db::embedded::EmbeddedDb, tempfile::TempDi
 async fn settings_get_put_and_validation() {
     let (app, _edb, _dir) = test_app().await;
 
-    let res = app.clone().oneshot(Request::get("/api/settings").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app.clone().oneshot(Request::get("/api/portfolios/1/settings").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
@@ -23,7 +23,7 @@ async fn settings_get_put_and_validation() {
     let mut s = body.clone();
     s["risk_free_rate"] = serde_json::json!(0.025);
     let res = app.clone().oneshot(
-        Request::put("/api/settings").header("content-type", "application/json")
+        Request::put("/api/portfolios/1/settings").header("content-type", "application/json")
             .body(Body::from(s.to_string())).unwrap(),
     ).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -31,7 +31,7 @@ async fn settings_get_put_and_validation() {
     let mut bad = body.clone();
     bad["var_confidence"] = serde_json::json!(1.5);
     let res = app.clone().oneshot(
-        Request::put("/api/settings").header("content-type", "application/json")
+        Request::put("/api/portfolios/1/settings").header("content-type", "application/json")
             .body(Body::from(bad.to_string())).unwrap(),
     ).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -39,7 +39,7 @@ async fn settings_get_put_and_validation() {
     let mut boundary = body.clone();
     boundary["var_confidence"] = serde_json::json!(0.5);
     let res = app.clone().oneshot(
-        Request::put("/api/settings").header("content-type", "application/json")
+        Request::put("/api/portfolios/1/settings").header("content-type", "application/json")
             .body(Body::from(boundary.to_string())).unwrap(),
     ).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);

@@ -2,6 +2,7 @@ import { Fragment, useMemo, useState } from "react";
 import { getPnl, type PnlDimension } from "../api";
 import { eur, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 const DIMENSIONS: { value: PnlDimension; label: string }[] = [
   { value: "asset_class", label: "Asset class" },
@@ -26,11 +27,12 @@ function presetRange(preset: string): { from: string; to: string } {
 }
 
 export default function PnlPage() {
+  const portfolio = usePortfolio();
   const [range, setRange] = useState(presetRange("YTD"));
   const [dimension, setDimension] = useState<PnlDimension>("asset_class");
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
-  const pnl = useFetch(() => getPnl({ ...range, dimension }), [range.from, range.to, dimension]);
+  const pnl = useFetch(() => getPnl(portfolio.id, { ...range, dimension }), [portfolio.id, range.from, range.to, dimension]);
   const data = pnl.data;
 
   const total = useMemo(

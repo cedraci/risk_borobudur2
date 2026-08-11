@@ -12,7 +12,7 @@ fn upload_req(bytes: &[u8]) -> Request<Body> {
     ).as_bytes());
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    Request::post("/api/imports")
+    Request::post("/api/portfolios/1/imports")
         .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
         .body(Body::from(body))
         .unwrap()
@@ -52,7 +52,7 @@ async fn limits_and_backtest_on_sample() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // concentration
-    let (st, c) = get_json(&app, "/api/metrics/concentration").await;
+    let (st, c) = get_json(&app, "/api/portfolios/1/metrics/concentration").await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(c["date"], "2026-07-24");
     let checks = c["checks"].as_array().unwrap();
@@ -68,7 +68,7 @@ async fn limits_and_backtest_on_sample() {
     assert!(dep["rows"].as_array().unwrap().iter().any(|r| r["group"] == "CBLU"));
 
     // liquidity
-    let (_, l) = get_json(&app, "/api/metrics/liquidity").await;
+    let (_, l) = get_json(&app, "/api/portfolios/1/metrics/liquidity").await;
     let buckets = l["buckets"].as_array().unwrap();
     assert_eq!(buckets.len(), 4);
     assert_eq!(buckets[0]["bucket"], "d1");
@@ -78,7 +78,7 @@ async fn limits_and_backtest_on_sample() {
     assert!(cum[3]["weight"].as_f64().unwrap() >= cum[0]["weight"].as_f64().unwrap());
 
     // rates: one bond with parsed statics
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let bonds = r["bonds"].as_array().unwrap();
     assert_eq!(bonds.len(), 1);
     assert_eq!(bonds[0]["missing"], false);
@@ -92,7 +92,7 @@ async fn limits_and_backtest_on_sample() {
     assert_eq!(r["futures_missing_any"], true);
 
     // backtest: 343 returns, window 252 -> 91 points
-    let (_, b) = get_json(&app, "/api/metrics/backtest").await;
+    let (_, b) = get_json(&app, "/api/portfolios/1/metrics/backtest").await;
     assert_eq!(b["confidence"].as_f64().unwrap(), 0.99);
     assert_eq!(b["horizon_days"], 1);
     assert_eq!(b["insufficient"], false);
@@ -104,7 +104,7 @@ async fn limits_and_backtest_on_sample() {
     assert_eq!(b["series"].as_array().unwrap().len(), 91);
 
     // bad date -> 400
-    let (st, _) = get_json(&app, "/api/metrics/concentration?date=notadate").await;
+    let (st, _) = get_json(&app, "/api/portfolios/1/metrics/concentration?date=notadate").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     pool.close().await;
@@ -123,7 +123,7 @@ async fn rates_incomplete_bond_statics() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // Initially bond has complete statics and is not marked missing
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let bonds = r["bonds"].as_array().unwrap();
     assert_eq!(bonds.len(), 1);
     assert_eq!(bonds[0]["missing"], false);
@@ -141,7 +141,7 @@ async fn rates_incomplete_bond_statics() {
     assert_eq!(st, StatusCode::OK);
 
     // After nulling statics, bond should be marked missing
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let bonds = r["bonds"].as_array().unwrap();
     assert_eq!(bonds.len(), 1);
     assert_eq!(bonds[0]["missing"], true);
@@ -159,7 +159,7 @@ async fn rates_incomplete_bond_statics() {
     assert_eq!(st, StatusCode::OK);
 
     // After restoring, bond should no longer be marked missing
-    let (_, r) = get_json(&app, "/api/metrics/rates").await;
+    let (_, r) = get_json(&app, "/api/portfolios/1/metrics/rates").await;
     let bonds = r["bonds"].as_array().unwrap();
     assert_eq!(bonds.len(), 1);
     assert_eq!(bonds[0]["missing"], false);

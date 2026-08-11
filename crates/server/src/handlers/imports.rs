@@ -1,10 +1,11 @@
 use crate::error::AppError;
 use crate::state::AppState;
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Path, State};
 use axum::Json;
 use sha2::Digest;
 
-pub async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Result<Json<db::repo::ImportOutcome>, AppError> {
+pub async fn upload(State(st): State<AppState>, Path(pid): Path<i64>, mut multipart: Multipart) -> Result<Json<db::repo::ImportOutcome>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, true).await?;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -23,12 +24,13 @@ pub async fn upload(State(st): State<AppState>, mut multipart: Multipart) -> Res
             ingest::ParseFailure::Workbook(m) => AppError::BadRequest(m),
             ingest::ParseFailure::Rows(rows) => AppError::UnprocessableRows(rows),
         })?;
-        let outcome = db::repo::import_workbook(&st.pool, &filename, &sha, &parsed).await?;
+        let outcome = db::repo::import_workbook(&st.pool, pid, &filename, &sha, &parsed).await?;
         return Ok(Json(outcome));
     }
     Err(AppError::BadRequest("missing multipart field 'file'".into()))
 }
 
-pub async fn list(State(st): State<AppState>) -> Result<Json<Vec<db::repo::ImportRecord>>, AppError> {
-    Ok(Json(db::repo::imports_list(&st.pool).await?))
+pub async fn list(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::ImportRecord>>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    Ok(Json(db::repo::imports_list(&st.pool, pid).await?))
 }

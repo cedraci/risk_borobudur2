@@ -5,19 +5,23 @@ import {
 } from "../api";
 import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
+import PortfoliosAdmin from "../components/PortfoliosAdmin";
 import { useFetch } from "../hooks";
+import { usePortfolio, useReloadPortfolios } from "../PortfolioContext";
 import { eur, num, pct } from "../fmt";
 
 export default function DataPage() {
+  const portfolio = usePortfolio();
+  const reloadPortfolios = useReloadPortfolios();
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
   const [uploadErr, setUploadErr] = useState<{ msg: string; rows?: { sheet: string; row: number; message: string }[] } | null>(null);
   const [posDate, setPosDate] = useState<string | undefined>(undefined);
 
-  const imports = useFetch(() => getImports(), []);
-  const positions = useFetch(() => getPositions(posDate), [posDate]);
-  const settings = useFetch(() => getSettings(), []);
+  const imports = useFetch(() => getImports(portfolio.id), [portfolio.id]);
+  const positions = useFetch(() => getPositions(portfolio.id, posDate), [portfolio.id, posDate]);
+  const settings = useFetch(() => getSettings(portfolio.id), [portfolio.id]);
   const refs = useFetch(() => getRefs(), []);
 
   async function doUpload(f: File) {
@@ -25,7 +29,7 @@ export default function DataPage() {
     setOutcome(null);
     setUploadErr(null);
     try {
-      setOutcome(await uploadFile(f));
+      setOutcome(await uploadFile(portfolio.id, f));
       imports.reload();
       positions.reload();
     } catch (e) {
@@ -40,6 +44,8 @@ export default function DataPage() {
     <div>
       <h2>Data</h2>
 
+      <PortfoliosAdmin onChange={reloadPortfolios} />
+
       <div
         className={`card drop ${over ? "over" : ""}`}
         onDragOver={(e) => { e.preventDefault(); setOver(true); }}
@@ -51,6 +57,7 @@ export default function DataPage() {
           if (f) void doUpload(f);
         }}
       >
+        <h3>NAV Recap — {portfolio.name}</h3>
         <p>{busy ? "Importing…" : "Drop the NAV Recap .xlsx here, or"}</p>
         <input
           type="file"
@@ -137,6 +144,7 @@ export default function DataPage() {
 }
 
 function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSaved: () => void }) {
+  const portfolio = usePortfolio();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const s = draft ?? settings;
@@ -161,7 +169,7 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
         <label>Redemption stress % <input type="number" step="5" value={(s.redemption_shock * 100).toFixed(0)}
           onChange={(e) => set({ redemption_shock: Number(e.target.value) / 100 })} /></label>
         <button disabled={!draft} onClick={() => {
-          putSettings(s).then(() => { setDraft(null); setMsg("Saved."); onSaved(); },
+          putSettings(portfolio.id, s).then(() => { setDraft(null); setMsg("Saved."); onSaved(); },
             (e) => setMsg(`Error: ${e.detail ?? e.message}`));
         }}>Save</button>
         {msg && <span>{msg}</span>}
@@ -225,6 +233,7 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
   return (
     <div className="card">
       <h3>Reference data</h3>
+      <p className="kpi-sub">Shared across all portfolios.</p>
       <p className="kpi-sub">
         Issuer groups drive the concentration checks (merge connected issuers by giving them the same group);
         buckets drive the liquidity view; bond fields drive YTM/duration. Blank override = default.

@@ -3,6 +3,7 @@ import DerivativesExposure from "../components/DerivativesExposure";
 import { ApiError, emirExportUrl, getEmir, putEmirKpi, type EmirKpi } from "../api";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 const VERDICT_LABEL: Record<string, string> = { ok: "OK", watch: "WATCH", breach: "BREACH" };
 const TIER_LABEL: Record<string, string> = {
@@ -20,7 +21,7 @@ function VerdictChip({ v }: { v: string }) {
   return <span className={cls}>{VERDICT_LABEL[v] ?? v}</span>;
 }
 
-function KpiForm({ onSaved }: { onSaved: () => void }) {
+function KpiForm({ pid, onSaved }: { pid: number; onSaved: () => void }) {
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [unconf, setUnconf] = useState(0);
   const [rec, setRec] = useState<EmirKpi["reconciliation"]>("not_applicable");
@@ -33,7 +34,7 @@ function KpiForm({ onSaved }: { onSaved: () => void }) {
     setBusy(true);
     setMsg(null);
     try {
-      await putEmirKpi(`${month}-01`, {
+      await putEmirKpi(pid, `${month}-01`, {
         unconfirmed_over_5d: unconf,
         reconciliation: rec,
         disputes,
@@ -77,9 +78,10 @@ function KpiForm({ onSaved }: { onSaved: () => void }) {
 }
 
 export default function DerivativesPage() {
+  const portfolio = usePortfolio();
   const [date, setDate] = useState<string | undefined>(undefined);
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const emir = useFetch(() => getEmir(date), [date]);
+  const emir = useFetch(() => getEmir(portfolio.id, date), [portfolio.id, date]);
   const data = emir.data;
 
   return (
@@ -91,7 +93,7 @@ export default function DerivativesPage() {
             {(data?.dates ?? []).map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         </label>
-        <a href={date ? `${emirExportUrl}?date=${date}` : emirExportUrl} download>Export evidence workbook</a>
+        <a href={emirExportUrl(portfolio.id) + (date ? `?date=${date}` : "")} download>Export evidence workbook</a>
       </div>
       {emir.error && <p className="neg">{emir.error}</p>}
       {!data && !emir.error && <p>Loading…</p>}
@@ -193,7 +195,7 @@ export default function DerivativesPage() {
               Middle-office facts the tool cannot derive: confirmation follow-up, portfolio
               reconciliation and disputes. One record per calendar month, reviewed in the risk committee.
             </p>
-            <KpiForm onSaved={emir.reload} />
+            <KpiForm pid={portfolio.id} onSaved={emir.reload} />
             {(data.kpis ?? []).length > 0 && (
               <table className="tbl">
                 <thead>

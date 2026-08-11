@@ -24,9 +24,11 @@ pub fn default_liquidity_defaults() -> serde_json::Value {
 
 fn default_redemption_shock() -> f64 { 0.30 }
 
-pub async fn get_settings(pool: &PgPool) -> anyhow::Result<AppSettings> {
+pub async fn get_settings(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<AppSettings> {
     let rows: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT key, value FROM settings").fetch_all(pool).await?;
+        sqlx::query_as("SELECT key, value FROM settings WHERE portfolio_id = $1")
+            .bind(portfolio_id)
+            .fetch_all(pool).await?;
     let get_f = |k: &str, d: f64| rows.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.as_f64()).unwrap_or(d);
     let get_u = |k: &str, d: u32| rows.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.as_u64()).map(|v| v as u32).unwrap_or(d);
     let liquidity_defaults = rows.iter().find(|(key, _)| key == "liquidity_defaults")
@@ -44,7 +46,7 @@ pub async fn get_settings(pool: &PgPool) -> anyhow::Result<AppSettings> {
     })
 }
 
-pub async fn put_settings(pool: &PgPool, s: &AppSettings) -> anyhow::Result<()> {
+pub async fn put_settings(pool: &PgPool, portfolio_id: i64, s: &AppSettings) -> anyhow::Result<()> {
     let pairs: Vec<(&str, serde_json::Value)> = vec![
         ("risk_free_rate", s.risk_free_rate.into()),
         ("var_confidence", s.var_confidence.into()),
@@ -56,11 +58,15 @@ pub async fn put_settings(pool: &PgPool, s: &AppSettings) -> anyhow::Result<()> 
         ("redemption_shock", s.redemption_shock.into()),
     ];
     for (k, v) in pairs {
-        sqlx::query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
-            .bind(k)
-            .bind(v)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO settings (portfolio_id, key, value) VALUES ($1, $2, $3)
+             ON CONFLICT (portfolio_id, key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(portfolio_id)
+        .bind(k)
+        .bind(v)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }

@@ -4,6 +4,7 @@ import {
   ApiError, type FuturesContract, type CtdRecord, type Category,
 } from "../api";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 import { CATEGORY_LABELS as LABELS, num } from "../fmt";
 
 const CATEGORIES: Category[] = ["equity", "interest_rate", "fx", "credit", "commodity", "other"];
@@ -17,8 +18,9 @@ const BLANK_SPEC: NewSpec = {
 };
 
 export default function FuturesContracts() {
+  const portfolio = usePortfolio();
   const contracts = useFetch(() => getFuturesContracts(), []);
-  const ctd = useFetch(() => getCtd(), []);
+  const ctd = useFetch(() => getCtd(portfolio.id), [portfolio.id]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [msg, setMsg] = useState<string | null>(null);
   const [savingRoot, setSavingRoot] = useState<string | null>(null);
@@ -111,7 +113,7 @@ export default function FuturesContracts() {
     setUploadMsg(null);
     setUploadErr(null);
     try {
-      const out = await uploadCtd(f);
+      const out = await uploadCtd(portfolio.id, f);
       setUploadMsg(`${out.rows} row(s) stored for ${out.nav_date}${out.replaced ? " (replaced)" : ""}.`);
       ctd.reload();
     } catch (e) {
@@ -125,6 +127,7 @@ export default function FuturesContracts() {
   return (
     <div className="card">
       <h3>Futures contracts</h3>
+      <p className="kpi-sub">Shared across all portfolios.</p>
       {contracts.error && <p className="neg">{contracts.error}</p>}
       {unconfirmedCount > 0 && (
         <p className="warn-badge">
@@ -317,7 +320,7 @@ export default function FuturesContracts() {
         </div>
       )}
 
-      <h4>Weekly CTD analytics</h4>
+      <h4>Weekly CTD analytics — {portfolio.name}</h4>
       <p className="kpi-sub">
         One row per bond future, with columns nav_date, ticker, ctd_isin, ctd_mod_duration, ctd_clean_price,
         ctd_accrued, conversion_factor. Re-uploading a file for the same NAV date replaces that date's rows.

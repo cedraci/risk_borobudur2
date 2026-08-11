@@ -3,6 +3,7 @@ import { getBacktest, getSettings, getVar, type VarBlock } from "../api";
 import EChart from "../components/EChart";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 
 function MethodCard({ title, v, varEur }: { title: string; v: { var: number; es: number } | null | undefined; varEur?: number | null }) {
   return (
@@ -15,7 +16,8 @@ function MethodCard({ title, v, varEur }: { title: string; v: { var: number; es:
 }
 
 export default function VarPage() {
-  const settings = useFetch(() => getSettings(), []);
+  const portfolio = usePortfolio();
+  const settings = useFetch(() => getSettings(portfolio.id), [portfolio.id]);
   const [confidence, setConfidence] = useState<number | null>(null);
   const [horizon, setHorizon] = useState<number | null>(null);
   const [window, setWindow] = useState<number | null>(null);
@@ -23,9 +25,9 @@ export default function VarPage() {
   const c = confidence ?? settings.data?.var_confidence ?? 0.99;
   const h = horizon ?? settings.data?.var_horizon_days ?? 20;
   const w = window ?? settings.data?.var_window_days ?? 252;
-  const v = useFetch(() => getVar({ confidence: c, horizon: h, window: w }), [c, h, w, !!settings.data]);
+  const v = useFetch(() => getVar(portfolio.id, { confidence: c, horizon: h, window: w }), [portfolio.id, c, h, w, !!settings.data]);
   const m: VarBlock | null = v.data?.methods ?? null;
-  const bt = useFetch(() => getBacktest(), []);
+  const bt = useFetch(() => getBacktest(portfolio.id), [portfolio.id]);
 
   return (
     <div>

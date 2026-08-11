@@ -2,7 +2,7 @@ use crate::error::AppError;
 use crate::handlers::refs::effective_bucket;
 use crate::state::AppState;
 use analytics::{concentration, default_issuer_group, liquidity, ConPosition, LiqPosition};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::NaiveDate;
 use std::collections::HashMap;
@@ -12,14 +12,14 @@ pub struct DateQuery { date: Option<String> }
 
 type Snapshot = (Vec<NaiveDate>, Option<NaiveDate>, Vec<db::repo::PositionRecord>, Vec<db::repo::InstrumentRef>);
 
-async fn snapshot(st: &AppState, q: &DateQuery) -> Result<Snapshot, AppError> {
-    let dates = db::repo::position_dates(&st.pool).await?;
+async fn snapshot(st: &AppState, pid: i64, q: &DateQuery) -> Result<Snapshot, AppError> {
+    let dates = db::repo::position_dates(&st.pool, pid).await?;
     let date = match &q.date {
         Some(s) => Some(s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?),
         None => dates.first().copied(),
     };
     let rows = match date {
-        Some(d) => db::repo::positions_for(&st.pool, d).await?,
+        Some(d) => db::repo::positions_for(&st.pool, pid, d).await?,
         None => Vec::new(),
     };
     let refs = db::repo::refs_all(&st.pool).await?;
@@ -30,8 +30,9 @@ fn ref_map(refs: &[db::repo::InstrumentRef]) -> HashMap<&str, &db::repo::Instrum
     refs.iter().map(|r| (r.code.as_str(), r)).collect()
 }
 
-pub async fn concentration_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    let (dates, date, rows, refs) = snapshot(&st, &q).await?;
+pub async fn concentration_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
     let by = ref_map(&refs);
     let cons: Vec<ConPosition> = rows.iter().filter_map(|p| {
         let w = p.weight?;
@@ -54,9 +55,10 @@ pub async fn concentration_h(State(st): State<AppState>, Query(q): Query<DateQue
     })))
 }
 
-pub async fn liquidity_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    let (dates, date, rows, refs) = snapshot(&st, &q).await?;
-    let settings = db::settings::get_settings(&st.pool).await?;
+pub async fn liquidity_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
     let by = ref_map(&refs);
     let liq: Vec<LiqPosition> = rows.iter().filter_map(|p| {
         let w = p.weight?;
@@ -78,8 +80,9 @@ pub async fn liquidity_h(State(st): State<AppState>, Query(q): Query<DateQuery>)
     })))
 }
 
-pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    let (dates, date, rows, refs) = snapshot(&st, &q).await?;
+pub async fn rates_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
     let by = ref_map(&refs);
     let mut bonds = Vec::new();
     let mut total_dv01 = 0.0f64;
@@ -118,7 +121,7 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
     let unconfirmed: std::collections::HashSet<&str> =
         snap.unconfirmed.iter().map(String::as_str).collect();
     let ctd = match date {
-        Some(d) => db::repo::ctd_for(&st.pool, d).await?,
+        Some(d) => db::repo::ctd_for(&st.pool, pid, d).await?,
         None => Vec::new(),
     };
     let mut futures = Vec::new();
@@ -182,7 +185,7 @@ pub async fn rates_h(State(st): State<AppState>, Query(q): Query<DateQuery>) -> 
         }
     }
     let aum = match date {
-        Some(d) => db::repo::aum_for(&st.pool, d).await?,
+        Some(d) => db::repo::aum_for(&st.pool, pid, d).await?,
         None => None,
     };
     // Signed P&L, not a magnitude. `dv01 = modified x mv x 1e-4` is positive
@@ -283,12 +286,14 @@ pub(crate) fn future_positions(
 
 pub async fn derivatives_h(
     State(st): State<AppState>,
+    Path(pid): Path<i64>,
     Query(q): Query<DateQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let (dates, date, rows, _refs) = snapshot(&st, &q).await?;
+    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let (dates, date, rows, _refs) = snapshot(&st, pid, &q).await?;
     let specs = db::repo::contracts_all(&st.pool).await?;
     let aum = match date {
-        Some(d) => db::repo::aum_for(&st.pool, d).await?.unwrap_or(0.0),
+        Some(d) => db::repo::aum_for(&st.pool, pid, d).await?.unwrap_or(0.0),
         None => 0.0,
     };
     let snap = future_positions(&rows, &specs);

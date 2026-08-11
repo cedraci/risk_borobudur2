@@ -51,8 +51,9 @@ pub struct ImportRecord {
     pub row_counts: serde_json::Value,
 }
 
-pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &ParsedWorkbook) -> anyhow::Result<ImportOutcome> {
-    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM imports WHERE sha256 = $1")
+pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, sha256: &str, wb: &ParsedWorkbook) -> anyhow::Result<ImportOutcome> {
+    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM imports WHERE portfolio_id = $1 AND sha256 = $2")
+        .bind(portfolio_id)
         .bind(sha256)
         .fetch_optional(pool)
         .await?
@@ -77,7 +78,9 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
     let mut tx = pool.begin().await?;
 
     let prev_latest: Option<NaiveDate> =
-        sqlx::query_scalar("SELECT max(nav_date) FROM imports").fetch_one(&mut *tx).await?;
+        sqlx::query_scalar("SELECT max(nav_date) FROM imports WHERE portfolio_id = $1")
+            .bind(portfolio_id)
+            .fetch_one(&mut *tx).await?;
     let replace_div_ops = prev_latest.is_none_or(|d| wb.nav_date >= d);
 
     let nav_rows = wb.nav_history.len() + 1;
@@ -87,30 +90,30 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
         "operations": if replace_div_ops { wb.operations.len() } else { 0 },
     });
     let (import_id,): (i64,) = sqlx::query_as(
-        "INSERT INTO imports (filename, sha256, nav_date, row_counts) VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
-    .bind(filename).bind(sha256).bind(wb.nav_date).bind(&row_counts)
+    .bind(portfolio_id).bind(filename).bind(sha256).bind(wb.nav_date).bind(&row_counts)
     .fetch_one(&mut *tx)
     .await?;
 
-    const UPSERT_NAV: &str = "INSERT INTO nav_history (date, aum, shares, nav) VALUES ($1, $2, $3, $4)
-        ON CONFLICT (date) DO UPDATE SET aum = EXCLUDED.aum, shares = EXCLUDED.shares, nav = EXCLUDED.nav";
+    const UPSERT_NAV: &str = "INSERT INTO nav_history (portfolio_id, date, aum, shares, nav) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (portfolio_id, date) DO UPDATE SET aum = EXCLUDED.aum, shares = EXCLUDED.shares, nav = EXCLUDED.nav";
     for r in &wb.nav_history {
-        sqlx::query(UPSERT_NAV).bind(r.date).bind(r.aum).bind(r.shares).bind(r.nav)
+        sqlx::query(UPSERT_NAV).bind(portfolio_id).bind(r.date).bind(r.aum).bind(r.shares).bind(r.nav)
             .execute(&mut *tx).await?;
     }
     // the recap's own NAV row (not yet in HISTO_NAV)
-    sqlx::query(UPSERT_NAV).bind(wb.nav_date).bind(wb.aum).bind(wb.shares).bind(wb.nav)
+    sqlx::query(UPSERT_NAV).bind(portfolio_id).bind(wb.nav_date).bind(wb.aum).bind(wb.shares).bind(wb.nav)
         .execute(&mut *tx).await?;
 
-    sqlx::query("DELETE FROM position_snapshots WHERE nav_date = $1")
-        .bind(wb.nav_date).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM position_snapshots WHERE portfolio_id = $1 AND nav_date = $2")
+        .bind(portfolio_id).bind(wb.nav_date).execute(&mut *tx).await?;
     for p in &wb.positions {
         sqlx::query(
-            "INSERT INTO position_snapshots (nav_date, import_id, asset_type, isin, name, currency, quantity, avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+            "INSERT INTO position_snapshots (portfolio_id, nav_date, import_id, asset_type, isin, name, currency, quantity, avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
-        .bind(wb.nav_date).bind(import_id).bind(&p.asset_type).bind(&p.isin).bind(&p.name)
+        .bind(portfolio_id).bind(wb.nav_date).bind(import_id).bind(&p.asset_type).bind(&p.isin).bind(&p.name)
         .bind(&p.currency).bind(p.quantity).bind(p.avg_cost).bind(p.price).bind(p.valuation_ccy)
         .bind(p.accrued_interest).bind(p.fx_rate).bind(p.valuation_eur).bind(p.weight).bind(&p.ticker)
         .execute(&mut *tx)
@@ -141,19 +144,19 @@ pub async fn import_workbook(pool: &PgPool, filename: &str, sha256: &str, wb: &P
     warnings.extend(pam_warnings(wb));
 
     if replace_div_ops {
-        sqlx::query("DELETE FROM dividends").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM dividends WHERE portfolio_id = $1").bind(portfolio_id).execute(&mut *tx).await?;
         for r in &wb.dividends {
-            sqlx::query("INSERT INTO dividends (provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5)")
-                .bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
+            sqlx::query("INSERT INTO dividends (portfolio_id, provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5, $6)")
+                .bind(portfolio_id).bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
                 .execute(&mut *tx).await?;
         }
-        sqlx::query("DELETE FROM operations").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM operations WHERE portfolio_id = $1").bind(portfolio_id).execute(&mut *tx).await?;
         for r in &wb.operations {
             sqlx::query(
-                "INSERT INTO operations (trade_date, side, ticker, isin, name, currency, quantity, price, gross_amount, fees, net_price, net_amount)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                "INSERT INTO operations (portfolio_id, trade_date, side, ticker, isin, name, currency, quantity, price, gross_amount, fees, net_price, net_amount)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             )
-            .bind(r.trade_date).bind(&r.side).bind(&r.ticker).bind(&r.isin).bind(&r.name)
+            .bind(portfolio_id).bind(r.trade_date).bind(&r.side).bind(&r.ticker).bind(&r.isin).bind(&r.name)
             .bind(&r.currency).bind(r.quantity).bind(r.price).bind(r.gross_amount).bind(r.fees)
             .bind(r.net_price).bind(r.net_amount)
             .execute(&mut *tx)
@@ -354,38 +357,48 @@ fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
     warnings
 }
 
-pub async fn nav_rows(pool: &PgPool) -> anyhow::Result<Vec<NavRow>> {
+pub async fn nav_rows(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<NavRow>> {
     Ok(sqlx::query_as(
-        "SELECT date, aum::float8 AS aum, shares::float8 AS shares, nav::float8 AS nav FROM nav_history ORDER BY date",
+        "SELECT date, aum::float8 AS aum, shares::float8 AS shares, nav::float8 AS nav
+         FROM nav_history WHERE portfolio_id = $1 ORDER BY date",
     )
+    .bind(portfolio_id)
     .fetch_all(pool)
     .await?)
 }
 
-pub async fn position_dates(pool: &PgPool) -> anyhow::Result<Vec<NaiveDate>> {
-    Ok(sqlx::query_scalar("SELECT DISTINCT nav_date FROM position_snapshots ORDER BY nav_date DESC")
-        .fetch_all(pool)
-        .await?)
+pub async fn position_dates(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<NaiveDate>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT nav_date FROM position_snapshots WHERE portfolio_id = $1 ORDER BY nav_date DESC",
+    )
+    .bind(portfolio_id)
+    .fetch_all(pool)
+    .await?)
 }
 
-pub async fn positions_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Vec<PositionRecord>> {
+pub async fn positions_for(pool: &PgPool, portfolio_id: i64, date: NaiveDate) -> anyhow::Result<Vec<PositionRecord>> {
     Ok(sqlx::query_as(
         "SELECT nav_date, asset_type, isin, name, currency,
                 quantity::float8 AS quantity, avg_cost::float8 AS avg_cost, price::float8 AS price,
                 valuation_ccy::float8 AS valuation_ccy, accrued_interest::float8 AS accrued_interest,
                 fx_rate::float8 AS fx_rate, valuation_eur::float8 AS valuation_eur,
                 weight::float8 AS weight, ticker
-         FROM position_snapshots WHERE nav_date = $1 ORDER BY id",
+         FROM position_snapshots WHERE portfolio_id = $1 AND nav_date = $2 ORDER BY id",
     )
+    .bind(portfolio_id)
     .bind(date)
     .fetch_all(pool)
     .await?)
 }
 
-pub async fn imports_list(pool: &PgPool) -> anyhow::Result<Vec<ImportRecord>> {
-    Ok(sqlx::query_as("SELECT id, filename, nav_date, imported_at, row_counts FROM imports ORDER BY imported_at DESC")
-        .fetch_all(pool)
-        .await?)
+pub async fn imports_list(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<ImportRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT id, filename, nav_date, imported_at, row_counts FROM imports
+         WHERE portfolio_id = $1 ORDER BY imported_at DESC",
+    )
+    .bind(portfolio_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -497,23 +510,25 @@ pub struct CtdRecord {
 /// re-upload is a corrected pull, which must win.
 pub async fn ctd_replace(
     pool: &PgPool,
+    portfolio_id: i64,
     date: NaiveDate,
     filename: &str,
     rows: &[ingest::CtdRow],
 ) -> anyhow::Result<usize> {
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM futures_analytics WHERE nav_date = $1")
+    sqlx::query("DELETE FROM futures_analytics WHERE portfolio_id = $1 AND nav_date = $2")
+        .bind(portfolio_id)
         .bind(date)
         .execute(&mut *tx)
         .await?;
     for r in rows {
         sqlx::query(
             "INSERT INTO futures_analytics
-               (nav_date, ticker, ctd_isin, ctd_mod_duration, ctd_clean_price,
+               (portfolio_id, nav_date, ticker, ctd_isin, ctd_mod_duration, ctd_clean_price,
                 ctd_accrued, conversion_factor, source_file)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
-        .bind(date).bind(&r.ticker).bind(&r.ctd_isin).bind(r.ctd_mod_duration)
+        .bind(portfolio_id).bind(date).bind(&r.ticker).bind(&r.ctd_isin).bind(r.ctd_mod_duration)
         .bind(r.ctd_clean_price).bind(r.ctd_accrued).bind(r.conversion_factor).bind(filename)
         .execute(&mut *tx)
         .await?;
@@ -522,23 +537,25 @@ pub async fn ctd_replace(
     Ok(rows.len())
 }
 
-pub async fn ctd_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Vec<CtdRecord>> {
+pub async fn ctd_for(pool: &PgPool, portfolio_id: i64, date: NaiveDate) -> anyhow::Result<Vec<CtdRecord>> {
     Ok(sqlx::query_as(
         "SELECT nav_date, ticker, ctd_isin,
                 ctd_mod_duration::float8 AS ctd_mod_duration,
                 ctd_clean_price::float8 AS ctd_clean_price,
                 ctd_accrued::float8 AS ctd_accrued,
                 conversion_factor::float8 AS conversion_factor
-         FROM futures_analytics WHERE nav_date = $1 ORDER BY ticker",
+         FROM futures_analytics WHERE portfolio_id = $1 AND nav_date = $2 ORDER BY ticker",
     )
+    .bind(portfolio_id)
     .bind(date)
     .fetch_all(pool)
     .await?)
 }
 
 /// AUM recorded for a NAV date, used as the denominator for exposure.
-pub async fn aum_for(pool: &PgPool, date: NaiveDate) -> anyhow::Result<Option<f64>> {
-    Ok(sqlx::query_scalar("SELECT aum::float8 FROM nav_history WHERE date = $1")
+pub async fn aum_for(pool: &PgPool, portfolio_id: i64, date: NaiveDate) -> anyhow::Result<Option<f64>> {
+    Ok(sqlx::query_scalar("SELECT aum::float8 FROM nav_history WHERE portfolio_id = $1 AND date = $2")
+        .bind(portfolio_id)
         .bind(date)
         .fetch_optional(pool)
         .await?)
@@ -558,13 +575,14 @@ pub struct OperationRecord {
     pub fees: Option<f64>,
 }
 
-pub async fn operations_all(pool: &PgPool) -> anyhow::Result<Vec<OperationRecord>> {
+pub async fn operations_all(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<OperationRecord>> {
     Ok(sqlx::query_as(
         "SELECT trade_date, side, isin, ticker, name, currency,
                 quantity::float8 AS quantity, net_price::float8 AS net_price,
                 net_amount::float8 AS net_amount, fees::float8 AS fees
-         FROM operations ORDER BY trade_date, id",
+         FROM operations WHERE portfolio_id = $1 ORDER BY trade_date, id",
     )
+    .bind(portfolio_id)
     .fetch_all(pool)
     .await?)
 }
@@ -577,11 +595,12 @@ pub struct DividendRecord {
     pub currency: String,
 }
 
-pub async fn dividends_all(pool: &PgPool) -> anyhow::Result<Vec<DividendRecord>> {
+pub async fn dividends_all(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<DividendRecord>> {
     Ok(sqlx::query_as(
         "SELECT provision_date, issuer, amount::float8 AS amount, currency
-         FROM dividends ORDER BY provision_date",
+         FROM dividends WHERE portfolio_id = $1 ORDER BY provision_date",
     )
+    .bind(portfolio_id)
     .fetch_all(pool)
     .await?)
 }
@@ -663,27 +682,29 @@ pub struct EmirKpi {
     pub note: Option<String>,
 }
 
-pub async fn emir_kpis_all(pool: &PgPool) -> anyhow::Result<Vec<EmirKpi>> {
+pub async fn emir_kpis_all(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<EmirKpi>> {
     Ok(sqlx::query_as::<_, EmirKpi>(
         "SELECT month, unconfirmed_over_5d, reconciliation, disputes, note
-         FROM emir_kpis ORDER BY month DESC",
+         FROM emir_kpis WHERE portfolio_id = $1 ORDER BY month DESC",
     )
+    .bind(portfolio_id)
     .fetch_all(pool)
     .await?)
 }
 
 /// Full-row replace, like `contracts_upsert`: every field is written as given.
-pub async fn emir_kpi_upsert(pool: &PgPool, k: &EmirKpi) -> anyhow::Result<()> {
+pub async fn emir_kpi_upsert(pool: &PgPool, portfolio_id: i64, k: &EmirKpi) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO emir_kpis (month, unconfirmed_over_5d, reconciliation, disputes, note)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (month) DO UPDATE SET
+        "INSERT INTO emir_kpis (portfolio_id, month, unconfirmed_over_5d, reconciliation, disputes, note)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (portfolio_id, month) DO UPDATE SET
            unconfirmed_over_5d = EXCLUDED.unconfirmed_over_5d,
            reconciliation = EXCLUDED.reconciliation,
            disputes = EXCLUDED.disputes,
            note = EXCLUDED.note,
            updated_at = now()",
     )
+    .bind(portfolio_id)
     .bind(k.month)
     .bind(k.unconfirmed_over_5d)
     .bind(&k.reconciliation)
@@ -692,6 +713,45 @@ pub async fn emir_kpi_upsert(pool: &PgPool, k: &EmirKpi) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// ---- portfolios ----
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct Portfolio {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub archived: bool,
+    /// Latest imported NAV date, the freshness signal for selector/overview.
+    pub latest_nav_date: Option<chrono::NaiveDate>,
+}
+
+const SELECT_PORTFOLIO: &str = "SELECT p.id, p.name, p.kind, p.archived,
+    (SELECT max(nav_date) FROM imports i WHERE i.portfolio_id = p.id) AS latest_nav_date
+ FROM portfolios p";
+
+pub async fn portfolios_list(pool: &PgPool) -> anyhow::Result<Vec<Portfolio>> {
+    Ok(sqlx::query_as(&format!("{SELECT_PORTFOLIO} ORDER BY p.id")).fetch_all(pool).await?)
+}
+
+pub async fn portfolio_get(pool: &PgPool, id: i64) -> anyhow::Result<Option<Portfolio>> {
+    Ok(sqlx::query_as(&format!("{SELECT_PORTFOLIO} WHERE p.id = $1"))
+        .bind(id).fetch_optional(pool).await?)
+}
+
+pub async fn portfolio_create(pool: &PgPool, name: &str, kind: &str) -> anyhow::Result<Portfolio> {
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO portfolios (name, kind) VALUES ($1, $2) RETURNING id")
+        .bind(name).bind(kind).fetch_one(pool).await?;
+    Ok(portfolio_get(pool, id).await?.expect("just inserted"))
+}
+
+pub async fn portfolio_update(pool: &PgPool, id: i64, name: &str, archived: bool) -> anyhow::Result<Option<Portfolio>> {
+    let n = sqlx::query("UPDATE portfolios SET name = $2, archived = $3 WHERE id = $1")
+        .bind(id).bind(name).bind(archived).execute(pool).await?.rows_affected();
+    if n == 0 { return Ok(None); }
+    portfolio_get(pool, id).await
 }
 
 #[cfg(test)]

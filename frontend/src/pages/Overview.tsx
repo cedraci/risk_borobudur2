@@ -3,19 +3,21 @@ import EChart from "../components/EChart";
 import KpiCard from "../components/KpiCard";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
+import { usePortfolio } from "../PortfolioContext";
 import { Link } from "react-router-dom";
 
 export default function Overview() {
-  const summary = useFetch(() => getSummary(), []);
-  const nav = useFetch(() => getNav(), []);
-  const dd = useFetch(() => getDrawdowns(), []);
+  const portfolio = usePortfolio();
+  const summary = useFetch(() => getSummary(portfolio.id), [portfolio.id]);
+  const nav = useFetch(() => getNav(portfolio.id), [portfolio.id]);
+  const dd = useFetch(() => getDrawdowns(portfolio.id), [portfolio.id]);
   const s = summary.data;
 
   if (s?.empty) {
     return (
       <div>
         <h2>Overview</h2>
-        <div className="card">No data yet — <Link to="/data">import a NAV Recap file</Link> to get started.</div>
+        <div className="card">No data yet — <Link to={`/p/${portfolio.id}/data`}>import a NAV Recap file</Link> to get started.</div>
       </div>
     );
   }

@@ -20,7 +20,7 @@ async fn import_seeds_futures_contracts_unconfirmed() {
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     let wb = ingest::parse_workbook(&bytes).unwrap();
-    let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-seed", &wb).await.unwrap();
+    let out = db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-seed", &wb).await.unwrap();
     assert!(!out.duplicate);
 
     let cs = db::repo::contracts_all(&pool).await.unwrap();
@@ -69,7 +69,7 @@ async fn duplicate_import_seeds_specs_a_pre_existing_database_is_missing() {
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     let wb = ingest::parse_workbook(&bytes).unwrap();
-    db::repo::import_workbook(&pool, "s.xlsx", "sha-dup", &wb).await.unwrap();
+    db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-dup", &wb).await.unwrap();
 
     // Rewind to what an upgraded installation actually looks like: the import
     // is on record, the specs are not.
@@ -77,7 +77,7 @@ async fn duplicate_import_seeds_specs_a_pre_existing_database_is_missing() {
     assert!(db::repo::contracts_all(&pool).await.unwrap().is_empty());
 
     // Same file, same sha256 -> the duplicate arm.
-    let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-dup", &wb).await.unwrap();
+    let out = db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-dup", &wb).await.unwrap();
     assert!(out.duplicate, "same sha256 must still be recognised as a duplicate");
     assert_eq!(out.positions, 0, "a duplicate re-ingests nothing");
 
@@ -100,7 +100,7 @@ async fn duplicate_import_seeds_specs_a_pre_existing_database_is_missing() {
         point_value: Some(1000.0), currency: "USD".into(), curve: Some("US-10y".into()),
         price_convention: "th32".into(), confirmed: true, otc: false,
     }).await.unwrap();
-    let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-dup", &wb).await.unwrap();
+    let out = db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-dup", &wb).await.unwrap();
     assert!(out.duplicate);
     let after = db::repo::contracts_all(&pool).await.unwrap();
     let ty = after.iter().find(|c| c.contract_root == "TY").unwrap();
@@ -122,7 +122,7 @@ async fn reimport_warns_on_point_value_mismatch_and_never_overwrites() {
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     let wb = ingest::parse_workbook(&bytes).unwrap();
-    db::repo::import_workbook(&pool, "s.xlsx", "sha-a", &wb).await.unwrap();
+    db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-a", &wb).await.unwrap();
 
     // Correct TY by hand, exactly as the user would on the Data page.
     let ty = db::repo::FuturesContract {
@@ -133,7 +133,7 @@ async fn reimport_warns_on_point_value_mismatch_and_never_overwrites() {
     db::repo::contracts_upsert(&pool, &ty).await.unwrap();
 
     // Re-import the same workbook under a new hash.
-    let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-b", &wb).await.unwrap();
+    let out = db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-b", &wb).await.unwrap();
 
     let after = db::repo::contracts_all(&pool).await.unwrap();
     let ty2 = after.iter().find(|c| c.contract_root == "TY").unwrap();
@@ -147,7 +147,7 @@ async fn reimport_warns_on_point_value_mismatch_and_never_overwrites() {
     db::repo::contracts_upsert(&pool, &db::repo::FuturesContract {
         price_convention: "decimal".into(), ..ty
     }).await.unwrap();
-    let out = db::repo::import_workbook(&pool, "s.xlsx", "sha-c", &wb).await.unwrap();
+    let out = db::repo::import_workbook(&pool, 1, "s.xlsx", "sha-c", &wb).await.unwrap();
     let w = futures_warnings(&out.warnings).into_iter().cloned().collect::<Vec<_>>().join(" | ");
     assert!(w.contains("TY"), "warning names the contract: {w}");
     assert!(w.contains("th32"), "warning names the likely convention: {w}");

@@ -1,4 +1,10 @@
-import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
+import { useEffect } from "react";
+import {
+  BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams,
+} from "react-router-dom";
+import { getPortfolios, type Portfolio } from "./api";
+import { useFetch } from "./hooks";
+import { lastPortfolio, PortfolioContext, PortfoliosReloadContext, rememberPortfolio } from "./PortfolioContext";
 import Overview from "./pages/Overview";
 import Performance from "./pages/Performance";
 import PnlPage from "./pages/PnlPage";
@@ -9,7 +15,7 @@ import DerivativesPage from "./pages/DerivativesPage";
 import DataPage from "./pages/DataPage";
 
 const links = [
-  { to: "/", label: "Overview" },
+  { to: "", label: "Overview" },
   { to: "/performance", label: "Performance" },
   { to: "/pnl", label: "P&L" },
   { to: "/risk", label: "Risk" },
@@ -19,29 +25,105 @@ const links = [
   { to: "/data", label: "Data" },
 ];
 
-export default function App() {
+/** `/` has no portfolio of its own — send the user into the remembered one
+ * (falling back to the first active portfolio when it's missing or archived). */
+function RootRedirect({ portfolios }: { portfolios: Portfolio[] }) {
+  const active = portfolios.filter((p) => !p.archived);
+  if (active.length === 0) {
+    const first = portfolios[0];
+    return (
+      <div className="layout">
+        <main className="content">
+          <p>No active portfolios yet.</p>
+          {first && <p><Link to={`/p/${first.id}/data`}>Manage portfolios</Link></p>}
+        </main>
+      </div>
+    );
+  }
+  const remembered = lastPortfolio();
+  const target = active.find((p) => p.id === remembered) ?? active[0];
+  return <Navigate to={`/p/${target.id}/`} replace />;
+}
+
+function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
+  const { pid } = useParams<{ pid: string }>();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const portfolio = portfolios.find((p) => String(p.id) === pid);
+
+  useEffect(() => {
+    if (portfolio) rememberPortfolio(portfolio.id);
+  }, [portfolio]);
+
+  if (!portfolio) return <Navigate to="/" replace />;
+
+  const prefix = `/p/${portfolio.id}`;
+  const rel = location.pathname.startsWith(prefix) ? location.pathname.slice(prefix.length) : "";
+  const active = portfolios.filter((p) => !p.archived);
+
   return (
-    <BrowserRouter>
+    <PortfolioContext.Provider value={portfolio}>
       <div className="layout">
         <nav className="sidebar">
           <h1>Borobudur<br />Risk</h1>
+          <div className="controls">
+            <select
+              value={portfolio.id}
+              onChange={(e) => navigate(`/p/${e.target.value}${rel}`)}
+            >
+              {active.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}{p.kind === "mandate" ? " (mandat)" : ""}</option>
+              ))}
+            </select>
+          </div>
           {links.map((l) => (
-            <NavLink key={l.to} to={l.to} end={l.to === "/"}>{l.label}</NavLink>
+            <NavLink key={l.to} to={`${prefix}${l.to}`} end={l.to === ""}>{l.label}</NavLink>
           ))}
         </nav>
-        <main className="content">
+        <main className="content" key={portfolio.id}>
           <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/performance" element={<Performance />} />
-            <Route path="/pnl" element={<PnlPage />} />
-            <Route path="/risk" element={<Risk />} />
-            <Route path="/var" element={<VarPage />} />
-            <Route path="/limits" element={<LimitsPage />} />
-            <Route path="/derivatives" element={<DerivativesPage />} />
-            <Route path="/data" element={<DataPage />} />
+            <Route path="" element={<Overview />} />
+            <Route path="performance" element={<Performance />} />
+            <Route path="pnl" element={<PnlPage />} />
+            <Route path="risk" element={<Risk />} />
+            <Route path="var" element={<VarPage />} />
+            <Route path="limits" element={<LimitsPage />} />
+            <Route path="derivatives" element={<DerivativesPage />} />
+            <Route path="data" element={<DataPage />} />
           </Routes>
         </main>
       </div>
-    </BrowserRouter>
+    </PortfolioContext.Provider>
+  );
+}
+
+export default function App() {
+  const portfolios = useFetch(() => getPortfolios(), []);
+
+  if (portfolios.error) {
+    return (
+      <div className="layout">
+        <main className="content"><p className="neg">{portfolios.error}</p></main>
+      </div>
+    );
+  }
+  if (!portfolios.data) {
+    return (
+      <div className="layout">
+        <main className="content"><p>Loading…</p></main>
+      </div>
+    );
+  }
+
+  return (
+    <PortfoliosReloadContext.Provider value={portfolios.reload}>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<RootRedirect portfolios={portfolios.data} />} />
+          <Route path="/p/:pid/*" element={<PortfolioLayout portfolios={portfolios.data} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </PortfoliosReloadContext.Provider>
   );
 }

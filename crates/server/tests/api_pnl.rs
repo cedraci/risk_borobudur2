@@ -13,7 +13,7 @@ fn upload_req(bytes: &[u8]) -> Request<Body> {
     ).as_bytes());
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    Request::post("/api/imports")
+    Request::post("/api/portfolios/1/imports")
         .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
         .body(Body::from(body)).unwrap()
 }
@@ -69,9 +69,9 @@ async fn app_with_sample() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
         .fetch_one(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO position_snapshots
-             (nav_date, import_id, asset_type, isin, name, currency, quantity,
+             (portfolio_id, nav_date, import_id, asset_type, isin, name, currency, quantity,
               avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
-         SELECT $1, import_id, asset_type, isin, name, currency, quantity,
+         SELECT portfolio_id, $1, import_id, asset_type, isin, name, currency, quantity,
                 avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker
          FROM position_snapshots WHERE nav_date = (SELECT MAX(nav_date) FROM position_snapshots)",
     )
@@ -86,7 +86,7 @@ async fn app_with_sample() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
 #[tokio::test]
 async fn pnl_snaps_to_snapshot_dates_and_reports_which_it_used() {
     let (app, pool, edb) = app_with_sample().await;
-    let (status, body) = get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["empty"], false);
     let p = &body["period"];
@@ -101,7 +101,7 @@ async fn pnl_snaps_to_snapshot_dates_and_reports_which_it_used() {
 #[tokio::test]
 async fn reconciliation_residual_is_always_present() {
     let (app, pool, edb) = app_with_sample().await;
-    let (_, body) = get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01").await;
+    let (_, body) = get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01").await;
     let r = &body["reconciliation"];
     assert!(r["residual"].is_number(), "residual must always be returned");
     assert!(r["within_tolerance"].is_boolean());
@@ -115,7 +115,7 @@ async fn reconciliation_residual_is_always_present() {
 async fn groups_by_the_requested_dimension() {
     let (app, pool, edb) = app_with_sample().await;
     let (_, body) =
-        get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01&dimension=asset_class").await;
+        get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01&dimension=asset_class").await;
     let keys: Vec<String> = body["groups"].as_array().unwrap().iter()
         .map(|g| g["key"].as_str().unwrap().to_string()).collect();
     assert!(keys.iter().any(|k| k == "Equities"), "got {keys:?}");
@@ -127,7 +127,7 @@ async fn groups_by_the_requested_dimension() {
 #[tokio::test]
 async fn an_unknown_dimension_is_a_bad_request() {
     let (app, pool, edb) = app_with_sample().await;
-    let (status, _) = get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01&dimension=zzz").await;
+    let (status, _) = get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01&dimension=zzz").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     pool.close().await;
@@ -138,7 +138,7 @@ async fn an_unknown_dimension_is_a_bad_request() {
 async fn group_totals_equal_the_sum_of_their_instruments() {
     let (app, pool, edb) = app_with_sample().await;
     let (_, body) =
-        get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01&dimension=currency").await;
+        get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01&dimension=currency").await;
     for g in body["groups"].as_array().unwrap() {
         let sum: f64 = g["instruments"].as_array().unwrap().iter()
             .map(|i| i["realized_price"].as_f64().unwrap() + i["unrealized_price"].as_f64().unwrap()
@@ -158,7 +158,7 @@ async fn fewer_than_two_snapshots_reports_empty_with_a_reason() {
     // around for the other tests in this file. Assert that degraded state
     // directly here.
     let (app, pool, edb) = upload_sample().await;
-    let (status, body) = get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["empty"], true);
     let warnings: Vec<&str> = body["warnings"].as_array().unwrap().iter()
@@ -175,7 +175,7 @@ async fn a_range_resolving_to_a_single_snapshot_reports_empty_with_a_reason() {
     // that pins from and to to the same one of them still resolves to a
     // single endpoint - no delta to compute.
     let (app, pool, edb) = app_with_sample().await;
-    let (status, body) = get_json(&app, "/api/pnl?from=2026-07-24&to=2026-07-24").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2026-07-24&to=2026-07-24").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["empty"], true);
     let warnings: Vec<&str> = body["warnings"].as_array().unwrap().iter()
@@ -235,43 +235,43 @@ async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     let import_id: i64 = sqlx::query_scalar(
-        "INSERT INTO imports (filename, sha256, nav_date, row_counts)
-         VALUES ('mini.xlsx', 'mini-sha', '2026-06-30', '{}') RETURNING id",
+        "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts)
+         VALUES (1, 'mini.xlsx', 'mini-sha', '2026-06-30', '{}') RETURNING id",
     ).fetch_one(&pool).await.unwrap();
 
     sqlx::query(
         "INSERT INTO position_snapshots
-           (nav_date, import_id, asset_type, isin, name, currency,
+           (portfolio_id, nav_date, import_id, asset_type, isin, name, currency,
             quantity, price, valuation_ccy, fx_rate, valuation_eur)
          VALUES
-           ('2026-06-01', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 100,  10,   1000, NULL, 1000),
-           ('2026-06-01', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5,    1000, 0.90, 900),
-           ('2026-06-01', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 5000, NULL, 5000),
-           ('2026-06-30', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 150,  11,   1650, NULL, 1650),
-           ('2026-06-30', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5.5,  1100, 0.95, 1045),
-           ('2026-06-30', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 4900, NULL, 4900),
-           ('2026-06-30', $1, 'Dividendes', 'DIVBETA', 'Beta Corp div', 'USD', NULL, NULL, 300,  0.95, 285),
-           ('2026-07-15', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 150,  11,   1650, NULL, 1650),
-           ('2026-07-15', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5.5,  1100, 0.95, 1045),
-           ('2026-07-15', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 5185, NULL, 5185)",
+           (1, '2026-06-01', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 100,  10,   1000, NULL, 1000),
+           (1, '2026-06-01', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5,    1000, 0.90, 900),
+           (1, '2026-06-01', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 5000, NULL, 5000),
+           (1, '2026-06-30', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 150,  11,   1650, NULL, 1650),
+           (1, '2026-06-30', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5.5,  1100, 0.95, 1045),
+           (1, '2026-06-30', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 4900, NULL, 4900),
+           (1, '2026-06-30', $1, 'Dividendes', 'DIVBETA', 'Beta Corp div', 'USD', NULL, NULL, 300,  0.95, 285),
+           (1, '2026-07-15', $1, 'Action',     'EQ1EUR',  'Alpha SE',      'EUR', 150,  11,   1650, NULL, 1650),
+           (1, '2026-07-15', $1, 'Action',     'EQ2USD',  'Beta Corp',     'USD', 200,  5.5,  1100, 0.95, 1045),
+           (1, '2026-07-15', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',      'EUR', NULL, NULL, 5185, NULL, 5185)",
     ).bind(import_id).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO nav_history (date, aum, shares, nav) VALUES
-           ('2026-06-01', 6900, 69, 100),
-           ('2026-06-10', 7400, 74, 100),
-           ('2026-06-30', 7880, 74, 106.486486486486486),
-           ('2026-07-15', 7880, 74, 106.486486486486486)",
+        "INSERT INTO nav_history (portfolio_id, date, aum, shares, nav) VALUES
+           (1, '2026-06-01', 6900, 69, 100),
+           (1, '2026-06-10', 7400, 74, 100),
+           (1, '2026-06-30', 7880, 74, 106.486486486486486),
+           (1, '2026-07-15', 7880, 74, 106.486486486486486)",
     ).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO operations (trade_date, side, isin, name, currency, quantity, net_price, net_amount)
-         VALUES ('2026-06-15', 'Achat', 'EQ1EUR', 'Alpha SE', 'EUR', 50, 12, -600)",
+        "INSERT INTO operations (portfolio_id, trade_date, side, isin, name, currency, quantity, net_price, net_amount)
+         VALUES (1, '2026-06-15', 'Achat', 'EQ1EUR', 'Alpha SE', 'EUR', 50, 12, -600)",
     ).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO dividends (provision_date, payment_date, issuer, amount, currency)
-         VALUES ('2026-06-20', '2026-07-10', 'Beta Corp', 300, 'USD')",
+        "INSERT INTO dividends (portfolio_id, provision_date, payment_date, issuer, amount, currency)
+         VALUES (1, '2026-06-20', '2026-07-10', 'Beta Corp', 300, 'USD')",
     ).execute(&pool).await.unwrap();
 
     sqlx::query(
@@ -279,7 +279,7 @@ async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
     ).execute(&pool).await.unwrap();
 
     // Period 1: subscription + settled buy + dividend accrual.
-    let (status, body) = get_json(&app, "/api/pnl?from=2026-06-01&to=2026-06-30").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2026-06-01&to=2026-06-30").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["empty"], false, "{body}");
     assert_eq!(body["warnings"].as_array().unwrap().len(), 0, "{body}");
@@ -297,7 +297,7 @@ async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
 
     // Period 2: the dividend's payment leg (receivable -> cash) must net to
     // zero, not resurface as P&L.
-    let (status, body) = get_json(&app, "/api/pnl?from=2026-06-30&to=2026-07-15").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2026-06-30&to=2026-07-15").await;
     assert_eq!(status, StatusCode::OK);
     let r = &body["reconciliation"];
     assert!((r["investment_pnl"].as_f64().unwrap() - 0.0).abs() < 1e-6, "{r}");
@@ -342,43 +342,43 @@ async fn duplicate_isin_receivable_rows_do_not_evict_the_instrument() {
     let app = server::routes::router(server::state::AppState { pool: pool.clone() });
 
     let import_id: i64 = sqlx::query_scalar(
-        "INSERT INTO imports (filename, sha256, nav_date, row_counts)
-         VALUES ('dup.xlsx', 'dup-sha', '2026-08-20', '{}') RETURNING id",
+        "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts)
+         VALUES (1, 'dup.xlsx', 'dup-sha', '2026-08-20', '{}') RETURNING id",
     ).fetch_one(&pool).await.unwrap();
 
     // Insertion order is load-bearing: positions_for orders by id, so each
     // Dividendes row lands after its equity and wins any one-row-per-ISIN map.
     sqlx::query(
         "INSERT INTO position_snapshots
-           (nav_date, import_id, asset_type, isin, name, currency,
+           (portfolio_id, nav_date, import_id, asset_type, isin, name, currency,
             quantity, price, valuation_ccy, fx_rate, valuation_eur)
          VALUES
-           ('2026-08-10', $1, 'Action',     'EQDUP',   'Kering-like SA', 'EUR', 100,  10,   1000, NULL, 1000),
-           ('2026-08-10', $1, 'Dividendes', 'EQDUP',   'Kering-like div','EUR', NULL, NULL, 50,   NULL, 50),
-           ('2026-08-10', $1, 'Action',     'EQSHAD',  'ABN-like NV',    'EUR', 20,   10,   200,  NULL, 200),
-           ('2026-08-10', $1, 'Dividendes', 'EQSHAD',  'ABN-like div',   'EUR', NULL, NULL, 10,   NULL, 10),
-           ('2026-08-10', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',       'EUR', NULL, NULL, 5000, NULL, 5000),
-           ('2026-08-20', $1, 'Action',     'EQSHAD',  'ABN-like NV',    'EUR', 20,   13,   260,  NULL, 260),
-           ('2026-08-20', $1, 'Dividendes', 'EQSHAD',  'ABN-like div',   'EUR', NULL, NULL, 10,   NULL, 10),
-           ('2026-08-20', $1, 'Dividendes', 'EQDUP',   'Kering-like div','EUR', NULL, NULL, 50,   NULL, 50),
-           ('2026-08-20', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',       'EUR', NULL, NULL, 6100, NULL, 6100)",
+           (1, '2026-08-10', $1, 'Action',     'EQDUP',   'Kering-like SA', 'EUR', 100,  10,   1000, NULL, 1000),
+           (1, '2026-08-10', $1, 'Dividendes', 'EQDUP',   'Kering-like div','EUR', NULL, NULL, 50,   NULL, 50),
+           (1, '2026-08-10', $1, 'Action',     'EQSHAD',  'ABN-like NV',    'EUR', 20,   10,   200,  NULL, 200),
+           (1, '2026-08-10', $1, 'Dividendes', 'EQSHAD',  'ABN-like div',   'EUR', NULL, NULL, 10,   NULL, 10),
+           (1, '2026-08-10', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',       'EUR', NULL, NULL, 5000, NULL, 5000),
+           (1, '2026-08-20', $1, 'Action',     'EQSHAD',  'ABN-like NV',    'EUR', 20,   13,   260,  NULL, 260),
+           (1, '2026-08-20', $1, 'Dividendes', 'EQSHAD',  'ABN-like div',   'EUR', NULL, NULL, 10,   NULL, 10),
+           (1, '2026-08-20', $1, 'Dividendes', 'EQDUP',   'Kering-like div','EUR', NULL, NULL, 50,   NULL, 50),
+           (1, '2026-08-20', $1, 'Cash Acc',   'CASHEUR', 'Cash EUR',       'EUR', NULL, NULL, 6100, NULL, 6100)",
     ).bind(import_id).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO nav_history (date, aum, shares, nav) VALUES
-           ('2026-08-10', 6260, 62.6, 100),
-           ('2026-08-20', 6420, 62.6, 102.55591054313099)",
+        "INSERT INTO nav_history (portfolio_id, date, aum, shares, nav) VALUES
+           (1, '2026-08-10', 6260, 62.6, 100),
+           (1, '2026-08-20', 6420, 62.6, 102.55591054313099)",
     ).execute(&pool).await.unwrap();
 
     // The lifetime buy (before t0) seeds the cost basis; only the sale falls
     // inside the period.
     sqlx::query(
-        "INSERT INTO operations (trade_date, side, isin, name, currency, quantity, net_price, net_amount)
-         VALUES ('2026-08-01', 'Achat', 'EQDUP', 'Kering-like SA', 'EUR', 100, 10, -1000),
-                ('2026-08-15', 'Vente', 'EQDUP', 'Kering-like SA', 'EUR', -100, 11, 1100)",
+        "INSERT INTO operations (portfolio_id, trade_date, side, isin, name, currency, quantity, net_price, net_amount)
+         VALUES (1, '2026-08-01', 'Achat', 'EQDUP', 'Kering-like SA', 'EUR', 100, 10, -1000),
+                (1, '2026-08-15', 'Vente', 'EQDUP', 'Kering-like SA', 'EUR', -100, 11, 1100)",
     ).execute(&pool).await.unwrap();
 
-    let (status, body) = get_json(&app, "/api/pnl?from=2026-08-10&to=2026-08-20").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2026-08-10&to=2026-08-20").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["empty"], false, "{body}");
     assert_eq!(body["warnings"].as_array().unwrap().len(), 0, "{body}");
@@ -481,7 +481,7 @@ async fn instrument_and_reconciliation_arithmetic_matches_a_hand_checked_scenari
     )
     .bind(t0).execute(&pool).await.unwrap();
 
-    let (status, body) = get_json(&app, "/api/pnl?from=2020-01-01&to=2030-01-01").await;
+    let (status, body) = get_json(&app, "/api/portfolios/1/pnl?from=2020-01-01&to=2030-01-01").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["empty"], false);
 
