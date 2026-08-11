@@ -202,3 +202,64 @@ pub fn parse_hisinv(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
         warnings,
     })
 }
+
+// HISTOVLLUX columns (0-based).
+const V_FUND_CODE: usize = 0;
+const V_NAV_DATE: usize = 2;
+const V_SHARE_CLASS: usize = 3;
+const V_NAV: usize = 5;
+const V_TNA: usize = 6;
+const V_OUTSTANDING: usize = 7;
+const V_MIN_FIELDS: usize = 20;
+
+pub fn parse_histovl(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, ParseFailure> {
+    let (fund_code, file_date) = filename_meta(filename)
+        .ok_or_else(|| ParseFailure::Workbook(format!("filename {filename:?} does not match HISTOVLLUX_<fund>_<yyyymmdd>_<ts>.csv")))?;
+
+    let textual = decode_latin1(bytes);
+    let mut rows: Vec<(String, crate::NavHistoryRow)> = Vec::new();
+    for (i, line) in textual.lines().enumerate() {
+        let lineno = i + 1;
+        if line.trim().is_empty() { continue; }
+        let fields: Vec<&str> = line.split(';').collect();
+        if fields.len() < V_MIN_FIELDS {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: {} columns, expected at least {V_MIN_FIELDS} — not a HISTOVLLUX layout", fields.len())));
+        }
+        if field(&fields, V_FUND_CODE) != fund_code {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: fund code {:?} differs from filename code {fund_code:?}", field(&fields, V_FUND_CODE))));
+        }
+        let date = NaiveDate::parse_from_str(field(&fields, V_NAV_DATE), "%Y%m%d")
+            .map_err(|_| ParseFailure::Workbook(format!("line {lineno}: bad NAV date {:?}", field(&fields, V_NAV_DATE))))?;
+        if date != file_date {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: row date {date} differs from filename date {file_date}")));
+        }
+        let (Some(nav), Some(aum), Some(shares)) = (num(&fields, V_NAV), num(&fields, V_TNA), num(&fields, V_OUTSTANDING)) else {
+            return Err(ParseFailure::Workbook(format!("line {lineno}: NAV/TNA/outstanding missing or unparsable")));
+        };
+        rows.push((field(&fields, V_SHARE_CLASS).to_string(), crate::NavHistoryRow { date, aum, shares, nav }));
+    }
+
+    match rows.len() {
+        0 => Err(ParseFailure::Workbook("no NAV rows found".into())),
+        1 => {
+            let (_, nav_point) = rows.into_iter().next().unwrap();
+            Ok(UniversalBatch {
+                primary_date: file_date,
+                nav_points: vec![nav_point],
+                snapshots: Vec::new(),
+                dividends: None,
+                operations: None,
+                ref_hints: Vec::new(),
+                warnings: Vec::new(),
+            })
+        }
+        _ => {
+            let classes: Vec<String> = rows.iter().map(|(c, _)| c.clone()).collect();
+            Err(ParseFailure::Workbook(format!(
+                "multi share class not supported yet (classes {classes:?}) — a silent sum would make NAV-per-share analytics meaningless")))
+        }
+    }
+}

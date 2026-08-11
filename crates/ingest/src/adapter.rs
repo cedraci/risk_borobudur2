@@ -72,5 +72,50 @@ pub fn to_batch(wb: ParsedWorkbook) -> UniversalBatch {
     }
 }
 
-// (`detect` and `parse` dispatchers arrive in Task 4 with the CACEIS side;
-// this task only establishes the types and the NAV Recap conversion.)
+/// Route a file to its adapter. Content sniffs guard against renamed files:
+/// a CACEIS CSV must actually parse its first line's column count and date.
+pub fn detect(filename: &str, bytes: &[u8]) -> Result<Identification, DetectError> {
+    let lower = filename.to_ascii_lowercase();
+    let caceis_meta = || crate::caceis::filename_meta(filename)
+        .map(|(code, _)| (crate::caceis::SOURCE.to_string(), code));
+
+    if lower.starts_with("hisinvlux_") {
+        let Some(fund_code) = caceis_meta() else {
+            return Err(DetectError::Unrecognized(filename.to_string()));
+        };
+        if !sniff_semicolons(bytes, 66) { return Err(DetectError::Unrecognized(filename.to_string())); }
+        return Ok(Identification { kind: FileKind::CaceisHisinv, fund_code: Some(fund_code) });
+    }
+    if lower.starts_with("histovllux_") {
+        let Some(fund_code) = caceis_meta() else {
+            return Err(DetectError::Unrecognized(filename.to_string()));
+        };
+        if !sniff_semicolons(bytes, 20) { return Err(DetectError::Unrecognized(filename.to_string())); }
+        return Ok(Identification { kind: FileKind::CaceisHistovl, fund_code: Some(fund_code) });
+    }
+    if lower.starts_with("invxdvlux_") {
+        return Err(DetectError::Rejected(
+            "INVXDVLUX is not needed: HISINVLUX already carries the positions. Upload HISINVLUX and HISTOVLLUX.".into()));
+    }
+    if lower.starts_with("jouroplux_") {
+        return Err(DetectError::Rejected(
+            "JOUROPLUX recognized, but its parser is pending a sample file — request the feed from CACEIS and provide one sample so the parser can be written.".into()));
+    }
+    if lower.ends_with(".xlsx") && bytes.starts_with(b"PK\x03\x04") {
+        return Ok(Identification { kind: FileKind::NavRecap, fund_code: None });
+    }
+    Err(DetectError::Unrecognized(filename.to_string()))
+}
+
+fn sniff_semicolons(bytes: &[u8], min_fields: usize) -> bool {
+    let first_line: Vec<u8> = bytes.iter().copied().take_while(|&b| b != b'\n').collect();
+    first_line.iter().filter(|&&b| b == b';').count() + 1 >= min_fields
+}
+
+pub fn parse(kind: FileKind, filename: &str, bytes: &[u8]) -> Result<UniversalBatch, crate::ParseFailure> {
+    match kind {
+        FileKind::NavRecap => crate::parse_workbook(bytes).map(to_batch),
+        FileKind::CaceisHisinv => crate::caceis::parse_hisinv(filename, bytes),
+        FileKind::CaceisHistovl => crate::caceis::parse_histovl(filename, bytes),
+    }
+}

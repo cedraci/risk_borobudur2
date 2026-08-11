@@ -103,3 +103,65 @@ fn unmappable_asset_code_drops_the_row_with_a_warning() {
     let full = batch().snapshots[0].positions.len();
     assert_eq!(total, full - 1, "exactly the corrupted row dropped");
 }
+
+const HV_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_histovl.csv");
+const HV_MULTI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_histovl_multiclass.csv");
+const HV_FNAME: &str = "HISTOVLLUX_165878_20260729_20260730170850.csv";
+
+#[test]
+fn histovl_yields_one_nav_point() {
+    let bytes = std::fs::read(HV_FIXTURE).unwrap();
+    let b = caceis::parse_histovl(HV_FNAME, &bytes).unwrap();
+    assert_eq!(b.primary_date, chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap());
+    assert_eq!(b.nav_points.len(), 1);
+    let n = &b.nav_points[0];
+    assert_eq!(n.nav, 104.04);
+    assert_eq!(n.aum, 28224487.14);
+    assert_eq!(n.shares, 271295.542);
+    assert!(b.snapshots.is_empty() && b.dividends.is_none() && b.operations.is_none());
+}
+
+#[test]
+fn histovl_rejects_multiple_share_classes() {
+    let bytes = std::fs::read(HV_MULTI).unwrap();
+    let err = caceis::parse_histovl(HV_FNAME, &bytes);
+    match err {
+        Err(ingest::ParseFailure::Workbook(m)) => assert!(m.contains("share class"), "{m}"),
+        other => panic!("expected multi-share-class rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn detect_routes_recognizes_and_rejects() {
+    use ingest::adapter::{detect, DetectError, FileKind};
+    let hisinv = std::fs::read(FIXTURE).unwrap();
+    let id = detect(FNAME, &hisinv).unwrap();
+    assert_eq!(id.kind, FileKind::CaceisHisinv);
+    assert_eq!(id.fund_code, Some(("caceis".to_string(), "165878".to_string())));
+
+    let histovl = std::fs::read(HV_FIXTURE).unwrap();
+    let id2 = detect(HV_FNAME, &histovl).unwrap();
+    assert_eq!(id2.kind, FileKind::CaceisHistovl);
+
+    // xlsx magic bytes -> NAV Recap, no fund code.
+    let id3 = detect("07-08-2026 - Borobudur - NAV Recap.xlsx", b"PK\x03\x04rest").unwrap();
+    assert_eq!(id3.kind, FileKind::NavRecap);
+    assert_eq!(id3.fund_code, None);
+
+    // Recognized-but-rejected families say why.
+    match detect("INVXDVLUX_165878_20260804_20260805132350.csv", b"x") {
+        Err(DetectError::Rejected(m)) => assert!(m.contains("HISINVLUX"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    match detect("JOUROPLUX_165878_20260804_20260805132350.csv", b"x") {
+        Err(DetectError::Rejected(m)) => assert!(m.to_lowercase().contains("sample"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // Garbage -> Unrecognized.
+    assert!(matches!(detect("notes.txt", b"hello"), Err(DetectError::Unrecognized(_))));
+    // A renamed random CSV must not slip through the content sniff.
+    assert!(matches!(
+        detect("HISINVLUX_1_20260101_1.csv", b"just,a,comma,file\n"),
+        Err(DetectError::Unrecognized(_))
+    ));
+}
