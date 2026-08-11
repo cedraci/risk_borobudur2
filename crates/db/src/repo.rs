@@ -210,6 +210,14 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
     }
 
     tx.commit().await?;
+
+    if b.dividends.is_none() && !b.snapshots.is_empty() {
+        let n = derive_dividends(pool, portfolio_id).await?;
+        if n > 0 {
+            warnings.push(format!("{n} dividend event(s) derived from receivable deltas"));
+        }
+    }
+
     Ok(ImportOutcome {
         import_id,
         duplicate: false,
@@ -845,6 +853,65 @@ pub async fn portfolio_codes_replace(pool: &PgPool, portfolio_id: i64, codes: &[
 pub async fn portfolio_by_code(pool: &PgPool, source: &str, code: &str) -> anyhow::Result<Option<i64>> {
     Ok(sqlx::query_scalar("SELECT portfolio_id FROM portfolio_codes WHERE source = $1 AND code = $2")
         .bind(source).bind(code).fetch_optional(pool).await?)
+}
+
+/// Recompute the derived dividend set for a portfolio from its `Dividendes`
+/// snapshot rows (CACEIS CPON receivables). A pure function of the
+/// snapshots — delete-and-rebuild — so backlog uploads converge in any
+/// order. Change detection runs on the LOCAL-currency value: FX moves on a
+/// foreign receivable emit nothing. The first snapshot is baseline only
+/// (its receivables existed before monitoring started). Dates carrying an
+/// explicit (derived = false) dividend are skipped entirely.
+pub async fn derive_dividends(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<usize> {
+    use std::collections::BTreeMap;
+
+    let rows: Vec<(NaiveDate, String, Option<String>, Option<String>, Option<f64>)> = sqlx::query_as(
+        "SELECT nav_date, isin, name, currency, valuation_ccy::float8 FROM position_snapshots
+         WHERE portfolio_id = $1 AND asset_type = 'Dividendes' ORDER BY nav_date")
+        .bind(portfolio_id).fetch_all(pool).await?;
+    let dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT DISTINCT nav_date FROM position_snapshots WHERE portfolio_id = $1 ORDER BY nav_date")
+        .bind(portfolio_id).fetch_all(pool).await?;
+    let explicit: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT DISTINCT provision_date FROM dividends WHERE portfolio_id = $1 AND NOT derived")
+        .bind(portfolio_id).fetch_all(pool).await?;
+
+    // (isin, currency) -> date -> summed local value (a code may appear twice).
+    let mut by_key: BTreeMap<(String, String), BTreeMap<NaiveDate, (f64, Option<String>)>> = BTreeMap::new();
+    for (date, isin, name, currency, local) in rows {
+        let Some(local) = local else { continue };
+        let key = (isin, currency.unwrap_or_else(|| "EUR".into()));
+        let e = by_key.entry(key).or_default().entry(date).or_insert((0.0, name));
+        e.0 += local;
+    }
+
+    // Events: growth or appearance between consecutive snapshot dates.
+    let mut events: Vec<(NaiveDate, String, f64, String)> = Vec::new();
+    for ((isin, currency), series) in &by_key {
+        for pair in dates.windows(2) {
+            let (d_prev, d_cur) = (pair[0], pair[1]);
+            let Some((cur, name)) = series.get(&d_cur) else { continue }; // absent = paid, no event
+            let prev = series.get(&d_prev).map(|(v, _)| *v).unwrap_or(0.0);
+            let delta = cur - prev;
+            if delta > 0.005 && !explicit.contains(&d_cur) {
+                let issuer = name.clone().unwrap_or_else(|| isin.clone());
+                events.push((d_cur, issuer, delta, currency.clone()));
+            }
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM dividends WHERE portfolio_id = $1 AND derived")
+        .bind(portfolio_id).execute(&mut *tx).await?;
+    for (date, issuer, amount, currency) in &events {
+        sqlx::query(
+            "INSERT INTO dividends (portfolio_id, provision_date, issuer, amount, currency, derived)
+             VALUES ($1, $2, $3, $4, $5, true)")
+            .bind(portfolio_id).bind(date).bind(issuer).bind(amount).bind(currency)
+            .execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(events.len())
 }
 
 #[cfg(test)]
