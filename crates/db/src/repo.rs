@@ -51,27 +51,21 @@ pub struct ImportRecord {
     pub row_counts: serde_json::Value,
 }
 
-pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, sha256: &str, wb: &ParsedWorkbook) -> anyhow::Result<ImportOutcome> {
+pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha256: &str, b: &ingest::adapter::UniversalBatch) -> anyhow::Result<ImportOutcome> {
+    let all_positions = || b.snapshots.iter().flat_map(|s| s.positions.iter());
+
     if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM imports WHERE portfolio_id = $1 AND sha256 = $2")
-        .bind(portfolio_id)
-        .bind(sha256)
-        .fetch_optional(pool)
-        .await?
+        .bind(portfolio_id).bind(sha256).fetch_optional(pool).await?
     {
-        // Nothing is re-ingested for a duplicate - but the futures spec seeding
-        // is deliberately NOT skipped. A database populated before futures
-        // support shipped holds the workbook and no contract specs at all, and
-        // re-dropping the same file is the user's only repair path; skipping it
-        // here left the whole feature inert on every existing installation.
-        // `seed_futures_contracts` only ever INSERTs roots it does not already
-        // know, so running it again is a no-op once the specs are in place.
+        // Duplicate: nothing re-ingested, but futures spec seeding still runs
+        // (same rationale as before — repair path for pre-futures databases).
         let mut tx = pool.begin().await?;
-        let warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
+        let positions: Vec<ingest::PositionRow> = all_positions().cloned().collect();
+        let warnings = seed_futures_contracts(&mut tx, &positions).await?;
         tx.commit().await?;
         return Ok(ImportOutcome {
             import_id: id, duplicate: true, nav_rows: 0, positions: 0,
-            dividends: 0, operations: 0, div_ops_replaced: false,
-            warnings,
+            dividends: 0, operations: 0, div_ops_replaced: false, warnings,
         });
     }
 
@@ -79,53 +73,56 @@ pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, s
 
     let prev_latest: Option<NaiveDate> =
         sqlx::query_scalar("SELECT max(nav_date) FROM imports WHERE portfolio_id = $1")
-            .bind(portfolio_id)
-            .fetch_one(&mut *tx).await?;
-    let replace_div_ops = prev_latest.is_none_or(|d| wb.nav_date >= d);
+            .bind(portfolio_id).fetch_one(&mut *tx).await?;
+    let has_div_ops = b.dividends.is_some() || b.operations.is_some();
+    let replace_div_ops = has_div_ops && prev_latest.is_none_or(|d| b.primary_date >= d);
 
-    let nav_rows = wb.nav_history.len() + 1;
-    let row_counts = serde_json::json!({
-        "nav_rows": nav_rows, "positions": wb.positions.len(),
-        "dividends": if replace_div_ops { wb.dividends.len() } else { 0 },
-        "operations": if replace_div_ops { wb.operations.len() } else { 0 },
+    let nav_rows = b.nav_points.len();
+    let n_positions: usize = b.snapshots.iter().map(|s| s.positions.len()).sum();
+    let n_div = b.dividends.as_ref().map_or(0, |d| d.len());
+    let n_ops = b.operations.as_ref().map_or(0, |o| o.len());
+    let mut row_counts = serde_json::json!({
+        "nav_rows": nav_rows, "positions": n_positions,
+        "dividends": if replace_div_ops { n_div } else { 0 },
+        "operations": if replace_div_ops { n_ops } else { 0 },
     });
+    if !b.warnings.is_empty() {
+        row_counts["warnings"] = serde_json::json!(b.warnings);
+    }
     let (import_id,): (i64,) = sqlx::query_as(
         "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
-    .bind(portfolio_id).bind(filename).bind(sha256).bind(wb.nav_date).bind(&row_counts)
-    .fetch_one(&mut *tx)
-    .await?;
+    .bind(portfolio_id).bind(filename).bind(sha256).bind(b.primary_date).bind(&row_counts)
+    .fetch_one(&mut *tx).await?;
 
     const UPSERT_NAV: &str = "INSERT INTO nav_history (portfolio_id, date, aum, shares, nav) VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (portfolio_id, date) DO UPDATE SET aum = EXCLUDED.aum, shares = EXCLUDED.shares, nav = EXCLUDED.nav";
-    for r in &wb.nav_history {
+    for r in &b.nav_points {
         sqlx::query(UPSERT_NAV).bind(portfolio_id).bind(r.date).bind(r.aum).bind(r.shares).bind(r.nav)
             .execute(&mut *tx).await?;
     }
-    // the recap's own NAV row (not yet in HISTO_NAV)
-    sqlx::query(UPSERT_NAV).bind(portfolio_id).bind(wb.nav_date).bind(wb.aum).bind(wb.shares).bind(wb.nav)
-        .execute(&mut *tx).await?;
 
-    sqlx::query("DELETE FROM position_snapshots WHERE portfolio_id = $1 AND nav_date = $2")
-        .bind(portfolio_id).bind(wb.nav_date).execute(&mut *tx).await?;
-    for p in &wb.positions {
-        sqlx::query(
-            "INSERT INTO position_snapshots (portfolio_id, nav_date, import_id, asset_type, isin, name, currency, quantity, avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
-        )
-        .bind(portfolio_id).bind(wb.nav_date).bind(import_id).bind(&p.asset_type).bind(&p.isin).bind(&p.name)
-        .bind(&p.currency).bind(p.quantity).bind(p.avg_cost).bind(p.price).bind(p.valuation_ccy)
-        .bind(p.accrued_interest).bind(p.fx_rate).bind(p.valuation_eur).bind(p.weight).bind(&p.ticker)
-        .execute(&mut *tx)
-        .await?;
+    for snap in &b.snapshots {
+        sqlx::query("DELETE FROM position_snapshots WHERE portfolio_id = $1 AND nav_date = $2")
+            .bind(portfolio_id).bind(snap.nav_date).execute(&mut *tx).await?;
+        for p in &snap.positions {
+            sqlx::query(
+                "INSERT INTO position_snapshots (portfolio_id, nav_date, import_id, asset_type, isin, name, currency, quantity, avg_cost, price, valuation_ccy, accrued_interest, fx_rate, valuation_eur, weight, ticker)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+            )
+            .bind(portfolio_id).bind(snap.nav_date).bind(import_id).bind(&p.asset_type).bind(&p.isin).bind(&p.name)
+            .bind(&p.currency).bind(p.quantity).bind(p.avg_cost).bind(p.price).bind(p.valuation_ccy)
+            .bind(p.accrued_interest).bind(p.fx_rate).bind(p.valuation_eur).bind(p.weight).bind(&p.ticker)
+            .execute(&mut *tx).await?;
+        }
     }
 
-    // Seed bond reference data parsed from names; never overwrite user
-    // values (COALESCE keeps existing non-NULL columns).
-    for p in &wb.positions {
+    // Bond statics from names — COALESCE keeps existing values (unchanged logic,
+    // now over every snapshot's positions).
+    for p in all_positions() {
         if p.asset_type != "Obligation" { continue; }
         let Some(name) = &p.name else { continue };
-        let Some(b) = ingest::parse_bond_statics(name, p.currency.as_deref()) else { continue };
+        let Some(bs) = ingest::parse_bond_statics(name, p.currency.as_deref()) else { continue };
         sqlx::query(
             "INSERT INTO instrument_refs (code, bond_coupon_pct, bond_maturity, bond_coupon_freq)
              VALUES ($1, $2, $3, $4)
@@ -135,23 +132,41 @@ pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, s
                bond_coupon_freq = COALESCE(instrument_refs.bond_coupon_freq, EXCLUDED.bond_coupon_freq),
                updated_at = now()",
         )
-        .bind(&p.isin).bind(b.coupon_pct).bind(b.maturity).bind(b.coupon_freq)
-        .execute(&mut *tx)
-        .await?;
+        .bind(&p.isin).bind(bs.coupon_pct).bind(bs.maturity).bind(bs.coupon_freq)
+        .execute(&mut *tx).await?;
     }
 
-    let mut warnings = seed_futures_contracts(&mut tx, &wb.positions).await?;
-    warnings.extend(pam_warnings(wb));
+    // Reference hints: fill NULLs only — Bloomberg data is never overwritten.
+    for h in &b.ref_hints {
+        sqlx::query(
+            "INSERT INTO instrument_refs (code, country_of_risk, region, ticker)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (code) DO UPDATE SET
+               country_of_risk = COALESCE(instrument_refs.country_of_risk, EXCLUDED.country_of_risk),
+               region          = COALESCE(instrument_refs.region,          EXCLUDED.region),
+               ticker          = COALESCE(instrument_refs.ticker,          EXCLUDED.ticker),
+               updated_at = now()",
+        )
+        .bind(&h.isin).bind(&h.country_of_risk).bind(&h.region).bind(&h.ticker)
+        .execute(&mut *tx).await?;
+    }
+
+    let positions: Vec<ingest::PositionRow> = all_positions().cloned().collect();
+    let mut warnings = b.warnings.clone();
+    warnings.extend(seed_futures_contracts(&mut tx, &positions).await?);
+    if let Some(ops) = &b.operations {
+        warnings.extend(pam_warnings(&positions, ops));
+    }
 
     if replace_div_ops {
         sqlx::query("DELETE FROM dividends WHERE portfolio_id = $1").bind(portfolio_id).execute(&mut *tx).await?;
-        for r in &wb.dividends {
+        for r in b.dividends.as_deref().unwrap_or(&[]) {
             sqlx::query("INSERT INTO dividends (portfolio_id, provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5, $6)")
                 .bind(portfolio_id).bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
                 .execute(&mut *tx).await?;
         }
         sqlx::query("DELETE FROM operations WHERE portfolio_id = $1").bind(portfolio_id).execute(&mut *tx).await?;
-        for r in &wb.operations {
+        for r in b.operations.as_deref().unwrap_or(&[]) {
             sqlx::query(
                 "INSERT INTO operations (portfolio_id, trade_date, side, ticker, isin, name, currency, quantity, price, gross_amount, fees, net_price, net_amount)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
@@ -159,9 +174,33 @@ pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, s
             .bind(portfolio_id).bind(r.trade_date).bind(&r.side).bind(&r.ticker).bind(&r.isin).bind(&r.name)
             .bind(&r.currency).bind(r.quantity).bind(r.price).bind(r.gross_amount).bind(r.fees)
             .bind(r.net_price).bind(r.net_amount)
-            .execute(&mut *tx)
-            .await?;
+            .execute(&mut *tx).await?;
         }
+    }
+
+    // TNA cross-check: for every date this batch touched where BOTH a
+    // snapshot and a NAV point now exist, the position sum must match AUM
+    // within 0.1% — catches truncated position files and stale NAVs.
+    let mut check_dates: Vec<NaiveDate> = b.snapshots.iter().map(|s| s.nav_date)
+        .chain(b.nav_points.iter().map(|n| n.date)).collect();
+    check_dates.sort();
+    check_dates.dedup();
+    let drift: Vec<(NaiveDate, f64, f64)> = sqlx::query_as(
+        "SELECT n.date, n.aum::float8, s.total
+         FROM nav_history n
+         JOIN (SELECT nav_date, SUM(valuation_eur)::float8 AS total
+               FROM position_snapshots WHERE portfolio_id = $1 GROUP BY nav_date) s
+           ON s.nav_date = n.date
+         WHERE n.portfolio_id = $1 AND n.date = ANY($2)
+           AND n.aum <> 0 AND abs(s.total - n.aum::float8) / abs(n.aum::float8) > 0.001",
+    )
+    .bind(portfolio_id).bind(&check_dates)
+    .fetch_all(&mut *tx).await?;
+    for (d, aum, total) in drift {
+        warnings.push(format!(
+            "TNA cross-check {d}: positions sum to {total:.2} EUR but the NAV file says {aum:.2} EUR ({:+.2}%)",
+            (total - aum) / aum * 100.0
+        ));
     }
 
     tx.commit().await?;
@@ -169,12 +208,22 @@ pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, s
         import_id,
         duplicate: false,
         nav_rows,
-        positions: wb.positions.len(),
-        dividends: if replace_div_ops { wb.dividends.len() } else { 0 },
-        operations: if replace_div_ops { wb.operations.len() } else { 0 },
+        positions: n_positions,
+        dividends: if replace_div_ops { n_div } else { 0 },
+        operations: if replace_div_ops { n_ops } else { 0 },
         div_ops_replaced: replace_div_ops,
         warnings,
     })
+}
+
+pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, sha256: &str, wb: &ParsedWorkbook) -> anyhow::Result<ImportOutcome> {
+    // Clone-into-batch: ParsedWorkbook fields are all Clone.
+    let b = ingest::adapter::to_batch(ParsedWorkbook {
+        nav_date: wb.nav_date, aum: wb.aum, shares: wb.shares, nav: wb.nav,
+        positions: wb.positions.clone(), nav_history: wb.nav_history.clone(),
+        dividends: wb.dividends.clone(), operations: wb.operations.clone(),
+    });
+    import_batch(pool, portfolio_id, filename, sha256, &b).await
 }
 
 /// Seed a contract spec for every futures root the database does not know yet,
@@ -289,11 +338,11 @@ async fn seed_futures_contracts(
 /// compared against PAM (a "PAM drift" warning), which reports a genuine
 /// mismatch between the administrator's file and the trade walk. Non-fatal:
 /// it warns, it never blocks the weekly import.
-fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
+fn pam_warnings(positions: &[ingest::PositionRow], operations: &[ingest::OperationRow]) -> Vec<String> {
     use analytics::pnl::{Trade, is_buy, walk_instrument};
 
     let mut trades: Vec<Trade> = Vec::new();
-    for o in &wb.operations {
+    for o in operations {
         let (Some(isin), Some(qty), Some(px)) = (o.isin.as_deref(), o.quantity, o.net_price) else { continue };
         let Some(buy) = is_buy(&o.side) else { continue };
         trades.push(Trade {
@@ -309,7 +358,7 @@ fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
     trades.sort_by_key(|t| t.trade_date);
 
     let mut warnings = Vec::new();
-    for p in &wb.positions {
+    for p in positions {
         // Futures have no cost basis; cash rows carry no PAM.
         if !matches!(p.asset_type.as_str(), "Action" | "Fonds" | "Obligation") { continue; }
         let (Some(pam), Some(qty)) = (p.avg_cost, p.quantity) else { continue };
@@ -319,8 +368,10 @@ fn pam_warnings(wb: &ingest::ParsedWorkbook) -> Vec<String> {
         // `walk_instrument` on an empty slice returns a zero `basis_end`, so an
         // ISIN entirely absent from OPERATIONS - the most severe form of
         // incomplete history - falls out of this call naturally rather than
-        // needing its own branch.
-        let w = walk_instrument(&mine, chrono::NaiveDate::MIN, wb.nav_date);
+        // needing its own branch. No single reference date applies to a
+        // batch that may carry positions from more than one snapshot, so the
+        // walk is unbounded above (every recorded trade counts).
+        let w = walk_instrument(&mine, chrono::NaiveDate::MIN, chrono::NaiveDate::MAX);
         if w.oversold {
             // A sell exceeding the running quantity is itself unambiguous
             // evidence of a broken history; it gets its own warning and is not
@@ -867,7 +918,7 @@ mod pam_warnings_tests {
                 op("SOME_OTHER_ISIN", "achat", d(2026, 1, 5), 10.0, 5.0),
             ],
         );
-        let warnings = pam_warnings(&wb);
+        let warnings = pam_warnings(&wb.positions, &wb.operations);
         assert!(
             warnings.iter().any(|w| w.starts_with("T1_NO_TRADES") && w.contains("incomplete trade history")),
             "an ISIN with zero OPERATIONS rows but a non-zero workbook holding must warn \
@@ -888,7 +939,7 @@ mod pam_warnings_tests {
                 op("T2_FLAT", "vente", d(2026, 1, 10), 100.0, 11.0),
             ],
         );
-        let warnings = pam_warnings(&wb);
+        let warnings = pam_warnings(&wb.positions, &wb.operations);
         assert!(
             warnings.iter().any(|w| w.starts_with("T2_FLAT") && w.contains("incomplete trade history")),
             "a history that round-trips to exactly flat against a non-zero workbook holding must \
@@ -911,7 +962,7 @@ mod pam_warnings_tests {
                 op("T3_OVERSOLD", "vente", d(2026, 1, 10), 100.0, 11.0),
             ],
         );
-        let warnings = pam_warnings(&wb);
+        let warnings = pam_warnings(&wb.positions, &wb.operations);
         assert!(
             warnings.iter().any(|w| w.starts_with("T3_OVERSOLD") && w.contains("sells exceed recorded buys")),
             "an oversold position must warn 'sells exceed recorded buys', got: {warnings:?}"

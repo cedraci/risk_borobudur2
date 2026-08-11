@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod bloomberg;
 pub mod emir_file;
 pub mod futures_file;
