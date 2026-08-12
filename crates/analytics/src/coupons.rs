@@ -83,7 +83,14 @@ fn add_months(d: NaiveDate, months: u32) -> Option<NaiveDate> {
 fn coupon_schedule(b: &CouponInput, snapshot: NaiveDate, horizon: u32, out: &mut CouponResult) {
     let pct = b.coupon_pct.unwrap_or(0.0);
     let is_fixed = b.coupon_type.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("FIX"));
-    if pct <= 0.0 || !is_fixed || b.quantity <= 0.0 || !(b.fx_rate.is_finite() && b.fx_rate > 0.0) {
+    // NaN fails every `<= 0.0` / `> 0.0` comparison, so without the explicit
+    // `is_finite()` checks a NaN coupon_pct or quantity would slip past this
+    // guard and produce a NaN-valued inflow. A NaN input is a data-quality
+    // signal, not a coupon, so it is treated the same as a zero coupon.
+    if !pct.is_finite() || pct <= 0.0 || !is_fixed
+        || !(b.quantity.is_finite() && b.quantity > 0.0)
+        || !(b.fx_rate.is_finite() && b.fx_rate > 0.0)
+    {
         return; // A zero-coupon instrument is not a gap; it simply pays nothing.
     }
     let Some(first) = b.next_coupon else {
@@ -100,18 +107,21 @@ fn coupon_schedule(b: &CouponInput, snapshot: NaiveDate, horizon: u32, out: &mut
     };
     let amount = annual_eur / f as f64;
     let step = (12 / f).max(1) as u32;
-    let mut date = first;
+    // Each coupon date is computed from the original anchor, not from the
+    // previous one. Re-basing off a clamped intermediate (e.g. a step that
+    // lands on Apr 30) would let that clamp permanently drag every later
+    // date down, even though the clamp was a property of April, not of the
+    // schedule.
+    let mut n: u32 = 0;
     loop {
+        let Some(date) = add_months(first, n * step) else { break; };
         // A past or same-day coupon yields offset 0 and is already in the
         // position; a coupon past the horizon ends the walk.
         let day = business_days_between(snapshot, date);
         if day == 0 || day > horizon { break; }
         if b.maturity.is_some_and(|m| date > m) { break; }
         out.inflows.push(Inflow { day, amount_eur: amount });
-        match add_months(date, step) {
-            Some(next) if next > date => date = next,
-            _ => break,
-        }
+        n += 1;
     }
 }
 
@@ -277,5 +287,64 @@ mod tests {
         assert_eq!(r.inflows.len(), 3);
         let each = 1_200_000.0 * 12.0 / 100.0 / 12.0;
         assert!(r.inflows.iter().all(|i| (i.amount_eur - each).abs() < 1e-9));
+    }
+
+    #[test]
+    fn a_quarterly_coupon_anchored_on_a_month_end_does_not_drift() {
+        // Anchored Jan 31, quarterly: the walk must land on Apr 30 (a real
+        // clamp, since April has 30 days) and then recover to Jul 31 (no
+        // clamp on July) rather than dragging the April clamp forward to
+        // land on Jul 30.
+        let snapshot = d(2026, 1, 1);
+        let third_coupon = d(2026, 7, 31);
+        let horizon = business_days_between(snapshot, third_coupon);
+        let b = CouponInput {
+            code: "XS0000000003".into(),
+            quantity: 1_000_000.0,
+            coupon_pct: Some(8.0),
+            coupon_type: Some("FIX".into()),
+            next_coupon: Some(d(2026, 1, 31)),
+            maturity: Some(d(2030, 1, 31)),
+            freq: Some(4),
+            accrued_eur: Some(0.0),
+            fx_rate: 1.0,
+        };
+        let r = bond_inflows(&[b], snapshot, horizon);
+        assert_eq!(r.inflows.len(), 3, "{:?}", r.inflows);
+        // The horizon was set to exactly the correct third coupon's offset,
+        // so the third inflow must land there.
+        assert_eq!(r.inflows[2].day, horizon);
+        // A drifted walk would instead land one business day earlier, on
+        // 2026-07-30.
+        let wrong = business_days_between(snapshot, d(2026, 7, 30));
+        assert_ne!(r.inflows[2].day, wrong);
+    }
+
+    #[test]
+    fn a_coupon_and_a_maturity_in_the_same_horizon_both_land() {
+        // Interest and principal are not double counting: a coupon inside
+        // the horizon and a maturity redemption inside the horizon are two
+        // distinct inflows for the same bond.
+        let snapshot = d(2026, 8, 7);
+        let b = CouponInput {
+            code: "XS0000000004".into(),
+            quantity: 1_000_000.0,
+            coupon_pct: Some(6.0),
+            coupon_type: Some("FIX".into()),
+            next_coupon: Some(d(2026, 8, 20)),
+            maturity: Some(d(2026, 9, 15)),
+            freq: Some(2),
+            accrued_eur: Some(0.0),
+            fx_rate: 1.0,
+        };
+        let r = bond_inflows(&[b], snapshot, 60);
+        assert_eq!(r.inflows.len(), 2, "{:?}", r.inflows);
+        let coupon_day = business_days_between(snapshot, d(2026, 8, 20));
+        let maturity_day = business_days_between(snapshot, d(2026, 9, 15));
+        let coupon = r.inflows.iter().find(|i| i.day == coupon_day).expect("coupon inflow");
+        let redemption = r.inflows.iter().find(|i| i.day == maturity_day).expect("redemption inflow");
+        let expected_coupon = 1_000_000.0 * 6.0 / 100.0 / 2.0;
+        assert!((coupon.amount_eur - expected_coupon).abs() < 1e-9);
+        assert!((redemption.amount_eur - 1_000_000.0).abs() < 1e-9);
     }
 }
