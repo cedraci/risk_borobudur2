@@ -66,10 +66,9 @@ fn settings_body(redemption_shock: f64) -> serde_json::Value {
         "var_window_days": 252,
         "var_limit": 0.20,
         "short_dd_max_days": 50,
-        "liquidity_defaults": {
-            "Action": "d1", "Fonds": "d2_7", "Future": "d1", "Obligation": "d8_30",
-            "Cash Acc": "d1", "Margin Acc": "d1", "Dividendes": "d1",
-            "Frais provisionnés": "d1", "Provisions ordres": "d1"
+        "liquidity_default_days": {
+            "Action": 1, "Fonds": 7, "Obligation": 30, "Future": 1,
+            "Dividendes": 1, "Frais provisionnés": 1, "Provisions ordres": 1
         },
         "redemption_shock": redemption_shock,
     })

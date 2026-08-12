@@ -65,6 +65,43 @@ async fn refs_upsert_seed_and_no_overwrite() {
     edb.stop().await;
 }
 
+/// The 0002_refs.sql inline CHECK only allowed 1 or 2. This proves the
+/// widened constraint added in 0011_liquidity_v2.sql actually persists a
+/// quarterly (4) or monthly (12) payer at the database layer — the app-level
+/// Rust validation in server::handlers::refs::put would not have caught a
+/// stale constraint, since that check runs before the INSERT.
+#[tokio::test]
+async fn bond_coupon_freq_accepts_quarterly_and_monthly() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+
+    let quarterly = InstrumentRef { code: "TESTQ".into(), issuer_group: None, liquidity_days: None,
+        adv_eligible: None,
+        bond_coupon_pct: None, bond_maturity: None, bond_coupon_freq: Some(4),
+        bond_next_coupon: None, bond_nominal: None,
+        market_place: None, market_place_name: None,
+        adv_30d: None, adv_asof: None,
+        country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None };
+    db::repo::refs_upsert(&pool, &quarterly).await.unwrap();
+
+    let monthly = InstrumentRef { code: "TESTM".into(), issuer_group: None, liquidity_days: None,
+        adv_eligible: None,
+        bond_coupon_pct: None, bond_maturity: None, bond_coupon_freq: Some(12),
+        bond_next_coupon: None, bond_nominal: None,
+        market_place: None, market_place_name: None,
+        adv_30d: None, adv_asof: None,
+        country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None };
+    db::repo::refs_upsert(&pool, &monthly).await.unwrap();
+
+    let all = db::repo::refs_all(&pool).await.unwrap();
+    assert_eq!(all.iter().find(|x| x.code == "TESTQ").unwrap().bond_coupon_freq, Some(4));
+    assert_eq!(all.iter().find(|x| x.code == "TESTM").unwrap().bond_coupon_freq, Some(12));
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 #[tokio::test]
 async fn liquidity_days_replaces_bucket_and_new_columns_round_trip() {
     let dir = tempfile::tempdir().unwrap();

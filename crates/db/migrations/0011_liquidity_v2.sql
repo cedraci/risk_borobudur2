@@ -22,6 +22,14 @@ ALTER TABLE instrument_refs ADD CONSTRAINT instrument_refs_adv_nonneg
 ALTER TABLE instrument_refs ADD CONSTRAINT instrument_refs_bond_nominal_pos
     CHECK (bond_nominal IS NULL OR bond_nominal > 0);
 
+-- The original 0002_refs.sql inline CHECK only allowed annual/semi-annual
+-- (1,2). Confirmed via pg_constraint that Postgres named it
+-- instrument_refs_bond_coupon_freq_check; replace it rather than adding a
+-- second constraint, so quarterly (4) and monthly (12) payers can persist.
+ALTER TABLE instrument_refs DROP CONSTRAINT instrument_refs_bond_coupon_freq_check;
+ALTER TABLE instrument_refs ADD CONSTRAINT instrument_refs_bond_coupon_freq_check
+    CHECK (bond_coupon_freq IS NULL OR bond_coupon_freq IN (1, 2, 4, 12));
+
 CREATE TABLE shareholders (
     id           BIGSERIAL PRIMARY KEY,
     portfolio_id BIGINT  NOT NULL REFERENCES portfolios(id),
