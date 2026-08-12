@@ -35,6 +35,7 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
             isin: "FR0000000001".into(),
             country_of_risk: Some("France".into()), region: Some("Europe".into()), ticker: Some("AAA FP".into()),
         }],
+        ref_facts: vec![],
         warnings: vec!["row 5: dropped".into()],
     };
     let out = repo::import_batch(&pool, 1, "f.csv", "sha-batch-1", &b).await.unwrap();
@@ -68,6 +69,7 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
         ref_hints: vec![ingest::adapter::RefHint {
             isin: "FR0000000001".into(), country_of_risk: Some("Germany".into()), region: None, ticker: None,
         }],
+        ref_facts: vec![],
         warnings: vec![],
     };
     repo::import_batch(&pool, 1, "f2.csv", "sha-batch-2", &b2).await.unwrap();
@@ -99,6 +101,7 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
         dividends: None,
         operations: None,
         ref_hints: vec![],
+        ref_facts: vec![],
         warnings: vec![],
     };
     repo::import_batch(&pool, 1, "csv.csv", "sha-csv-1", &csv_batch).await.unwrap();
@@ -116,6 +119,7 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
             gross_amount: Some(900.0), fees: None, net_price: None, net_amount: Some(900.0),
         }]),
         ref_hints: vec![],
+        ref_facts: vec![],
         warnings: vec![],
     };
     let out = repo::import_batch(&pool, 1, "recap.xlsx", "sha-recap-1", &recap_batch).await.unwrap();
@@ -150,7 +154,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
             pos("Dividendes", "GB0000000001", 580.0),
             pos("Action", "FR0000000001", 1000.0),
         ] }],
-        dividends: None, operations: None, ref_hints: vec![], warnings: vec![],
+        dividends: None, operations: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
     repo::import_batch(&pool, 1, "day1.csv", "sha-d1", &b1).await.unwrap();
 
@@ -162,7 +166,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
             pos("Dividendes", "GB0000000001", 920.0),
             pos("Action", "FR0000000001", 1000.0),
         ] }],
-        dividends: None, operations: None, ref_hints: vec![], warnings: vec![],
+        dividends: None, operations: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
     let out2 = repo::import_batch(&pool, 1, "day2.csv", "sha-d2", &b2).await.unwrap();
     assert!(out2.warnings.iter().any(|w| w.contains("derived")), "{:?}", out2.warnings);
@@ -188,7 +192,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
             amount: 99.0, currency: "EUR".into(),
         }]),
         operations: Some(vec![]),
-        ref_hints: vec![], warnings: vec![],
+        ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
     let out3 = repo::import_batch(&pool, 1, "day3.xlsx", "sha-d3", &b3).await.unwrap();
     assert!(out3.div_ops_replaced);
@@ -216,6 +220,44 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM dividends WHERE portfolio_id = 1")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(n, 2);
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+const HISINV_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/caceis_hisinv.csv");
+const HISINV_FNAME: &str = "HISINVLUX_165878_20260807_20260810130151.csv";
+
+// Task 6: HISINVLUX carries the depositary's own market place and bond
+// schedule for every instrument it lists. These are authoritative facts, not
+// user-overridable hints — they must land in `instrument_refs` on import and
+// must survive a later `refs_upsert` that only ever touches the user-owned
+// columns (here, `liquidity_days`).
+#[tokio::test]
+async fn hisinv_import_stores_depositary_facts_and_refs_upsert_does_not_erase_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+
+    let bytes = std::fs::read(HISINV_FIXTURE).unwrap();
+    let batch = ingest::caceis::parse_hisinv(HISINV_FNAME, &bytes).expect("fixture parses");
+    repo::import_batch(&pool, 1, "hisinv.csv", "sha-hisinv-1", &batch).await.unwrap();
+
+    let refs = repo::refs_all(&pool).await.unwrap();
+    let bond = refs.iter().find(|r| r.code == "US105756CL22").expect("bond ref stored");
+    assert_eq!(bond.market_place.as_deref(), Some("186"));
+    assert_eq!(bond.bond_next_coupon, Some(d("2026-09-15")));
+
+    // A user editing only liquidity_days must not blank the depositary facts.
+    let mut edited = bond.clone();
+    edited.liquidity_days = Some(3.0);
+    repo::refs_upsert(&pool, &edited).await.unwrap();
+
+    let refs_after = repo::refs_all(&pool).await.unwrap();
+    let bond_after = refs_after.iter().find(|r| r.code == "US105756CL22").expect("bond ref still present");
+    assert_eq!(bond_after.liquidity_days, Some(3.0));
+    assert_eq!(bond_after.market_place.as_deref(), Some("186"), "refs_upsert must not touch market_place");
+    assert_eq!(bond_after.bond_next_coupon, Some(d("2026-09-15")), "refs_upsert must not touch bond_next_coupon");
 
     pool.close().await;
     edb.stop().await;

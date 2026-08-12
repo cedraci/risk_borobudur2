@@ -4,7 +4,7 @@
 //! depositary's header glossary ("Glossary GP CSV Headers.xlsx") and are
 //! the single place to edit if CACEIS changes the layout.
 
-use crate::adapter::{RefHint, Snapshot, UniversalBatch};
+use crate::adapter::{RefFact, RefHint, Snapshot, UniversalBatch};
 use crate::{ParseFailure, PositionRow};
 use chrono::NaiveDate;
 
@@ -26,7 +26,14 @@ const H_ACCRUED_FUND_CCY: usize = 33;
 const H_WEIGHT_PCT: usize = 35; // percent of TNA; the universal model wants a fraction
 const H_RISK_COUNTRY: usize = 41; // ISO alpha-3
 const H_ISIN: usize = 45;
+const H_MATURITY: usize = 49;      // "Maturity Date"
 const H_MV_LOCAL: usize = 51;
+const H_NOMINAL: usize = 56;       // "Nominal" — the denomination prices quote against
+const H_NEXT_COUPON: usize = 57;   // "Next coupon date"
+const H_COUPON_TYPE: usize = 59;   // "Coupon Type" — only FIX yields coupons
+const H_COUPON_RATE: usize = 60;   // "Coupon rate"
+const H_MARKET_PLACE: usize = 63;  // "Market place"
+const H_MARKET_NAME: usize = 64;   // "Market place Description"
 const H_BLOOMBERG: usize = 65;
 const H_MIN_FIELDS: usize = 66;
 
@@ -57,6 +64,10 @@ fn num(fields: &[&str], i: usize) -> Option<f64> {
 fn text(fields: &[&str], i: usize) -> Option<String> {
     let t = field(fields, i);
     if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+fn date(fields: &[&str], i: usize) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(field(fields, i), "%Y%m%d").ok()
 }
 
 /// CACEIS category + detail code -> the closed universal vocabulary.
@@ -108,6 +119,7 @@ pub fn parse_hisinv(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
     let textual = decode_latin1(bytes);
     let mut positions: Vec<PositionRow> = Vec::new();
     let mut ref_hints: Vec<RefHint> = Vec::new();
+    let mut ref_facts: Vec<RefFact> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
     for (i, line) in textual.lines().enumerate() {
@@ -171,6 +183,25 @@ pub fn parse_hisinv(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
             }
         }
 
+        let coupon_type = text(&fields, H_COUPON_TYPE);
+        let fixed = coupon_type.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("FIX"));
+        let fact = RefFact {
+            isin: isin.clone(),
+            market_place: text(&fields, H_MARKET_PLACE),
+            market_place_name: text(&fields, H_MARKET_NAME),
+            // Coupon statics only where the instrument actually carries a
+            // fixed coupon; an equity row's blank columns must not write NULLs
+            // over a bond's data if the same code ever appears twice.
+            bond_maturity: if fixed { date(&fields, H_MATURITY) } else { None },
+            bond_next_coupon: if fixed { date(&fields, H_NEXT_COUPON) } else { None },
+            bond_coupon_pct: if fixed { num(&fields, H_COUPON_RATE) } else { None },
+            bond_nominal: if fixed { num(&fields, H_NOMINAL).filter(|n| *n > 0.0) } else { None },
+            bond_coupon_freq: None, // HISINVLUX does not carry it
+        };
+        if fact.market_place.is_some() || fact.bond_maturity.is_some() {
+            ref_facts.push(fact);
+        }
+
         positions.push(PositionRow {
             asset_type: asset_type.to_string(),
             isin,
@@ -199,6 +230,7 @@ pub fn parse_hisinv(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
         dividends: None,
         operations: None,
         ref_hints,
+        ref_facts,
         warnings,
     })
 }
@@ -253,6 +285,7 @@ pub fn parse_histovl(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Par
                 dividends: None,
                 operations: None,
                 ref_hints: Vec::new(),
+                ref_facts: Vec::new(),
                 warnings: Vec::new(),
             })
         }

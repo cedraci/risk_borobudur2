@@ -20,6 +20,25 @@ pub struct RefHint {
     pub ticker: Option<String>,
 }
 
+/// Reference data the depositary restates on every file and is authoritative
+/// for. Unlike `RefHint`, these OVERWRITE: the daily feed is the source of
+/// truth, and a value the user typed for an instrument CACEIS also reports is
+/// superseded by the depositary's own.
+///
+/// Deliberately absent: `liquidity_days` and `adv_eligible` (the user's), and
+/// `adv_30d` / `adv_asof` (Bloomberg's). An import never touches those.
+#[derive(Debug, Clone, Default)]
+pub struct RefFact {
+    pub isin: String,
+    pub market_place: Option<String>,
+    pub market_place_name: Option<String>,
+    pub bond_maturity: Option<NaiveDate>,
+    pub bond_next_coupon: Option<NaiveDate>,
+    pub bond_coupon_pct: Option<f64>,
+    pub bond_nominal: Option<f64>,
+    pub bond_coupon_freq: Option<i32>,
+}
+
 #[derive(Debug)]
 pub struct UniversalBatch {
     /// The file's own NAV date — keys the `imports` row.
@@ -32,6 +51,7 @@ pub struct UniversalBatch {
     pub dividends: Option<Vec<DividendRow>>,
     pub operations: Option<Vec<OperationRow>>,
     pub ref_hints: Vec<RefHint>,
+    pub ref_facts: Vec<RefFact>,
     /// Row-level anomalies that dropped rows without rejecting the file.
     pub warnings: Vec<String>,
 }
@@ -68,6 +88,7 @@ pub fn to_batch(wb: ParsedWorkbook) -> UniversalBatch {
         dividends: Some(wb.dividends),
         operations: Some(wb.operations),
         ref_hints: Vec::new(),
+        ref_facts: Vec::new(),
         warnings: Vec::new(),
     }
 }

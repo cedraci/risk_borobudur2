@@ -104,6 +104,39 @@ fn unmappable_asset_code_drops_the_row_with_a_warning() {
     assert_eq!(total, full - 1, "exactly the corrupted row dropped");
 }
 
+#[test]
+fn hisinv_emits_depositary_statics_as_authoritative_facts() {
+    let b = batch();
+    let bond = b.ref_facts.iter().find(|f| f.isin == "US105756CL22").expect("bond fact");
+    assert_eq!(bond.bond_maturity, chrono::NaiveDate::from_ymd_opt(2035, 3, 15));
+    assert_eq!(bond.bond_next_coupon, chrono::NaiveDate::from_ymd_opt(2026, 9, 15));
+    assert_eq!(bond.bond_coupon_pct, Some(6.625));
+    assert_eq!(bond.bond_nominal, Some(100.0));
+    // Frequency is not in HISINVLUX; it comes from INVJCPLUX or the inference.
+    assert_eq!(bond.bond_coupon_freq, None);
+    assert_eq!(bond.market_place.as_deref(), Some("186"));
+}
+
+#[test]
+fn market_place_distinguishes_listed_from_unlisted() {
+    let b = batch();
+    let by = |isin: &str| b.ref_facts.iter().find(|f| f.isin == isin).cloned();
+    let eq = by("AT000000STR1").expect("equity fact");
+    assert_eq!(eq.market_place.as_deref(), Some("050"));
+    assert_eq!(eq.market_place_name.as_deref(), Some("WIENER BOERSE"));
+    // Cash, provisions and futures quote at a forced price and are not listed.
+    let forced = b.ref_facts.iter().filter(|f| f.market_place.as_deref() == Some("FOR")).count();
+    assert!(forced > 0, "the sample holds cash and futures rows");
+}
+
+#[test]
+fn an_absent_static_is_none_not_zero() {
+    let b = batch();
+    let eq = b.ref_facts.iter().find(|f| f.isin == "AT000000STR1").unwrap();
+    assert_eq!(eq.bond_maturity, None);
+    assert_eq!(eq.bond_next_coupon, None);
+}
+
 const HV_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_histovl.csv");
 const HV_MULTI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_histovl_multiclass.csv");
 const HV_FNAME: &str = "HISTOVLLUX_165878_20260729_20260730170850.csv";

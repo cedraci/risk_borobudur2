@@ -155,6 +155,30 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
         .execute(&mut *tx).await?;
     }
 
+    // Authoritative depositary facts: overwrite where present, leave alone
+    // where this file says nothing. COALESCE(EXCLUDED, existing) rather than
+    // COALESCE(existing, EXCLUDED) — the inverse of the hint loop above.
+    for f in &b.ref_facts {
+        sqlx::query(
+            "INSERT INTO instrument_refs
+               (code, market_place, market_place_name, bond_maturity,
+                bond_next_coupon, bond_coupon_pct, bond_nominal, bond_coupon_freq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (code) DO UPDATE SET
+               market_place      = COALESCE(EXCLUDED.market_place,      instrument_refs.market_place),
+               market_place_name = COALESCE(EXCLUDED.market_place_name, instrument_refs.market_place_name),
+               bond_maturity     = COALESCE(EXCLUDED.bond_maturity,     instrument_refs.bond_maturity),
+               bond_next_coupon  = COALESCE(EXCLUDED.bond_next_coupon,  instrument_refs.bond_next_coupon),
+               bond_coupon_pct   = COALESCE(EXCLUDED.bond_coupon_pct,   instrument_refs.bond_coupon_pct),
+               bond_nominal      = COALESCE(EXCLUDED.bond_nominal,      instrument_refs.bond_nominal),
+               bond_coupon_freq  = COALESCE(EXCLUDED.bond_coupon_freq,  instrument_refs.bond_coupon_freq),
+               updated_at = now()",
+        )
+        .bind(&f.isin).bind(&f.market_place).bind(&f.market_place_name).bind(f.bond_maturity)
+        .bind(f.bond_next_coupon).bind(f.bond_coupon_pct).bind(f.bond_nominal).bind(f.bond_coupon_freq)
+        .execute(&mut *tx).await?;
+    }
+
     let positions: Vec<ingest::PositionRow> = all_positions().cloned().collect();
     let mut warnings = b.warnings.clone();
     warnings.extend(seed_futures_contracts(&mut tx, &positions).await?);
