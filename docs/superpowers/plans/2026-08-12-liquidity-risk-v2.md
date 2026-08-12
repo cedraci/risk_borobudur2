@@ -1935,9 +1935,12 @@ fn joursr_reads_both_share_classes() {
 fn joursr_stores_both_amounts_as_magnitudes() {
     // The depositary's sign convention for the redemption column is not
     // observable without a real file, so direction comes from which column
-    // the amount sat in and never from its sign.
-    let bytes = std::fs::read(JOURSR).unwrap().replace_redemption_with_negative();
-    let b = caceis::parse_joursr(JOURSR_FNAME, &bytes).unwrap();
+    // the amount sat in and never from its sign. The same file with the
+    // redemption written negative must parse to the same magnitude.
+    let text = String::from_utf8(std::fs::read(JOURSR).unwrap()).unwrap();
+    let flipped = text.replace(";1922.15;200000.;", ";1922.15;-200000.;");
+    assert_ne!(flipped, text, "the fixture's redemption amount must be present to flip");
+    let b = caceis::parse_joursr(JOURSR_FNAME, flipped.as_bytes()).unwrap();
     let c1 = b.flows.unwrap().into_iter().find(|f| f.share_class == "C1").unwrap();
     assert_eq!(c1.redemption_amount, 200_000.0);
 }
