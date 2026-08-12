@@ -137,6 +137,24 @@ fn an_absent_static_is_none_not_zero() {
     assert_eq!(eq.bond_next_coupon, None);
 }
 
+#[test]
+fn a_futures_contract_expiry_is_not_a_bond_maturity() {
+    let b = batch();
+    for isin in ["CFIN2608", "RYCU2609"] {
+        let fut = b.ref_facts.iter().find(|f| f.isin == isin)
+            .unwrap_or_else(|| panic!("expected a RefFact for futures contract {isin}"));
+        // Column 49 carries a real date here (a contract expiry, e.g.
+        // 20260831 / 20260930) — proof the fact was actually pushed and this
+        // assertion isn't vacuously true because the row is absent.
+        assert_eq!(fut.market_place.as_deref(), Some("FOR"));
+        // The coupon-type gate (blank on these rows) must keep that expiry
+        // out of the bond fields — a futures mark-to-market must never be
+        // mistaken for a bond's principal redemption.
+        assert_eq!(fut.bond_maturity, None, "{isin}: contract expiry leaked into bond_maturity");
+        assert_eq!(fut.bond_next_coupon, None, "{isin}: contract expiry leaked into bond_next_coupon");
+    }
+}
+
 const HV_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_histovl.csv");
 const HV_MULTI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_histovl_multiclass.csv");
 const HV_FNAME: &str = "HISTOVLLUX_165878_20260729_20260730170850.csv";

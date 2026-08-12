@@ -230,34 +230,87 @@ const HISINV_FNAME: &str = "HISINVLUX_165878_20260807_20260810130151.csv";
 
 // Task 6: HISINVLUX carries the depositary's own market place and bond
 // schedule for every instrument it lists. These are authoritative facts, not
-// user-overridable hints — they must land in `instrument_refs` on import and
-// must survive a later `refs_upsert` that only ever touches the user-owned
-// columns (here, `liquidity_days`).
+// user-overridable hints:
+//   - a later refs_upsert (user-owned columns only) must not erase them;
+//   - a LATER import carrying a DIFFERENT fact for the same code must
+//     overwrite it — the only test shape that can tell a correct
+//     COALESCE(EXCLUDED, existing) apart from an accidentally reversed
+//     COALESCE(existing, EXCLUDED), since within a single import the hint
+//     loop leaves the fact columns NULL and COALESCE degenerates either way
+//     when the existing value is NULL;
+//   - and that same second import must not clobber liquidity_days /
+//     adv_eligible, the columns an import never owns.
 #[tokio::test]
-async fn hisinv_import_stores_depositary_facts_and_refs_upsert_does_not_erase_them() {
+async fn hisinv_facts_overwrite_on_reimport_but_never_touch_user_owned_columns() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
 
+    // Import 1: the real HISINVLUX fixture sets the depositary facts.
     let bytes = std::fs::read(HISINV_FIXTURE).unwrap();
-    let batch = ingest::caceis::parse_hisinv(HISINV_FNAME, &bytes).expect("fixture parses");
-    repo::import_batch(&pool, 1, "hisinv.csv", "sha-hisinv-1", &batch).await.unwrap();
+    let batch1 = ingest::caceis::parse_hisinv(HISINV_FNAME, &bytes).expect("fixture parses");
+    repo::import_batch(&pool, 1, "hisinv.csv", "sha-hisinv-1", &batch1).await.unwrap();
 
     let refs = repo::refs_all(&pool).await.unwrap();
     let bond = refs.iter().find(|r| r.code == "US105756CL22").expect("bond ref stored");
     assert_eq!(bond.market_place.as_deref(), Some("186"));
     assert_eq!(bond.bond_next_coupon, Some(d("2026-09-15")));
 
-    // A user editing only liquidity_days must not blank the depositary facts.
+    // A user setting liquidity_days/adv_eligible (refs_upsert only ever
+    // writes user-owned columns) must not blank the depositary facts.
     let mut edited = bond.clone();
     edited.liquidity_days = Some(3.0);
+    edited.adv_eligible = Some(true);
     repo::refs_upsert(&pool, &edited).await.unwrap();
+
+    let refs_mid = repo::refs_all(&pool).await.unwrap();
+    let bond_mid = refs_mid.iter().find(|r| r.code == "US105756CL22").expect("bond ref still present");
+    assert_eq!(bond_mid.liquidity_days, Some(3.0));
+    assert_eq!(bond_mid.adv_eligible, Some(true));
+    assert_eq!(bond_mid.market_place.as_deref(), Some("186"), "refs_upsert must not touch market_place");
+    assert_eq!(bond_mid.bond_next_coupon, Some(d("2026-09-15")), "refs_upsert must not touch bond_next_coupon");
+
+    // Import 2: a later depositary file restates the SAME instrument with a
+    // DIFFERENT market place and next coupon date. Hand-built rather than a
+    // second fixture — no new fixture file is needed or wanted. A distinct
+    // sha256 keeps this from being treated as a duplicate of import 1.
+    let batch2 = UniversalBatch {
+        primary_date: d("2026-08-08"),
+        nav_points: vec![],
+        snapshots: vec![],
+        dividends: None,
+        operations: None,
+        ref_hints: vec![],
+        ref_facts: vec![ingest::adapter::RefFact {
+            isin: "US105756CL22".into(),
+            market_place: Some("999".into()),
+            market_place_name: Some("A DIFFERENT VENUE".into()),
+            bond_maturity: None,
+            bond_next_coupon: Some(d("2026-12-15")),
+            bond_coupon_pct: None,
+            bond_nominal: None,
+            bond_coupon_freq: None,
+        }],
+        warnings: vec![],
+    };
+    repo::import_batch(&pool, 1, "hisinv2.csv", "sha-hisinv-2", &batch2).await.unwrap();
 
     let refs_after = repo::refs_all(&pool).await.unwrap();
     let bond_after = refs_after.iter().find(|r| r.code == "US105756CL22").expect("bond ref still present");
-    assert_eq!(bond_after.liquidity_days, Some(3.0));
-    assert_eq!(bond_after.market_place.as_deref(), Some("186"), "refs_upsert must not touch market_place");
-    assert_eq!(bond_after.bond_next_coupon, Some(d("2026-09-15")), "refs_upsert must not touch bond_next_coupon");
+
+    // The new fact values win — proves overwrite, not fill-only. A reversed
+    // COALESCE would have left these at "186" / 2026-09-15.
+    assert_eq!(bond_after.market_place.as_deref(), Some("999"), "a later import's fact must overwrite the earlier one");
+    assert_eq!(bond_after.bond_next_coupon, Some(d("2026-12-15")), "a later import's fact must overwrite the earlier one");
+
+    // Fields import 2 said nothing about (bond_maturity, bond_coupon_pct)
+    // are left alone, not nulled out, because the new RefFact carries None.
+    assert_eq!(bond_after.bond_maturity, Some(d("2035-03-15")), "absent fields must not be nulled out");
+    assert_eq!(bond_after.bond_coupon_pct, Some(6.625), "absent fields must not be nulled out");
+
+    // The columns this import never owns must survive untouched.
+    assert_eq!(bond_after.liquidity_days, Some(3.0), "an import must never touch liquidity_days");
+    assert_eq!(bond_after.adv_eligible, Some(true), "an import must never touch adv_eligible");
 
     pool.close().await;
     edb.stop().await;
