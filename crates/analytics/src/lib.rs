@@ -12,6 +12,7 @@ pub mod futures;
 pub mod pnl;
 pub mod emir;
 pub mod bizdays;
+pub mod coupons;
 
 pub use returns::*;
 pub use stats::*;
@@ -26,6 +27,7 @@ pub use backtest::*;
 pub use futures::*;
 pub use pnl::*;
 pub use bizdays::*;
+pub use coupons::*;
 
 // Disambiguate: returns::NavPoint is the default; pnl::NavPoint must be qualified
 pub use returns::NavPoint;
