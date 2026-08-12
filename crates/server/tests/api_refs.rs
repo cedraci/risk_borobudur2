@@ -111,7 +111,7 @@ async fn refs_editor_flow() {
     assert_eq!(bond["bond_coupon_pct"].as_f64().unwrap(), 6.625);
     assert_eq!(bond["bond_maturity"], "2035-03-15");
     assert_eq!(bond["bond_coupon_freq"], 2);
-    assert_eq!(bond["effective_bucket"], "d8_30"); // Obligation default
+    assert_eq!(bond["effective_days"], 30.0); // Obligation default
     let cash = rows.iter().find(|r| r["asset_type"] == "Cash Acc").unwrap();
     assert_eq!(cash["effective_issuer_group"], "CBLU");
 
@@ -119,29 +119,29 @@ async fn refs_editor_flow() {
     let helium = rows.iter().find(|r| r["code"] == "LU1112771255").unwrap();
     assert_eq!(helium["issuer_group_override"], serde_json::Value::Null);
     let (st, _) = put_json(&app, "/api/refs/LU1112771255", serde_json::json!({
-        "issuer_group": "HELIUM GROUP", "liquidity_bucket": "d8_30",
+        "issuer_group": "HELIUM GROUP", "liquidity_days": 30,
         "bond_coupon_pct": null, "bond_maturity": null, "bond_coupon_freq": null
     })).await;
     assert_eq!(st, StatusCode::OK);
     let (_, rows2) = get_json(&app, "/api/refs").await;
     let helium2 = rows2.as_array().unwrap().iter().find(|r| r["code"] == "LU1112771255").unwrap();
     assert_eq!(helium2["effective_issuer_group"], "HELIUM GROUP");
-    assert_eq!(helium2["effective_bucket"], "d8_30");
+    assert_eq!(helium2["effective_days"], 30.0);
 
     // revert with nulls
     let (st, _) = put_json(&app, "/api/refs/LU1112771255", serde_json::json!({
-        "issuer_group": null, "liquidity_bucket": null,
+        "issuer_group": null, "liquidity_days": null,
         "bond_coupon_pct": null, "bond_maturity": null, "bond_coupon_freq": null
     })).await;
     assert_eq!(st, StatusCode::OK);
     let (_, rows3) = get_json(&app, "/api/refs").await;
     let helium3 = rows3.as_array().unwrap().iter().find(|r| r["code"] == "LU1112771255").unwrap();
     assert_eq!(helium3["issuer_group_override"], serde_json::Value::Null);
-    assert_eq!(helium3["effective_bucket"], "d2_7"); // back to Fonds default
+    assert_eq!(helium3["effective_days"], 7.0); // back to Fonds default
 
-    // invalid bucket -> 422
+    // invalid liquidity_days -> 422
     let (st, err) = put_json(&app, "/api/refs/LU1112771255", serde_json::json!({
-        "issuer_group": null, "liquidity_bucket": "weekly",
+        "issuer_group": null, "liquidity_days": -5,
         "bond_coupon_pct": null, "bond_maturity": null, "bond_coupon_freq": null
     })).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);

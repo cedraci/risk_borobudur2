@@ -133,7 +133,7 @@ async fn rates_incomplete_bond_statics() {
     // Null out bond statics via PUT /api/refs/{code}
     let (st, _) = put_json(&app, "/api/refs/US105756CL22", serde_json::json!({
         "issuer_group": null,
-        "liquidity_bucket": null,
+        "liquidity_days": null,
         "bond_coupon_pct": null,
         "bond_maturity": null,
         "bond_coupon_freq": null,
@@ -151,7 +151,7 @@ async fn rates_incomplete_bond_statics() {
     // Restore bond statics
     let (st, _) = put_json(&app, "/api/refs/US105756CL22", serde_json::json!({
         "issuer_group": null,
-        "liquidity_bucket": null,
+        "liquidity_days": null,
         "bond_coupon_pct": 1.125,
         "bond_maturity": "2035-11-15",
         "bond_coupon_freq": 2,

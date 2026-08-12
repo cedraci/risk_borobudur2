@@ -6,16 +6,16 @@ async fn settings_v2_fields_roundtrip() {
 
     let mut s = db::settings::get_settings(&pool, 1).await.unwrap();
     assert!((s.redemption_shock - 0.30).abs() < 1e-12);
-    assert_eq!(s.liquidity_defaults["Fonds"], "d2_7");
-    assert_eq!(s.liquidity_defaults["Obligation"], "d8_30");
+    assert_eq!(s.liquidity_default_days["Fonds"], 7);
+    assert_eq!(s.liquidity_default_days["Obligation"], 30);
 
     s.redemption_shock = 0.25;
-    s.liquidity_defaults["Fonds"] = serde_json::json!("d8_30");
+    s.liquidity_default_days["Fonds"] = serde_json::json!(30);
     db::settings::put_settings(&pool, 1, &s).await.unwrap();
 
     let s2 = db::settings::get_settings(&pool, 1).await.unwrap();
     assert!((s2.redemption_shock - 0.25).abs() < 1e-12);
-    assert_eq!(s2.liquidity_defaults["Fonds"], "d8_30");
+    assert_eq!(s2.liquidity_default_days["Fonds"], 30);
 
     pool.close().await;
     edb.stop().await;

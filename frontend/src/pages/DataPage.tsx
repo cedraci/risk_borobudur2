@@ -198,14 +198,12 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
         }}>Save</button>
         {msg && <span>{msg}</span>}
       </div>
-      <h4>Liquidity defaults by asset type</h4>
+      <h4>Liquidity default days by asset type</h4>
       <div className="controls">
-        {Object.entries(s.liquidity_defaults).map(([atype, bucket]) => (
+        {Object.entries(s.liquidity_default_days).map(([atype, days]) => (
           <label key={atype}>{atype}{" "}
-            <select value={bucket} onChange={(e) =>
-              set({ liquidity_defaults: { ...s.liquidity_defaults, [atype]: e.target.value as import("../api").Bucket } })}>
-              {["d1", "d2_7", "d8_30", "d30p"].map((b) => <option key={b} value={b}>{b}</option>)}
-            </select>
+            <input type="number" min={0} step={0.5} value={days} onChange={(e) =>
+              set({ liquidity_default_days: { ...s.liquidity_default_days, [atype]: Number(e.target.value) } })} />
           </label>
         ))}
       </div>
@@ -226,7 +224,8 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
     const d = draftFor(r.code);
     const body: import("../api").RefBody = {
       issuer_group: d.issuer_group !== undefined ? d.issuer_group : r.issuer_group_override,
-      liquidity_bucket: d.liquidity_bucket !== undefined ? d.liquidity_bucket : r.bucket_override,
+      liquidity_days: d.liquidity_days !== undefined ? d.liquidity_days : r.days_override,
+      adv_eligible: d.adv_eligible !== undefined ? d.adv_eligible : r.adv_eligible,
       bond_coupon_pct: d.bond_coupon_pct !== undefined ? d.bond_coupon_pct : r.bond_coupon_pct,
       bond_maturity: d.bond_maturity !== undefined ? d.bond_maturity : r.bond_maturity,
       bond_coupon_freq: d.bond_coupon_freq !== undefined ? d.bond_coupon_freq : r.bond_coupon_freq,
@@ -244,7 +243,7 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
 
   async function reset(r: import("../api").RefRow) {
     try {
-      await putRef(r.code, { issuer_group: null, liquidity_bucket: null, bond_coupon_pct: null, bond_maturity: null, bond_coupon_freq: null });
+      await putRef(r.code, { issuer_group: null, liquidity_days: null, adv_eligible: null, bond_coupon_pct: null, bond_maturity: null, bond_coupon_freq: null });
       setDrafts((prev) => { const rest = { ...prev }; delete rest[r.code]; return rest; });
       setMsg(`Reset ${r.code} to defaults.`);
       onSaved();
@@ -264,12 +263,12 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
       </p>
       {msg && <p>{msg}</p>}
       <table className="tbl">
-        <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Issuer group</th><th>Bucket</th><th>Coupon %</th><th>Maturity</th><th>Freq</th><th></th></tr></thead>
+        <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Issuer group</th><th>Days</th><th>Coupon %</th><th>Maturity</th><th>Freq</th><th></th></tr></thead>
         <tbody>
           {rows.map((r) => {
             const d = draftFor(r.code);
             const dirty = Object.keys(d).length > 0;
-            const overridden = r.issuer_group_override != null || r.bucket_override != null;
+            const overridden = r.issuer_group_override != null || r.days_override != null;
             return (
               <tr key={r.code}>
                 <td>{r.code}</td>
@@ -283,13 +282,12 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
                   />
                 </td>
                 <td>
-                  <select
-                    value={d.liquidity_bucket !== undefined ? (d.liquidity_bucket ?? "") : (r.bucket_override ?? "")}
-                    onChange={(e) => setDraft(r.code, { liquidity_bucket: (e.target.value || null) as import("../api").Bucket | null })}
-                  >
-                    <option value="">default ({r.effective_bucket})</option>
-                    {["d1", "d2_7", "d8_30", "d30p"].map((b) => <option key={b} value={b}>{b}</option>)}
-                  </select>
+                  <input
+                    type="number" min={0} step={0.5}
+                    placeholder={`default (${r.effective_days})`}
+                    value={d.liquidity_days !== undefined ? (d.liquidity_days ?? "") : (r.days_override ?? "")}
+                    onChange={(e) => setDraft(r.code, { liquidity_days: e.target.value === "" ? null : Number(e.target.value) })}
+                  />
                 </td>
                 {r.is_bond ? (
                   <>

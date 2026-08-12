@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::handlers::refs::effective_bucket;
+use crate::handlers::refs::effective_days;
 use crate::state::AppState;
 use analytics::{concentration, default_issuer_group, liquidity, ConPosition, LiqPosition};
 use axum::extract::{Path, Query, State};
@@ -62,11 +62,9 @@ pub async fn liquidity_h(State(st): State<AppState>, Path(pid): Path<i64>, Query
     let by = ref_map(&refs);
     let liq: Vec<LiqPosition> = rows.iter().filter_map(|p| {
         let w = p.weight?;
-        let override_ = by.get(p.isin.as_str()).and_then(|r| r.liquidity_bucket.as_deref());
-        Some(LiqPosition {
-            weight: w,
-            bucket: effective_bucket(&settings.liquidity_defaults, &p.asset_type, override_),
-        })
+        let days = effective_days(&settings.liquidity_default_days, &p.asset_type,
+                                  by.get(p.isin.as_str()).and_then(|r| r.liquidity_days));
+        Some(LiqPosition { weight: w, bucket: analytics::BUCKET_ORDER[analytics::band_of_days(days)].into() })
     }).collect();
     let report = liquidity(&liq, settings.redemption_shock);
     Ok(Json(serde_json::json!({

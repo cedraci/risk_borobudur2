@@ -2,6 +2,12 @@ use serde::Serialize;
 
 pub const BUCKET_ORDER: [&str; 4] = ["d1", "d2_7", "d8_30", "d30p"];
 
+/// Index into `BUCKET_ORDER` for a days figure. Bands are closed at the
+/// upper edge: 1 day is `d1`, 7 days is `d2_7`, 30 days is `d8_30`.
+pub fn band_of_days(days: f64) -> usize {
+    if days <= 1.0 { 0 } else if days <= 7.0 { 1 } else if days <= 30.0 { 2 } else { 3 }
+}
+
 #[derive(Debug, Clone)]
 pub struct LiqPosition {
     pub weight: f64,

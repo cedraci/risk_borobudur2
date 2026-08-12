@@ -36,7 +36,9 @@ export interface ImportOutcome {
 export interface Settings {
   risk_free_rate: number; var_confidence: number; var_horizon_days: number;
   var_window_days: number; var_limit: number; short_dd_max_days: number;
-  liquidity_defaults: Record<string, Bucket>; redemption_shock: number;
+  liquidity_default_days: Record<string, number>; redemption_shock: number;
+  participation_rate: number; adv_stress_factor: number; liquidity_horizon_days: number;
+  settlement_deadline_days: number; adv_max_age_days: number; flow_lookback_days: number;
 }
 export interface RowError { sheet: string; row: number; message: string }
 
@@ -156,12 +158,14 @@ export interface Backtest {
 export interface RefRow {
   code: string; name: string; asset_type: string;
   effective_issuer_group: string; issuer_group_override: string | null;
-  effective_bucket: Bucket; bucket_override: Bucket | null;
+  effective_days: number; days_override: number | null;
+  adv_30d: number | null; adv_asof: string | null; adv_eligible: boolean | null;
+  market_place_name: string | null;
   bond_coupon_pct: number | null; bond_maturity: string | null; bond_coupon_freq: number | null;
   is_bond: boolean;
 }
 export interface RefBody {
-  issuer_group: string | null; liquidity_bucket: Bucket | null;
+  issuer_group: string | null; liquidity_days: number | null; adv_eligible: boolean | null;
   bond_coupon_pct: number | null; bond_maturity: string | null; bond_coupon_freq: number | null;
 }
 

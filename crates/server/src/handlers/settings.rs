@@ -26,13 +26,13 @@ fn validate(s: &AppSettings) -> Result<(), String> {
     if !(s.redemption_shock > 0.0 && s.redemption_shock < 1.0) {
         return Err("redemption_shock must be in (0, 1)".into());
     }
-    let Some(obj) = s.liquidity_defaults.as_object() else {
-        return Err("liquidity_defaults must be a JSON object".into());
+    let Some(obj) = s.liquidity_default_days.as_object() else {
+        return Err("liquidity_default_days must be a JSON object".into());
     };
     for (k, v) in obj {
-        let ok = v.as_str().map(|b| ["d1", "d2_7", "d8_30", "d30p"].contains(&b)).unwrap_or(false);
+        let ok = v.as_f64().map(|d| d.is_finite() && (0.0..=3650.0).contains(&d)).unwrap_or(false);
         if !ok {
-            return Err(format!("liquidity_defaults[{k}] must be one of d1, d2_7, d8_30, d30p"));
+            return Err(format!("liquidity_default_days[{k}] must be a number in [0, 3650]"));
         }
     }
     Ok(())

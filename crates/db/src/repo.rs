@@ -490,10 +490,21 @@ pub async fn imports_list(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Ve
 pub struct InstrumentRef {
     pub code: String,
     pub issuer_group: Option<String>,
-    pub liquidity_bucket: Option<String>,
+    /// Per-instrument days-to-liquidate override. NULL = asset-type default.
+    pub liquidity_days: Option<f64>,
+    /// User override of the derived venue rule. NULL = derive.
+    pub adv_eligible: Option<bool>,
     pub bond_coupon_pct: Option<f64>,
     pub bond_maturity: Option<NaiveDate>,
     pub bond_coupon_freq: Option<i32>,
+    // Depositary-maintained (HISINVLUX / INVJCPLUX), overwritten on import.
+    pub bond_next_coupon: Option<NaiveDate>,
+    pub bond_nominal: Option<f64>,
+    pub market_place: Option<String>,
+    pub market_place_name: Option<String>,
+    // Bloomberg-maintained, written only by the ADV response upload.
+    pub adv_30d: Option<f64>,
+    pub adv_asof: Option<NaiveDate>,
     pub country_of_risk: Option<String>,
     pub region: Option<String>,
     pub gics_sector: Option<String>,
@@ -503,8 +514,12 @@ pub struct InstrumentRef {
 
 pub async fn refs_all(pool: &PgPool) -> anyhow::Result<Vec<InstrumentRef>> {
     Ok(sqlx::query_as(
-        "SELECT code, issuer_group, liquidity_bucket,
+        "SELECT code, issuer_group,
+                liquidity_days::float8 AS liquidity_days, adv_eligible,
                 bond_coupon_pct::float8 AS bond_coupon_pct, bond_maturity, bond_coupon_freq,
+                bond_next_coupon, bond_nominal::float8 AS bond_nominal,
+                market_place, market_place_name,
+                adv_30d::float8 AS adv_30d, adv_asof,
                 country_of_risk, region, gics_sector, gics_industry, ticker
          FROM instrument_refs ORDER BY code",
     )
@@ -512,21 +527,26 @@ pub async fn refs_all(pool: &PgPool) -> anyhow::Result<Vec<InstrumentRef>> {
     .await?)
 }
 
-/// Full-row replace: every field is written as given; None stores NULL,
-/// which means "use the derived default".
+/// User-owned fields only. The depositary columns (`market_place`,
+/// `bond_next_coupon`, `bond_nominal`) and the Bloomberg columns (`adv_30d`,
+/// `adv_asof`) are deliberately absent: an editor save must never blank data
+/// the import or the terminal owns.
 pub async fn refs_upsert(pool: &PgPool, r: &InstrumentRef) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO instrument_refs (code, issuer_group, liquidity_bucket, bond_coupon_pct, bond_maturity, bond_coupon_freq, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
+        "INSERT INTO instrument_refs
+           (code, issuer_group, liquidity_days, adv_eligible,
+            bond_coupon_pct, bond_maturity, bond_coupon_freq, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now())
          ON CONFLICT (code) DO UPDATE SET
-           issuer_group = EXCLUDED.issuer_group,
-           liquidity_bucket = EXCLUDED.liquidity_bucket,
-           bond_coupon_pct = EXCLUDED.bond_coupon_pct,
-           bond_maturity = EXCLUDED.bond_maturity,
+           issuer_group     = EXCLUDED.issuer_group,
+           liquidity_days   = EXCLUDED.liquidity_days,
+           adv_eligible     = EXCLUDED.adv_eligible,
+           bond_coupon_pct  = EXCLUDED.bond_coupon_pct,
+           bond_maturity    = EXCLUDED.bond_maturity,
            bond_coupon_freq = EXCLUDED.bond_coupon_freq,
            updated_at = now()",
     )
-    .bind(&r.code).bind(&r.issuer_group).bind(&r.liquidity_bucket)
+    .bind(&r.code).bind(&r.issuer_group).bind(r.liquidity_days).bind(r.adv_eligible)
     .bind(r.bond_coupon_pct).bind(r.bond_maturity).bind(r.bond_coupon_freq)
     .execute(pool)
     .await?;
