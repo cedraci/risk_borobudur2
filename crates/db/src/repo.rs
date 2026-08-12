@@ -71,8 +71,12 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
 
     let mut tx = pool.begin().await?;
 
+    // Only ever compare a journal-bearing batch's date against OTHER
+    // journal-bearing imports — CACEIS CSV imports also create `imports`
+    // rows now, and their nav_date (typically daily, so almost always newer
+    // than a weekly recap's own date) must never poison this gate.
     let prev_latest: Option<NaiveDate> =
-        sqlx::query_scalar("SELECT max(nav_date) FROM imports WHERE portfolio_id = $1")
+        sqlx::query_scalar("SELECT max(nav_date) FROM imports WHERE portfolio_id = $1 AND has_div_ops")
             .bind(portfolio_id).fetch_one(&mut *tx).await?;
     let has_div_ops = b.dividends.is_some() || b.operations.is_some();
     let replace_div_ops = has_div_ops && prev_latest.is_none_or(|d| b.primary_date >= d);
@@ -90,9 +94,9 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
         row_counts["warnings"] = serde_json::json!(b.warnings);
     }
     let (import_id,): (i64,) = sqlx::query_as(
-        "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts, has_div_ops) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
-    .bind(portfolio_id).bind(filename).bind(sha256).bind(b.primary_date).bind(&row_counts)
+    .bind(portfolio_id).bind(filename).bind(sha256).bind(b.primary_date).bind(&row_counts).bind(has_div_ops)
     .fetch_one(&mut *tx).await?;
 
     const UPSERT_NAV: &str = "INSERT INTO nav_history (portfolio_id, date, aum, shares, nav) VALUES ($1, $2, $3, $4, $5)
@@ -165,7 +169,11 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
     }
 
     if replace_div_ops {
-        sqlx::query("DELETE FROM dividends WHERE portfolio_id = $1").bind(portfolio_id).execute(&mut *tx).await?;
+        // Scoped to explicit (file-sourced) rows only: derived rows are
+        // owned exclusively by `derive_dividends`'s own delete-and-rebuild,
+        // and are re-derived below, not wiped and left unreplaced here.
+        sqlx::query("DELETE FROM dividends WHERE portfolio_id = $1 AND NOT derived")
+            .bind(portfolio_id).execute(&mut *tx).await?;
         for r in b.dividends.as_deref().unwrap_or(&[]) {
             sqlx::query("INSERT INTO dividends (portfolio_id, provision_date, payment_date, issuer, amount, currency) VALUES ($1, $2, $3, $4, $5, $6)")
                 .bind(portfolio_id).bind(r.provision_date).bind(r.payment_date).bind(&r.issuer).bind(r.amount).bind(&r.currency)
@@ -211,7 +219,17 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
 
     tx.commit().await?;
 
-    if b.dividends.is_none() && !b.snapshots.is_empty() {
+    // Re-derive whenever this batch's own snapshots might contain new CPON
+    // deltas (the original trigger), OR whenever a journal-bearing batch
+    // just ran (explicit rows may have been inserted/changed) and the
+    // portfolio holds any derived rows at all — a mixed-feed portfolio's
+    // NAV Recap import must re-run derivation so newly explicit dates
+    // correctly suppress the same-date derived rows, and so a derived date
+    // this batch did not touch is recomputed rather than left stale.
+    let has_derived_rows = has_div_ops && sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM dividends WHERE portfolio_id = $1 AND derived)")
+        .bind(portfolio_id).fetch_one(pool).await?;
+    if (b.dividends.is_none() && !b.snapshots.is_empty()) || has_derived_rows {
         let n = derive_dividends(pool, portfolio_id).await?;
         if n > 0 {
             warnings.push(format!("{n} dividend event(s) derived from receivable deltas"));

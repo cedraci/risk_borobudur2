@@ -93,7 +93,16 @@ export default function DataPage() {
                         <span className="pos">
                           {r.outcome.duplicate
                             ? "Already imported (identical file)."
-                            : `Imported: ${r.outcome.nav_rows} NAV rows, ${r.outcome.positions} positions, ${r.outcome.dividends} dividends, ${r.outcome.operations} operations.`}
+                            : `Imported: ${r.outcome.nav_rows} NAV rows, ${r.outcome.positions} positions, ${r.outcome.dividends} dividends, ${r.outcome.operations} operations.` +
+                              // Only a NAV Recap ever carries a dividends/operations
+                              // journal (CACEIS CSV outcomes never set dividends or
+                              // operations, so div_ops_replaced is always false for
+                              // them too) — gate on kind so a CSV row is never
+                              // mislabeled as "older file" when it never had a
+                              // journal to replace in the first place.
+                              (r.kind === "nav_recap" && !r.outcome.div_ops_replaced
+                                ? " (older file: dividends/operations left untouched)"
+                                : "")}
                         </span>
                         {r.outcome.warnings.map((w, j) => <p key={j} className="warn-badge">{w}</p>)}
                       </>
