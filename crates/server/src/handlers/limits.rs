@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::handlers::refs::effective_days;
 use crate::state::AppState;
-use analytics::{concentration, default_issuer_group, liquidity, ConPosition, LiqPosition};
+use analytics::{concentration, default_issuer_group, ConPosition};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::NaiveDate;
@@ -60,21 +60,29 @@ pub async fn liquidity_h(State(st): State<AppState>, Path(pid): Path<i64>, Query
     let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
     let settings = db::settings::get_settings(&st.pool, pid).await?;
     let by = ref_map(&refs);
-    let liq: Vec<LiqPosition> = rows.iter().filter_map(|p| {
-        let w = p.weight?;
-        let days = effective_days(&settings.liquidity_default_days, &p.asset_type,
-                                  by.get(p.isin.as_str()).and_then(|r| r.liquidity_days));
-        Some(LiqPosition { weight: w, bucket: analytics::BUCKET_ORDER[analytics::band_of_days(days)].into() })
+    let nav = db::repo::aum_for(&st.pool, pid, date.unwrap_or_default()).await?.unwrap_or(0.0);
+    let caps: Vec<analytics::Capacity> = rows.iter().filter_map(|p| {
+        let v = p.valuation_eur?;
+        if v <= 0.0 { return None; }
+        let r = by.get(p.isin.as_str());
+        Some(analytics::capacity(&analytics::LiqPosition {
+            code: p.isin.clone(), asset_type: p.asset_type.clone(), valuation_eur: v,
+            quantity: p.quantity, adv_30d: None, adv_stale: false,
+            adv_eligible: r.and_then(|r| r.adv_eligible), market_place: None,
+            liquidity_days: r.and_then(|r| r.liquidity_days),
+            default_days: effective_days(&settings.liquidity_default_days, &p.asset_type, None),
+        }, settings.participation_rate, 1.0))
     }).collect();
-    let report = liquidity(&liq, settings.redemption_shock);
+    let profile = analytics::asset_profile(&caps, nav);
+    let negative_memo: f64 = rows.iter().filter_map(|p| p.weight).filter(|w| *w < 0.0).sum();
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
-        "buckets": report.buckets,
-        "cumulative": report.cumulative,
-        "negative_memo": report.negative_memo,
+        "buckets": profile.buckets,
+        "cumulative": profile.cumulative,
+        "negative_memo": negative_memo,
         "shock": settings.redemption_shock,
-        "stress_status": if report.stress_ok { "ok" } else { "breach" },
+        "stress_status": if profile.cumulative[1].weight >= settings.redemption_shock { "ok" } else { "breach" },
     })))
 }
 
