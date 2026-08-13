@@ -240,3 +240,70 @@ async fn flows_are_unavailable_until_enough_history_is_loaded() {
     pool.close().await;
     edb.stop().await;
 }
+
+fn flow_row(date: chrono::NaiveDate, class: &str, outstanding: Option<f64>, nav: Option<f64>, sub: f64, red: f64) -> ingest::ShareClassFlowRow {
+    ingest::ShareClassFlowRow {
+        flow_date: date,
+        share_class: class.into(),
+        outstanding_shares: outstanding,
+        nav_per_share: nav,
+        subscription_amount: sub,
+        redemption_amount: red,
+    }
+}
+
+// A date whose NAV has not yet been struck for one of its share classes
+// (outstanding_shares/nav_per_share both None — the ingest layer's "not yet
+// struck" state, distinct from a genuinely blank amount which defaults to
+// 0.0) must be excluded from the fund-level series entirely: counting its
+// full redemption against a fabricated (zero) NAV would inflate every
+// window's worst-outflow percentage. The excluded date is reported via
+// `dates_excluded_no_nav` rather than silently dropped.
+#[tokio::test]
+async fn flows_exclude_a_date_missing_nav_for_any_class_instead_of_zero_filling() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
+    let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let base = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let mut rows = Vec::new();
+    // 21 complete daily observations at a constant 100m NAV, all flat except
+    // for a single, known 5m outflow on day 15 (a 0.05 worst 1-day ratio).
+    for i in 0..21 {
+        let date = base + chrono::Duration::days(i);
+        let red = if i == 14 { 5_000_000.0 } else { 0.0 };
+        rows.push(flow_row(date, "C1", Some(1_000_000.0), Some(100.0), 0.0, red));
+    }
+    // Day 10 (2026-01-10) additionally books a second share class whose NAV
+    // has not been struck yet, alongside a much larger redemption. If this
+    // date were zero-filled rather than excluded, it would dominate every
+    // window it appears in.
+    rows.push(flow_row(base + chrono::Duration::days(9), "C2", None, None, 0.0, 40_000_000.0));
+
+    {
+        let mut conn = pool.acquire().await.unwrap();
+        db::repo::flows_upsert(&mut conn, 1, &rows).await.unwrap();
+    }
+
+    let (s, b) = get_json(&app, "/api/portfolios/1/flows").await;
+    assert_eq!(s, StatusCode::OK);
+    // 21 days loaded, 1 excluded for missing NAV -> 20 complete observations,
+    // exactly meeting the minimum, so flow_stats returns a result.
+    assert_eq!(b["dates_excluded_no_nav"], 1);
+    assert_eq!(b["n_observations"], 20);
+
+    // The worst 1-day outflow reflects only the known 5m/100m = 0.05 event,
+    // never the excluded date's fabricated 40m/0 ratio.
+    let w1 = b["worst"].as_array().unwrap().iter()
+        .find(|w| w["window"] == 1).unwrap();
+    assert!((w1["pct_of_nav"].as_f64().unwrap() - 0.05).abs() < 1e-9,
+        "worst outflow inflated by the excluded date: {w1}");
+
+    pool.close().await;
+    edb.stop().await;
+}

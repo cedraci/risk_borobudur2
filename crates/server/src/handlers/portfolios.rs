@@ -170,21 +170,47 @@ pub async fn flows(
     // contributes its own net amount and its own net assets, so no
     // NAV-per-share ambiguity arises and multi-class portfolios need no
     // special case here.
-    let mut by_date: std::collections::BTreeMap<chrono::NaiveDate, (f64, f64)> = Default::default();
+    //
+    // A blank *amount* cell is parsed upstream as 0.0 ("no flow that day"),
+    // but a blank outstanding_shares/nav_per_share is parsed as None ("NAV
+    // not yet struck" — an ordinary depositary-lag state, not a zero). If we
+    // let a None NAV contribute 0.0 to the denominator while still counting
+    // that class's full subscription/redemption in the numerator, a date
+    // with an unstruck NAV would fabricate an inflated outflow percentage.
+    // So the whole date is excluded whenever any contributing class is
+    // missing either NAV input — never zero-filled — and the exclusion is
+    // reported rather than swallowed.
+    let mut by_date: std::collections::BTreeMap<chrono::NaiveDate, (f64, f64, bool)> = Default::default();
     for r in &records {
-        let e = by_date.entry(r.flow_date).or_insert((0.0, 0.0));
+        let e = by_date.entry(r.flow_date).or_insert((0.0, 0.0, true));
         e.0 += r.subscription_amount - r.redemption_amount;
-        e.1 += r.outstanding_shares.unwrap_or(0.0) * r.nav_per_share.unwrap_or(0.0);
+        match (r.outstanding_shares, r.nav_per_share) {
+            (Some(shares), Some(nav)) => e.1 += shares * nav,
+            _ => e.2 = false,
+        }
     }
+    let mut dates_excluded_no_nav: usize = 0;
     let obs: Vec<analytics::FlowObs> = by_date.into_iter()
-        .map(|(date, (net_eur, nav_eur))| analytics::FlowObs { date, net_eur, nav_eur })
+        .filter_map(|(date, (net_eur, nav_eur, complete))| {
+            if complete {
+                Some(analytics::FlowObs { date, net_eur, nav_eur })
+            } else {
+                dates_excluded_no_nav += 1;
+                None
+            }
+        })
         .collect();
 
     Ok(Json(match analytics::flow_stats(&obs) {
-        Some(s) => serde_json::json!(s),
+        Some(s) => {
+            let mut v = serde_json::json!(s);
+            v["dates_excluded_no_nav"] = serde_json::json!(dates_excluded_no_nav);
+            v
+        }
         None => serde_json::json!({
             "status": "unavailable",
             "n_observations": obs.len(),
+            "dates_excluded_no_nav": dates_excluded_no_nav,
             "reason": format!(
                 "{} observation(s) loaded; {} are needed before an observed outflow means anything",
                 obs.len(), analytics::MIN_FLOW_OBSERVATIONS),
