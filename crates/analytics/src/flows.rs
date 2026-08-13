@@ -56,7 +56,13 @@ pub fn flow_stats(obs: &[FlowObs]) -> Option<FlowStats> {
                 if ratio < worst_ratio { worst_ratio = ratio; }
             }
         }
-        WorstOutflow { window: w, pct_of_nav: -worst_ratio }
+        // `worst_ratio` starts at 0.0 and only ever moves negative, but a
+        // series that never sees a net outflow leaves it at exactly 0.0 —
+        // negating that yields -0.0, which `==` treats as equal to 0.0 but
+        // which serde_json serialises with the sign bit intact. Normalise so
+        // a non-negative accumulator always yields positive zero on output.
+        let pct_of_nav = if worst_ratio < 0.0 { -worst_ratio } else { 0.0 };
+        WorstOutflow { window: w, pct_of_nav }
     }).collect();
 
     Some(FlowStats {
@@ -134,6 +140,21 @@ mod tests {
         let st = flow_stats(&s).unwrap();
         assert_eq!(st.from, NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
         assert!((st.worst.iter().find(|w| w.window == 1).unwrap().pct_of_nav - 0.09).abs() < 1e-12);
+    }
+
+    /// `==` treats 0.0 and -0.0 as equal, so it cannot catch a regression
+    /// here — the check must be sign-sensitive. `serde_json` (used by the
+    /// API layer that consumes this struct) preserves the sign bit of a
+    /// float, so a leaked -0.0 would render as `"pct_of_nav": -0.0` over the
+    /// wire; `f64::is_sign_negative` detects the same defect directly.
+    #[test]
+    fn an_all_subscriptions_series_reports_worst_outflow_as_positive_zero_not_negative_zero() {
+        let mut s = series(40);
+        for o in s.iter_mut() { o.net_eur = 1_000_000.0; }
+        let st = flow_stats(&s).unwrap();
+        for w in &st.worst {
+            assert!(!w.pct_of_nav.is_sign_negative(), "window {}: -0.0 leaked", w.window);
+        }
     }
 
     #[test]

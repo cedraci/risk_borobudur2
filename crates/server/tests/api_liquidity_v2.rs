@@ -217,3 +217,26 @@ async fn shareholders_put_refused_but_read_allowed_on_archived_portfolio() {
     pool.close().await;
     edb.stop().await;
 }
+
+#[tokio::test]
+async fn flows_are_unavailable_until_enough_history_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
+    let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (s, b) = get_json(&app, "/api/portfolios/1/flows").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["status"], "unavailable");
+    assert_eq!(b["n_observations"], 0);
+    // Never a percentage computed from too little history.
+    assert!(b["worst"].is_null());
+    assert!(b["reason"].as_str().unwrap().contains("observation"));
+
+    pool.close().await;
+    edb.stop().await;
+}

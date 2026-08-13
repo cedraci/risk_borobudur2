@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/portfolios/{id}/shareholders",
             get(handlers::portfolios::shareholders_list)
                 .put(handlers::portfolios::shareholders_put))
+        .route("/api/portfolios/{id}/flows", get(handlers::portfolios::flows))
         .route("/api/portfolios/{id}/settings", get(handlers::settings::get).put(handlers::settings::put))
         .route("/api/portfolios/{id}/imports", get(handlers::imports::list).post(handlers::imports::upload))
         .route("/api/portfolios/{id}/nav", get(handlers::data::nav))

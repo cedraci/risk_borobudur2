@@ -155,3 +155,39 @@ pub async fn shareholders_put(
     db::repo::shareholders_replace(&st.pool, pid, &rows).await?;
     Ok(Json(db::repo::shareholders_for(&st.pool, pid).await?))
 }
+
+/// The observed subscription/redemption history, for comparison against the
+/// *configured* redemption shock used in the liquidity scenarios. This is a
+/// read: history must stay inspectable even on an archived portfolio.
+pub async fn flows(
+    State(st): State<AppState>, Path(pid): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    ensure(&st.pool, pid, false).await?;
+    let settings = db::settings::get_settings(&st.pool, pid).await?;
+    let records = db::repo::flows_for(&st.pool, pid, settings.flow_lookback_days).await?;
+
+    // Aggregate the share classes into one fund-level series. Each class
+    // contributes its own net amount and its own net assets, so no
+    // NAV-per-share ambiguity arises and multi-class portfolios need no
+    // special case here.
+    let mut by_date: std::collections::BTreeMap<chrono::NaiveDate, (f64, f64)> = Default::default();
+    for r in &records {
+        let e = by_date.entry(r.flow_date).or_insert((0.0, 0.0));
+        e.0 += r.subscription_amount - r.redemption_amount;
+        e.1 += r.outstanding_shares.unwrap_or(0.0) * r.nav_per_share.unwrap_or(0.0);
+    }
+    let obs: Vec<analytics::FlowObs> = by_date.into_iter()
+        .map(|(date, (net_eur, nav_eur))| analytics::FlowObs { date, net_eur, nav_eur })
+        .collect();
+
+    Ok(Json(match analytics::flow_stats(&obs) {
+        Some(s) => serde_json::json!(s),
+        None => serde_json::json!({
+            "status": "unavailable",
+            "n_observations": obs.len(),
+            "reason": format!(
+                "{} observation(s) loaded; {} are needed before an observed outflow means anything",
+                obs.len(), analytics::MIN_FLOW_OBSERVATIONS),
+        }),
+    }))
+}
