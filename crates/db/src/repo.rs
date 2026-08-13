@@ -1037,6 +1037,42 @@ pub async fn derive_dividends(pool: &PgPool, portfolio_id: i64) -> anyhow::Resul
     Ok(events.len())
 }
 
+// ---- shareholder register (manually maintained top holders, as % of NAV) ----
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct Shareholder {
+    pub id: i64,
+    pub label: String,
+    pub pct_of_nav: f64,
+    pub as_of: NaiveDate,
+}
+
+/// Largest first: the top-five scenario reads straight off this order.
+pub async fn shareholders_for(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<Shareholder>> {
+    Ok(sqlx::query_as(
+        "SELECT id, label, pct_of_nav::float8 AS pct_of_nav, as_of
+         FROM shareholders WHERE portfolio_id = $1 ORDER BY pct_of_nav DESC, id",
+    )
+    .bind(portfolio_id).fetch_all(pool).await?)
+}
+
+/// Replace the full register for one portfolio in a single transaction, so a
+/// mid-list failure cannot leave a half-replaced register.
+pub async fn shareholders_replace(
+    pool: &PgPool, portfolio_id: i64, rows: &[(String, f64, NaiveDate)],
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM shareholders WHERE portfolio_id = $1")
+        .bind(portfolio_id).execute(&mut *tx).await?;
+    for (label, pct, as_of) in rows {
+        sqlx::query("INSERT INTO shareholders (portfolio_id, label, pct_of_nav, as_of) VALUES ($1, $2, $3, $4)")
+            .bind(portfolio_id).bind(label).bind(pct).bind(as_of)
+            .execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod pam_warnings_tests {
     //! Unit-level pin for the two silent-skip paths in `pam_warnings`, using

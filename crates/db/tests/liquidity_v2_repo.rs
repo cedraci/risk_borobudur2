@@ -126,3 +126,46 @@ async fn import_batch_stores_flows_and_row_count() {
     pool.close().await;
     edb.stop().await;
 }
+
+// shareholders_replace deletes and re-inserts in one transaction; the read
+// back must come out largest-first, with `id` as a deterministic tiebreak
+// for equal percentages.
+#[tokio::test]
+async fn shareholders_replace_is_transactional_and_ordered_largest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+
+    let first = vec![
+        ("Founder family".to_string(), 18.0, d("2026-08-07")),
+        ("Pension fund A".to_string(), 12.5, d("2026-08-07")),
+        // Same pct as another later row, further down: id tiebreak matters.
+        ("Tied holder A".to_string(), 5.0, d("2026-08-07")),
+        ("Tied holder B".to_string(), 5.0, d("2026-08-07")),
+    ];
+    repo::shareholders_replace(&pool, 1, &first).await.unwrap();
+
+    let rows = repo::shareholders_for(&pool, 1).await.unwrap();
+    assert_eq!(rows.len(), 4);
+    // Largest first.
+    assert_eq!(rows[0].label, "Founder family");
+    assert_eq!(rows[1].label, "Pension fund A");
+    // Equal percentages break the tie on ascending id (insertion order here).
+    assert_eq!(rows[2].label, "Tied holder A");
+    assert_eq!(rows[3].label, "Tied holder B");
+    assert!(rows[2].id < rows[3].id);
+
+    // A second replace fully supersedes the first: no leftover rows, no
+    // duplicate accumulation.
+    let second = vec![("Founder family".to_string(), 20.0, d("2026-08-10"))];
+    repo::shareholders_replace(&pool, 1, &second).await.unwrap();
+
+    let rows_after = repo::shareholders_for(&pool, 1).await.unwrap();
+    assert_eq!(rows_after.len(), 1, "replace must not append to the previous register");
+    assert_eq!(rows_after[0].label, "Founder family");
+    assert_eq!(rows_after[0].pct_of_nav, 20.0);
+    assert_eq!(rows_after[0].as_of, d("2026-08-10"));
+
+    pool.close().await;
+    edb.stop().await;
+}

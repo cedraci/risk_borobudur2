@@ -112,3 +112,46 @@ pub async fn codes_put(State(st): State<AppState>, Path(pid): Path<i64>, Json(bo
     })?;
     Ok(Json(db::repo::portfolio_codes_for(&st.pool, pid).await?))
 }
+
+#[derive(serde::Deserialize)]
+pub struct ShareholderBody {
+    pub label: String,
+    pub pct_of_nav: f64,
+    pub as_of: chrono::NaiveDate,
+}
+
+pub async fn shareholders_list(
+    State(st): State<AppState>, Path(pid): Path<i64>,
+) -> Result<Json<Vec<db::repo::Shareholder>>, AppError> {
+    ensure(&st.pool, pid, false).await?;
+    Ok(Json(db::repo::shareholders_for(&st.pool, pid).await?))
+}
+
+/// Replace the portfolio's whole register. Every check runs before any
+/// write, so a rejected payload leaves the stored register untouched.
+pub async fn shareholders_put(
+    State(st): State<AppState>, Path(pid): Path<i64>, Json(body): Json<Vec<ShareholderBody>>,
+) -> Result<Json<Vec<db::repo::Shareholder>>, AppError> {
+    ensure(&st.pool, pid, false).await?;
+    let mut total = 0.0;
+    let mut rows = Vec::with_capacity(body.len());
+    for b in &body {
+        let label = b.label.trim();
+        if label.is_empty() {
+            return Err(AppError::Unprocessable("label must not be blank".into()));
+        }
+        if !(b.pct_of_nav.is_finite() && b.pct_of_nav > 0.0 && b.pct_of_nav <= 100.0) {
+            return Err(AppError::Unprocessable(format!(
+                "{label}: pct_of_nav must be in (0, 100]")));
+        }
+        total += b.pct_of_nav;
+        rows.push((label.to_string(), b.pct_of_nav, b.as_of));
+    }
+    // A register summing past the whole fund is a typo, not a portfolio.
+    if total > 100.0 {
+        return Err(AppError::Unprocessable(format!(
+            "register totals {total:.2}% of NAV, which exceeds 100%")));
+    }
+    db::repo::shareholders_replace(&st.pool, pid, &rows).await?;
+    Ok(Json(db::repo::shareholders_for(&st.pool, pid).await?))
+}
