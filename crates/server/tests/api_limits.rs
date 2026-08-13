@@ -69,12 +69,14 @@ async fn limits_and_backtest_on_sample() {
 
     // liquidity
     let (_, l) = get_json(&app, "/api/portfolios/1/metrics/liquidity").await;
-    let buckets = l["buckets"].as_array().unwrap();
+    let buckets = l["asset"]["normal"]["buckets"].as_array().unwrap();
     assert_eq!(buckets.len(), 4);
     assert_eq!(buckets[0]["bucket"], "d1");
     assert!(buckets[0]["weight"].as_f64().unwrap() > 0.5); // equities dominate
-    assert!(l["stress_status"] == "ok" || l["stress_status"] == "breach");
-    let cum = l["cumulative"].as_array().unwrap();
+    let fixed = l["scenarios"].as_array().unwrap().iter()
+        .find(|s| s["key"] == "fixed").unwrap();
+    assert!(fixed["status"] == "ok" || fixed["status"] == "breach");
+    let cum = l["asset"]["normal"]["cumulative"].as_array().unwrap();
     assert!(cum[3]["weight"].as_f64().unwrap() >= cum[0]["weight"].as_f64().unwrap());
 
     // rates: one bond with parsed statics

@@ -1,5 +1,4 @@
 use crate::error::AppError;
-use crate::handlers::refs::effective_days;
 use crate::state::AppState;
 use analytics::{concentration, default_issuer_group, ConPosition};
 use axum::extract::{Path, Query, State};
@@ -55,34 +54,172 @@ pub async fn concentration_h(State(st): State<AppState>, Path(pid): Path<i64>, Q
     })))
 }
 
-pub async fn liquidity_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
+/// A register whose as-of date is older than this is flagged stale. It is not
+/// a setting: the register is a compliance artefact with no per-portfolio
+/// cadence to calibrate against, and a quarter is the interval at which one
+/// would normally be refreshed.
+const REGISTER_MAX_AGE_DAYS: i64 = 90;
+
+fn build_positions(
+    rows: &[db::repo::PositionRecord],
+    by: &HashMap<&str, &db::repo::InstrumentRef>,
+    settings: &db::settings::AppSettings,
+    asof: chrono::NaiveDate,
+) -> Vec<analytics::LiqPosition> {
+    rows.iter().filter_map(|p| {
+        let v = p.valuation_eur?;
+        if v <= 0.0 { return None; }  // negatives are a cash need, not a sale
+        let r = by.get(p.isin.as_str());
+        Some(analytics::LiqPosition {
+            code: p.isin.clone(),
+            asset_type: p.asset_type.clone(),
+            valuation_eur: v,
+            quantity: p.quantity,
+            adv_30d: r.and_then(|r| r.adv_30d),
+            adv_stale: r.and_then(|r| r.adv_asof)
+                .map(|d| (asof - d).num_days() > settings.adv_max_age_days as i64)
+                // No as-of at all is "no adv", reported by its own reason.
+                .unwrap_or(false),
+            adv_eligible: r.and_then(|r| r.adv_eligible),
+            market_place: r.and_then(|r| r.market_place.clone()),
+            liquidity_days: r.and_then(|r| r.liquidity_days),
+            default_days: super::refs::effective_days(
+                &settings.liquidity_default_days, &p.asset_type, None),
+        })
+    }).collect()
+}
+
+pub async fn liquidity_h(
+    State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
     super::portfolios::ensure(&st.pool, pid, false).await?;
     let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
     let settings = db::settings::get_settings(&st.pool, pid).await?;
     let by = ref_map(&refs);
-    let nav = db::repo::aum_for(&st.pool, pid, date.unwrap_or_default()).await?.unwrap_or(0.0);
-    let caps: Vec<analytics::Capacity> = rows.iter().filter_map(|p| {
-        let v = p.valuation_eur?;
-        if v <= 0.0 { return None; }
-        let r = by.get(p.isin.as_str());
-        Some(analytics::capacity(&analytics::LiqPosition {
-            code: p.isin.clone(), asset_type: p.asset_type.clone(), valuation_eur: v,
-            quantity: p.quantity, adv_30d: None, adv_stale: false,
-            adv_eligible: r.and_then(|r| r.adv_eligible), market_place: None,
-            liquidity_days: r.and_then(|r| r.liquidity_days),
-            default_days: effective_days(&settings.liquidity_default_days, &p.asset_type, None),
-        }, settings.participation_rate, 1.0))
-    }).collect();
-    let profile = analytics::asset_profile(&caps, nav);
+    let horizon = settings.liquidity_horizon_days;
+
+    let params = serde_json::json!({
+        "participation_rate": settings.participation_rate,
+        "adv_stress_factor": settings.adv_stress_factor,
+        "liquidity_horizon_days": horizon,
+        "settlement_deadline_days": settings.settlement_deadline_days,
+        "adv_max_age_days": settings.adv_max_age_days,
+        "redemption_shock": settings.redemption_shock,
+        "day_unit": "business days (Mon-Fri, no holiday calendar)",
+    });
+
+    // An absent snapshot or NAV returns the established empty shape rather
+    // than an error, matching every other metrics endpoint.
+    let (Some(asof), Some(nav)) = (date, match date {
+        Some(d) => db::repo::aum_for(&st.pool, pid, d).await?,
+        None => None,
+    }) else {
+        return Ok(Json(serde_json::json!({
+            "dates": dates, "date": date, "nav": null, "params": params,
+            "coverage": serde_json::Value::Null, "asset": serde_json::Value::Null,
+            "scenarios": [], "negative_memo": 0.0, "negative_memo_eur": 0.0,
+        })));
+    };
+
+    let positions = build_positions(&rows, &by, &settings, asof);
+    let cap_at = |stress: f64| -> Vec<analytics::Capacity> {
+        positions.iter().map(|p| analytics::capacity(p, settings.participation_rate, stress)).collect()
+    };
+    let normal = cap_at(1.0);
+    let stressed = cap_at(settings.adv_stress_factor);
+
+    let negative_eur: f64 = rows.iter().filter_map(|p| p.valuation_eur).filter(|v| *v < 0.0).sum();
     let negative_memo: f64 = rows.iter().filter_map(|p| p.weight).filter(|w| *w < 0.0).sum();
+
+    // Coupon and redemption inflows, from the depositary's own schedule.
+    let coupon_inputs: Vec<analytics::CouponInput> = rows.iter()
+        .filter(|p| p.asset_type == "Obligation")
+        .filter_map(|p| {
+            let r = by.get(p.isin.as_str())?;
+            Some(analytics::CouponInput {
+                code: p.isin.clone(),
+                quantity: p.quantity.unwrap_or(0.0),
+                coupon_pct: r.bond_coupon_pct,
+                // Only a fixed coupon reaches instrument_refs at all, so its
+                // presence is the FIX gate the parser already applied.
+                coupon_type: r.bond_coupon_pct.map(|_| "FIX".to_string()),
+                next_coupon: r.bond_next_coupon,
+                maturity: r.bond_maturity,
+                freq: r.bond_coupon_freq,
+                accrued_eur: p.accrued_interest,
+                fx_rate: p.fx_rate.unwrap_or(1.0),
+            })
+        }).collect();
+    let coupons = analytics::bond_inflows(&coupon_inputs, asof, horizon);
+
+    let register = db::repo::shareholders_for(&st.pool, pid).await?;
+    let top5_pct: f64 = register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0;
+
+    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity]| -> serde_json::Value {
+        let Some(pct) = required_pct else {
+            return serde_json::json!({
+                "key": key, "status": "unavailable", "reason": "no shareholder register",
+            });
+        };
+        let required = pct * nav;
+        let w = analytics::waterfall(caps, &coupons.inflows, negative_eur, required, horizon);
+        let status = match w.days {
+            Some(d) if d <= settings.settlement_deadline_days => "ok",
+            _ => "breach",
+        };
+        let curve: Vec<serde_json::Value> = (1..=horizon).map(|d| serde_json::json!({
+            "day": d,
+            "available_eur": analytics::available(caps, &coupons.inflows, negative_eur, d),
+        })).collect();
+        serde_json::json!({
+            "key": key,
+            "required_eur": required,
+            "required_pct": pct,
+            "register_count": register.len().min(5),
+            "status": status,
+            "waterfall": w,
+            "slice_days": analytics::slice_days(caps, required, nav),
+            "residual": analytics::residual(caps, required, nav, w.days.unwrap_or(horizon)),
+            "curve": curve,
+        })
+    };
+
+    let top5 = (!register.is_empty()).then_some(top5_pct);
+    let fixed = Some(settings.redemption_shock);
+    let scenarios = vec![
+        scenario("top5", top5, &normal),
+        scenario("fixed", fixed, &normal),
+        scenario("hybrid_top5", top5, &stressed),
+        scenario("hybrid_fixed", fixed, &stressed),
+    ];
+
+    let measured_eur: f64 = normal.iter().filter(|c| c.measured).map(|c| c.valuation_eur).sum();
+    let fallbacks: Vec<serde_json::Value> = normal.iter()
+        .filter_map(|c| c.reason.map(|r| serde_json::json!({"code": c.code, "reason": r})))
+        .collect();
+
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
-        "buckets": profile.buckets,
-        "cumulative": profile.cumulative,
+        "nav": nav,
+        "params": params,
+        "coverage": {
+            "adv_pct_of_nav": if nav > 0.0 { measured_eur / nav } else { 0.0 },
+            "fallbacks": fallbacks,
+            "coupon_gaps": coupons.gaps,
+            "register": {
+                "count": register.len(),
+                "as_of": register.iter().map(|s| s.as_of).min(),
+                "stale": register.iter().any(|s| (asof - s.as_of).num_days() > REGISTER_MAX_AGE_DAYS),
+            },
+        },
+        "asset": {
+            "normal": analytics::asset_profile(&normal, nav),
+            "stressed": analytics::asset_profile(&stressed, nav),
+        },
+        "scenarios": scenarios,
         "negative_memo": negative_memo,
-        "shock": settings.redemption_shock,
-        "stress_status": if profile.cumulative[1].weight >= settings.redemption_shock { "ok" } else { "breach" },
+        "negative_memo_eur": negative_eur,
     })))
 }
 

@@ -92,6 +92,100 @@ async fn shareholder_register_crud_and_validation() {
     edb.stop().await;
 }
 
+#[tokio::test]
+async fn liquidity_response_shape_and_scenarios() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
+    let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (s, b) = get_json(&app, "/api/portfolios/1/metrics/liquidity").await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Every displayed number is explained by an echoed parameter.
+    for k in ["participation_rate", "adv_stress_factor", "liquidity_horizon_days",
+              "settlement_deadline_days", "redemption_shock", "day_unit"] {
+        assert!(!b["params"][k].is_null(), "params.{k} missing");
+    }
+    assert_eq!(b["params"]["day_unit"], "business days (Mon-Fri, no holiday calendar)");
+
+    // Two asset profiles over the same four bands.
+    for view in ["normal", "stressed"] {
+        let buckets = b["asset"][view]["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 4);
+        assert_eq!(buckets[0]["bucket"], "d1");
+        assert_eq!(b["asset"][view]["cumulative"].as_array().unwrap().len(), 4);
+    }
+
+    // Four scenarios, always present, always keyed.
+    let keys: Vec<&str> = b["scenarios"].as_array().unwrap().iter()
+        .map(|s| s["key"].as_str().unwrap()).collect();
+    assert_eq!(keys, vec!["top5", "fixed", "hybrid_top5", "hybrid_fixed"]);
+
+    // With no register loaded, the top-five scenarios are explicitly
+    // unavailable — never a zero and never a pass.
+    let top5 = &b["scenarios"][0];
+    assert_eq!(top5["status"], "unavailable");
+    assert_eq!(top5["reason"], "no shareholder register");
+    assert!(top5["waterfall"].is_null());
+
+    // The fixed scenario computes against the configured shock.
+    let fixed = &b["scenarios"][1];
+    assert!(fixed["required_eur"].as_f64().unwrap() > 0.0);
+    assert!((fixed["required_pct"].as_f64().unwrap() - 0.30).abs() < 1e-9);
+    assert!(matches!(fixed["status"].as_str().unwrap(), "ok" | "breach"));
+
+    assert!(!b["coverage"]["adv_pct_of_nav"].is_null());
+    assert!(b["coverage"]["fallbacks"].is_array());
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn a_loaded_register_drives_the_top_five_scenarios() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
+    let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    put_json(&app, "/api/portfolios/1/shareholders", serde_json::json!([
+        {"label": "A", "pct_of_nav": 10.0, "as_of": "2026-08-07"},
+        {"label": "B", "pct_of_nav": 8.0,  "as_of": "2026-08-07"},
+        {"label": "C", "pct_of_nav": 6.0,  "as_of": "2026-08-07"},
+        {"label": "D", "pct_of_nav": 4.0,  "as_of": "2026-08-07"},
+        {"label": "E", "pct_of_nav": 2.0,  "as_of": "2026-08-07"},
+        {"label": "F", "pct_of_nav": 1.0,  "as_of": "2026-08-07"}
+    ])).await;
+
+    let (_, b) = get_json(&app, "/api/portfolios/1/metrics/liquidity").await;
+    let top5 = &b["scenarios"][0];
+    assert_ne!(top5["status"], "unavailable");
+    // The five largest only: 10 + 8 + 6 + 4 + 2 = 30%, not 31%.
+    assert!((top5["required_pct"].as_f64().unwrap() - 0.30).abs() < 1e-9);
+    assert_eq!(top5["register_count"], 5);
+
+    // The hybrid runs the same requirement against stressed volumes, so it is
+    // never faster than its unstressed twin.
+    let hy = &b["scenarios"][2];
+    let (a, h) = (top5["waterfall"]["days"].as_u64(), hy["waterfall"]["days"].as_u64());
+    if let (Some(a), Some(h)) = (a, h) { assert!(h >= a); }
+
+    // Slice is always the slower ordering.
+    assert!(top5["slice_days"].as_f64().unwrap() >= top5["waterfall"]["days"].as_f64().unwrap_or(0.0));
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 // `shareholders_put` is a mutating write and must be refused on an archived
 // portfolio, same as settings/imports/CTD/codes puts. `shareholders_list`
 // is a read and must stay available even when archived, so history remains
