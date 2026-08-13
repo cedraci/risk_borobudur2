@@ -309,6 +309,21 @@ const R_SUB_AMOUNT: usize = 6;
 const R_RED_AMOUNT: usize = 8;
 const R_MIN_FIELDS: usize = 15;
 
+/// Empty cell -> `0.0` (a day with no subscriptions/redemptions is normal).
+/// A present-but-unparsable cell is rejected instead of silently defaulting
+/// to zero: we have no real JOURSRLUX sample, so a shifted amount column is
+/// only detectable this way — a shift changes neither the row's field
+/// count, its fund code, nor its date, so those three checks would pass
+/// unchanged while the flow was quietly recorded as zero.
+fn amount_or_reject(fields: &[&str], i: usize, lineno: usize, label: &str) -> Result<f64, ParseFailure> {
+    let t = field(fields, i);
+    if t.is_empty() {
+        return Ok(0.0);
+    }
+    t.parse::<f64>().map_err(|_| ParseFailure::Workbook(format!(
+        "line {lineno}: {label} amount {t:?} is not numeric — not a JOURSRLUX layout")))
+}
+
 /// Daily subscriptions/redemptions per share class. Unlike HISTOVLLUX,
 /// nothing here divides by a fund-level share count, so multiple share
 /// classes on one date are normal and all stored — no multi-class rejection.
@@ -349,8 +364,8 @@ pub fn parse_joursr(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
             share_class,
             outstanding_shares: num(&fields, R_OUTSTANDING),
             nav_per_share: num(&fields, R_NAV_PER_SHARE),
-            subscription_amount: num(&fields, R_SUB_AMOUNT).unwrap_or(0.0).abs(),
-            redemption_amount: num(&fields, R_RED_AMOUNT).unwrap_or(0.0).abs(),
+            subscription_amount: amount_or_reject(&fields, R_SUB_AMOUNT, lineno, "subscription")?.abs(),
+            redemption_amount: amount_or_reject(&fields, R_RED_AMOUNT, lineno, "redemption")?.abs(),
         });
     }
     if rows.is_empty() {

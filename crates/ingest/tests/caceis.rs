@@ -261,3 +261,35 @@ fn joursr_rejects_a_mis_shaped_or_mislabelled_file() {
     assert!(caceis::parse_joursr("JOURSRLUX_999999_20260807_1.csv", &bytes).is_err());
     assert!(caceis::parse_joursr("JOURSRLUX_165878_20260806_1.csv", &bytes).is_err());
 }
+
+#[test]
+fn joursr_rejects_a_non_numeric_subscription_amount() {
+    // A shifted amount column changes neither the row's field count, its
+    // fund code, nor its date, so the only way to catch it is refusing to
+    // treat an unparsable-but-present cell as a silent zero.
+    let text = String::from_utf8(std::fs::read(JOURSR).unwrap()).unwrap();
+    let corrupted = text.replace("3363.325;350000.;0.;0.", "3363.325;EUR;0.;0.");
+    assert_ne!(corrupted, text, "the fixture's C2 subscription amount must be present to corrupt");
+    assert!(caceis::parse_joursr(JOURSR_FNAME, corrupted.as_bytes()).is_err());
+}
+
+#[test]
+fn joursr_rejects_a_non_numeric_redemption_amount() {
+    let text = String::from_utf8(std::fs::read(JOURSR).unwrap()).unwrap();
+    let corrupted = text.replace(";1922.15;200000.;269373.392;", ";1922.15;EUR;269373.392;");
+    assert_ne!(corrupted, text, "the fixture's C1 redemption amount must be present to corrupt");
+    assert!(caceis::parse_joursr(JOURSR_FNAME, corrupted.as_bytes()).is_err());
+}
+
+#[test]
+fn joursr_treats_an_empty_amount_cell_as_zero() {
+    // An empty cell is a legitimate "no flow that day" — only a present but
+    // unparsable cell should be fatal, not a blank one.
+    let text = String::from_utf8(std::fs::read(JOURSR).unwrap()).unwrap();
+    let blanked = text.replace("104.04;0.;0.;1922.15", "104.04;;0.;1922.15");
+    assert_ne!(blanked, text, "the fixture's C1 subscription amount must be present to blank");
+    let b = caceis::parse_joursr(JOURSR_FNAME, blanked.as_bytes()).expect("empty cell still parses");
+    let c1 = b.flows.unwrap().into_iter().find(|f| f.share_class == "C1").unwrap();
+    assert_eq!(c1.subscription_amount, 0.0);
+    assert_eq!(c1.redemption_amount, 200_000.0, "the other amount column is untouched");
+}
