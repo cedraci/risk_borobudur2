@@ -6,6 +6,7 @@ use tower::util::ServiceExt;
 
 const BOUNDARY: &str = "XBOUNDARYX";
 const HISINV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/caceis_hisinv.csv");
+const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx");
 
 fn upload_req(uri: &str, filename: &str, bytes: &[u8]) -> Request<Body> {
     let mut body = Vec::new();
@@ -42,6 +43,34 @@ fn adv_sheet_isins(bytes: &[u8]) -> Vec<String> {
     range.rows().skip(1)
         .filter_map(|r| r.first().and_then(|c| c.get_string()).map(str::to_string))
         .collect()
+}
+
+async fn create_mandate(app: &axum::Router, name: &str) -> i64 {
+    let res = app.clone().oneshot(
+        Request::post("/api/portfolios")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name": name, "kind": "mandate"}).to_string()))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    body["id"].as_i64().unwrap()
+}
+
+/// Fetch a portfolio's current settings and PUT them back with
+/// `adv_max_age_days` overridden — mirrors the GET-then-PUT pattern in
+/// `api_settings.rs`.
+async fn set_adv_max_age_days(app: &axum::Router, pid: i64, days: u32) {
+    let (status, mut s) = get_json(app, &format!("/api/portfolios/{pid}/settings")).await;
+    assert_eq!(status, StatusCode::OK, "{s}");
+    s["adv_max_age_days"] = serde_json::json!(days);
+    let res = app.clone().oneshot(
+        Request::put(format!("/api/portfolios/{pid}/settings"))
+            .header("content-type", "application/json")
+            .body(Body::from(s.to_string())).unwrap(),
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "settings PUT failed for portfolio {pid}");
 }
 
 /// Fresh embedded database with the CACEIS HISINVLUX fixture imported into a
@@ -114,7 +143,22 @@ async fn adv_request_is_scoped_to_listed_instruments_that_are_due() {
     // instruments whose asset type is not Action.
     assert!(isins.iter().any(|i| i == "DE000A1EK0G3"),
         "the gold ETC, listed but not an Action, is still requested: {isins:?}");
-    assert!(!isins.iter().any(|i| i.starts_with("FVS")), "futures are never requested: {isins:?}");
+    // The fixture's two futures rows (CAC40 and EUR/JPY, both FUTU) carry
+    // instrument codes, not ISINs: CFIN2608 and RYCU2609 — never "FVS"
+    // prefixed, so the previous assertion (`!starts_with("FVS")`) passed
+    // unconditionally and guarded nothing. Assert against the codes that
+    // actually appear. Note this fixture's futures both carry market_place
+    // "FOR" (forced price), which is itself in NON_MARKET_CODES, so their
+    // exclusion here is doubly covered by the venue rule; the row that
+    // isolates `adv_eligible`'s *unconditional* asset_type == "Future"
+    // exclusion (ahead of, not instead of, the venue rule) is the analytics
+    // unit test in crates/analytics/src/liquidity.rs (a future with
+    // `adv_eligible` force-overridden to `Some(true)` is still excluded).
+    // This assertion still matters at the handler/workbook layer: it is the
+    // only check confirming a Future position never makes it into the
+    // exported ADV sheet at all, regardless of which rule excludes it.
+    assert!(!isins.iter().any(|i| i == "CFIN2608"), "the CAC40 future is never requested: {isins:?}");
+    assert!(!isins.iter().any(|i| i == "RYCU2609"), "the EUR/JPY future is never requested: {isins:?}");
 
     pool.close().await;
     edb.stop().await;
@@ -160,6 +204,85 @@ async fn a_fresh_adv_drops_out_until_it_goes_stale() {
     let isins = adv_sheet_isins(&resp_bytes);
     assert!(isins.iter().any(|i| i == "AT000000STR1"),
         "?all=true serves the full held set regardless of staleness: {isins:?}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Regression test for the fix to `adv_scope`: staleness must be decided per
+/// `(portfolio, ISIN)` pair and then unioned, not decided once by whichever
+/// portfolio happens to be walked first (`portfolios_list` orders by id —
+/// deterministic but arbitrary) and then locked in by the fleet-wide dedup.
+///
+/// Portfolio 1 (walked first, id 1) holds the instrument with a lax 30-day
+/// threshold; portfolio 2 (walked second) holds the SAME instrument with a
+/// strict 7-day one. The instrument was "fetched" 20 days before the latest
+/// snapshot date — fresh by 30 days, stale by 7. Before the fix, portfolio 1
+/// would judge it fresh, `seen.insert` would mark the ISIN handled, and
+/// portfolio 2's stricter verdict would never be reached. After the fix, the
+/// instrument must still appear in `due`.
+#[tokio::test]
+async fn a_stricter_portfolios_threshold_is_not_overridden_by_a_looser_one_walked_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let bytes = std::fs::read(SAMPLE).unwrap();
+
+    // Portfolio 1 (pre-existing, id 1) imports the sample workbook.
+    let res = app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body[0]["error"].is_null(), "portfolio 1 import failed: {body}");
+
+    // Portfolio 2, a fresh mandate, imports the SAME bytes independently.
+    // `same_file_imports_independently_per_portfolio` in
+    // api_portfolio_isolation.rs confirms this yields the same instrument
+    // set (isin/asset_type/...) in both portfolios, since none of that is
+    // portfolio-scoped.
+    let pid2 = create_mandate(&app, "Mandat Strict").await;
+    assert_eq!(pid2, 2, "walked after portfolio 1 in portfolios_list's ORDER BY id");
+    let res = app.clone().oneshot(upload_req(&format!("/api/portfolios/{pid2}/imports"), "s.xlsx", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body[0]["error"].is_null(), "portfolio 2 import failed: {body}");
+
+    set_adv_max_age_days(&app, 1, 30).await;
+    set_adv_max_age_days(&app, pid2, 7).await;
+
+    // Both portfolios' latest snapshot is the same date (same source file).
+    let (status, pos1) = get_json(&app, "/api/portfolios/1/positions").await;
+    assert_eq!(status, StatusCode::OK);
+    let latest: chrono::NaiveDate = pos1["date"].as_str().unwrap().parse().unwrap();
+
+    // FR0000121014 is the sample's equity (an Action, market_place NULL —
+    // the NAV Recap adapter carries no venue column, so `adv_eligible` falls
+    // back to the pre-v2 asset_type == "Action" rule; either way it is
+    // eligible). No instrument_refs row exists for it yet — the NAV Recap
+    // adapter never emits ref_hints/ref_facts — so this seeds one directly
+    // with an as-of 20 days before the latest snapshot.
+    let stale_asof = latest - chrono::Duration::days(20);
+    sqlx::query(
+        "INSERT INTO instrument_refs (code, adv_asof) VALUES ($1, $2)
+         ON CONFLICT (code) DO UPDATE SET adv_asof = EXCLUDED.adv_asof",
+    )
+    .bind("FR0000121014")
+    .bind(stale_asof)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let res = app.clone().oneshot(
+        Request::get("/api/bloomberg/adv-request").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp_bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let isins = adv_sheet_isins(&resp_bytes);
+    assert!(isins.iter().any(|i| i == "FR0000121014"),
+        "portfolio 2's stricter 7-day threshold must still flag the instrument stale, \
+         even though portfolio 1 (walked first, 30-day threshold, fresh by 20 <= 30) \
+         considers it fresh: {isins:?}");
 
     pool.close().await;
     edb.stop().await;

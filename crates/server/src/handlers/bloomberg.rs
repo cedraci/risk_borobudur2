@@ -72,13 +72,27 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
 /// those whose stored volume has gone stale and the full held set.
 /// Deduplicated by ISIN: an instrument held by three portfolios is requested
 /// once.
+///
+/// Staleness is decided per `(portfolio, ISIN)` pair, then unioned across
+/// portfolios — not decided once by whichever portfolio happens to be walked
+/// first and then locked in via dedup. `portfolios_list` order is
+/// deterministic but arbitrary (`ORDER BY id`), and portfolios can set their
+/// own `adv_max_age_days`; if a lax portfolio's threshold silently overrode a
+/// stricter one that also holds the instrument, that stricter portfolio's own
+/// Limits page would flag the position stale while nothing prompted a fetch
+/// to fix it. So an instrument is due if ANY portfolio holding it considers
+/// it stale — over-requesting one instrument costs one formula cell.
 async fn adv_scope(st: &AppState) -> Result<(Vec<RequestItem>, Vec<RequestItem>), AppError> {
     let refs = db::repo::refs_all(&st.pool).await?;
     let by: std::collections::HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();
 
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let (mut due, mut held) = (Vec::new(), Vec::new());
+    // `items` dedups the held set by ISIN (first occurrence wins — the
+    // market sector only depends on asset type, which the same instrument
+    // does not vary across portfolios). `stale` is the union of every
+    // portfolio's own verdict for that ISIN.
+    let mut items: std::collections::BTreeMap<String, RequestItem> = std::collections::BTreeMap::new();
+    let mut stale: BTreeSet<String> = BTreeSet::new();
     for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
         let dates = db::repo::position_dates(&st.pool, pf.id).await?;
         let Some(latest) = dates.first().copied() else { continue };
@@ -94,18 +108,21 @@ async fn adv_scope(st: &AppState) -> Result<(Vec<RequestItem>, Vec<RequestItem>)
                 liquidity_days: None, default_days: 1.0,
             };
             if !analytics::adv_eligible(&probe) { continue; }
-            if !seen.insert(p.isin.clone()) { continue; }
-            let item = RequestItem {
+            items.entry(p.isin.clone()).or_insert_with(|| RequestItem {
                 isin: p.isin.clone(),
                 market_sector: market_sector_for(asset_class_of(&p.asset_type)).to_string(),
-            };
-            let stale = r.and_then(|r| r.adv_asof)
+            });
+            let is_stale = r.and_then(|r| r.adv_asof)
                 .map(|d| (latest - d).num_days() > settings.adv_max_age_days as i64)
                 .unwrap_or(true);   // never fetched is always due
-            if stale { due.push(item.clone()); }
-            held.push(item);
+            if is_stale { stale.insert(p.isin.clone()); }
         }
     }
+    let held: Vec<RequestItem> = items.values().cloned().collect();
+    let due: Vec<RequestItem> = items.iter()
+        .filter(|(isin, _)| stale.contains(isin.as_str()))
+        .map(|(_, item)| item.clone())
+        .collect();
     Ok((due, held))
 }
 

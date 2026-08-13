@@ -228,7 +228,7 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
     let adv_sheet = wb.worksheet_range("ADV");
     if refs_sheet.is_err() && fx_sheet.is_err() && adv_sheet.is_err() {
         return Err(ParseFailure::Workbook(
-            "workbook has neither a REFS nor an FX sheet; not a Bloomberg response file".into(),
+            "workbook has none of a REFS, FX or ADV sheet; not a Bloomberg response file".into(),
         ));
     }
 
