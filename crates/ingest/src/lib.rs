@@ -47,6 +47,19 @@ pub struct NavHistoryRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct ShareClassFlowRow {
+    pub flow_date: NaiveDate,
+    pub share_class: String,
+    pub outstanding_shares: Option<f64>,
+    pub nav_per_share: Option<f64>,
+    /// Magnitudes, both non-negative. Direction comes from the column, not
+    /// the sign: the depositary's convention is not observable from the
+    /// glossary alone.
+    pub subscription_amount: f64,
+    pub redemption_amount: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct DividendRow {
     pub provision_date: NaiveDate,
     pub payment_date: Option<NaiveDate>,

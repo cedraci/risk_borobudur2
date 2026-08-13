@@ -31,6 +31,7 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
         snapshots: vec![Snapshot { nav_date: d("2026-08-07"), positions: vec![pos("Action", "FR0000000001", 1000.0)] }],
         dividends: None,
         operations: None,
+        flows: None,
         ref_hints: vec![ingest::adapter::RefHint {
             isin: "FR0000000001".into(),
             country_of_risk: Some("France".into()), region: Some("Europe".into()), ticker: Some("AAA FP".into()),
@@ -65,7 +66,7 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
         primary_date: d("2026-08-08"),
         nav_points: vec![NavHistoryRow { date: d("2026-08-08"), aum: 1000.0, shares: 10.0, nav: 100.0 }],
         snapshots: vec![Snapshot { nav_date: d("2026-08-08"), positions: vec![pos("Action", "FR0000000001", 1000.0)] }],
-        dividends: None, operations: None,
+        dividends: None, operations: None, flows: None,
         ref_hints: vec![ingest::adapter::RefHint {
             isin: "FR0000000001".into(), country_of_risk: Some("Germany".into()), region: None, ticker: None,
         }],
@@ -100,6 +101,7 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
         snapshots: vec![Snapshot { nav_date: d("2026-08-10"), positions: vec![pos("Action", "FR0000000001", 1000.0)] }],
         dividends: None,
         operations: None,
+        flows: None,
         ref_hints: vec![],
         ref_facts: vec![],
         warnings: vec![],
@@ -118,6 +120,7 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
             name: None, currency: Some("EUR".into()), quantity: Some(10.0), price: Some(90.0),
             gross_amount: Some(900.0), fees: None, net_price: None, net_amount: Some(900.0),
         }]),
+        flows: None,
         ref_hints: vec![],
         ref_facts: vec![],
         warnings: vec![],
@@ -154,7 +157,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
             pos("Dividendes", "GB0000000001", 580.0),
             pos("Action", "FR0000000001", 1000.0),
         ] }],
-        dividends: None, operations: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
+        dividends: None, operations: None, flows: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
     repo::import_batch(&pool, 1, "day1.csv", "sha-d1", &b1).await.unwrap();
 
@@ -166,7 +169,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
             pos("Dividendes", "GB0000000001", 920.0),
             pos("Action", "FR0000000001", 1000.0),
         ] }],
-        dividends: None, operations: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
+        dividends: None, operations: None, flows: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
     let out2 = repo::import_batch(&pool, 1, "day2.csv", "sha-d2", &b2).await.unwrap();
     assert!(out2.warnings.iter().any(|w| w.contains("derived")), "{:?}", out2.warnings);
@@ -192,6 +195,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
             amount: 99.0, currency: "EUR".into(),
         }]),
         operations: Some(vec![]),
+        flows: None,
         ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
     let out3 = repo::import_batch(&pool, 1, "day3.xlsx", "sha-d3", &b3).await.unwrap();
@@ -280,6 +284,7 @@ async fn hisinv_facts_overwrite_on_reimport_but_never_touch_user_owned_columns()
         snapshots: vec![],
         dividends: None,
         operations: None,
+        flows: None,
         ref_hints: vec![],
         ref_facts: vec![ingest::adapter::RefFact {
             isin: "US105756CL22".into(),

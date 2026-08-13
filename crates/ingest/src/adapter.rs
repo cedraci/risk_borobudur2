@@ -1,7 +1,7 @@
 //! The universal ingest contract. Every source adapter produces a
 //! `UniversalBatch`; the import pipeline consumes nothing else.
 
-use crate::{DividendRow, NavHistoryRow, OperationRow, ParsedWorkbook, PositionRow};
+use crate::{DividendRow, NavHistoryRow, OperationRow, ParsedWorkbook, PositionRow, ShareClassFlowRow};
 use chrono::NaiveDate;
 
 #[derive(Debug)]
@@ -50,6 +50,10 @@ pub struct UniversalBatch {
     /// journal is untouched by this import.
     pub dividends: Option<Vec<DividendRow>>,
     pub operations: Option<Vec<OperationRow>>,
+    /// `Some` = this file carries the daily subscription/redemption journal
+    /// (JOURSRLUX). `None` = the file says nothing about that journal,
+    /// matching the `dividends`/`operations` convention.
+    pub flows: Option<Vec<ShareClassFlowRow>>,
     pub ref_hints: Vec<RefHint>,
     pub ref_facts: Vec<RefFact>,
     /// Row-level anomalies that dropped rows without rejecting the file.
@@ -87,6 +91,7 @@ pub fn to_batch(wb: ParsedWorkbook) -> UniversalBatch {
         snapshots: vec![Snapshot { nav_date: wb.nav_date, positions: wb.positions }],
         dividends: Some(wb.dividends),
         operations: Some(wb.operations),
+        flows: None,
         ref_hints: Vec::new(),
         ref_facts: Vec::new(),
         warnings: Vec::new(),

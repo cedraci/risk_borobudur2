@@ -93,6 +93,10 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
     if !b.warnings.is_empty() {
         row_counts["warnings"] = serde_json::json!(b.warnings);
     }
+    if let Some(rows) = &b.flows {
+        flows_upsert(&mut tx, portfolio_id, rows).await?;
+        row_counts["flows"] = serde_json::json!(rows.len());
+    }
     let (import_id,): (i64,) = sqlx::query_as(
         "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts, has_div_ops) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
@@ -280,6 +284,63 @@ pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, s
         dividends: wb.dividends.clone(), operations: wb.operations.clone(),
     });
     import_batch(pool, portfolio_id, filename, sha256, &b).await
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct FlowRecord {
+    pub flow_date: NaiveDate,
+    pub share_class: String,
+    pub outstanding_shares: Option<f64>,
+    pub nav_per_share: Option<f64>,
+    pub subscription_amount: f64,
+    pub redemption_amount: f64,
+}
+
+/// Idempotent: re-loading the same day overwrites rather than duplicating.
+///
+/// Takes a connection rather than a pool so `import_batch` can call it inside
+/// its own transaction, following `seed_futures_contracts`. Callers outside a
+/// transaction pass `&mut *pool.acquire().await?`.
+pub async fn flows_upsert(
+    conn: &mut sqlx::PgConnection, portfolio_id: i64, rows: &[ingest::ShareClassFlowRow],
+) -> anyhow::Result<u64> {
+    let mut n = 0;
+    for r in rows {
+        n += sqlx::query(
+            "INSERT INTO share_class_flows
+               (portfolio_id, flow_date, share_class, outstanding_shares,
+                nav_per_share, subscription_amount, redemption_amount)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (portfolio_id, flow_date, share_class) DO UPDATE SET
+               outstanding_shares  = EXCLUDED.outstanding_shares,
+               nav_per_share       = EXCLUDED.nav_per_share,
+               subscription_amount = EXCLUDED.subscription_amount,
+               redemption_amount   = EXCLUDED.redemption_amount",
+        )
+        .bind(portfolio_id).bind(r.flow_date).bind(&r.share_class)
+        .bind(r.outstanding_shares).bind(r.nav_per_share)
+        .bind(r.subscription_amount).bind(r.redemption_amount)
+        .execute(&mut *conn).await?.rows_affected();
+    }
+    Ok(n)
+}
+
+/// The most recent `lookback` distinct dates, oldest first.
+pub async fn flows_for(pool: &PgPool, portfolio_id: i64, lookback: u32) -> anyhow::Result<Vec<FlowRecord>> {
+    Ok(sqlx::query_as(
+        "SELECT flow_date, share_class,
+                outstanding_shares::float8 AS outstanding_shares,
+                nav_per_share::float8 AS nav_per_share,
+                subscription_amount::float8 AS subscription_amount,
+                redemption_amount::float8 AS redemption_amount
+         FROM share_class_flows
+         WHERE portfolio_id = $1 AND flow_date IN (
+             SELECT DISTINCT flow_date FROM share_class_flows
+             WHERE portfolio_id = $1 ORDER BY flow_date DESC LIMIT $2)
+         ORDER BY flow_date, share_class",
+    )
+    .bind(portfolio_id).bind(lookback as i64)
+    .fetch_all(pool).await?)
 }
 
 /// Seed a contract spec for every futures root the database does not know yet,

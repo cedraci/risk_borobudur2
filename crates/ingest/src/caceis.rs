@@ -229,6 +229,7 @@ pub fn parse_hisinv(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
         snapshots: vec![Snapshot { nav_date: file_date, positions }],
         dividends: None,
         operations: None,
+        flows: None,
         ref_hints,
         ref_facts,
         warnings,
@@ -284,6 +285,7 @@ pub fn parse_histovl(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Par
                 snapshots: Vec::new(),
                 dividends: None,
                 operations: None,
+                flows: None,
                 ref_hints: Vec::new(),
                 ref_facts: Vec::new(),
                 warnings: Vec::new(),
@@ -295,4 +297,74 @@ pub fn parse_histovl(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Par
                 "multi share class not supported yet (classes {classes:?}) — a silent sum would make NAV-per-share analytics meaningless")))
         }
     }
+}
+
+// JOURSRLUX columns (0-based), from the depositary glossary.
+const R_FUND_CODE: usize = 0;
+const R_NAV_DATE: usize = 1;
+const R_SHARE_CLASS: usize = 2;
+const R_OUTSTANDING: usize = 3;
+const R_NAV_PER_SHARE: usize = 4;
+const R_SUB_AMOUNT: usize = 6;
+const R_RED_AMOUNT: usize = 8;
+const R_MIN_FIELDS: usize = 15;
+
+/// Daily subscriptions/redemptions per share class. Unlike HISTOVLLUX,
+/// nothing here divides by a fund-level share count, so multiple share
+/// classes on one date are normal and all stored — no multi-class rejection.
+pub fn parse_joursr(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, ParseFailure> {
+    let (fund_code, file_date) = filename_meta(filename)
+        .ok_or_else(|| ParseFailure::Workbook(format!(
+            "filename {filename:?} does not match JOURSRLUX_<fund>_<yyyymmdd>_<ts>.csv")))?;
+
+    let textual = decode_latin1(bytes);
+    let mut rows: Vec<crate::ShareClassFlowRow> = Vec::new();
+    for (i, line) in textual.lines().enumerate() {
+        let lineno = i + 1;
+        if line.trim().is_empty() { continue; }
+        let fields: Vec<&str> = line.split(';').collect();
+        if fields.len() < R_MIN_FIELDS {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: {} columns, expected at least {R_MIN_FIELDS} — not a JOURSRLUX layout",
+                fields.len())));
+        }
+        if field(&fields, R_FUND_CODE) != fund_code {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: fund code {:?} differs from filename code {fund_code:?}",
+                field(&fields, R_FUND_CODE))));
+        }
+        let row_date = NaiveDate::parse_from_str(field(&fields, R_NAV_DATE), "%Y%m%d")
+            .map_err(|_| ParseFailure::Workbook(format!(
+                "line {lineno}: bad NAV date {:?}", field(&fields, R_NAV_DATE))))?;
+        if row_date != file_date {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: row date {row_date} differs from filename date {file_date}")));
+        }
+        let share_class = field(&fields, R_SHARE_CLASS).to_string();
+        if share_class.is_empty() {
+            return Err(ParseFailure::Workbook(format!("line {lineno}: blank share class code")));
+        }
+        rows.push(crate::ShareClassFlowRow {
+            flow_date: row_date,
+            share_class,
+            outstanding_shares: num(&fields, R_OUTSTANDING),
+            nav_per_share: num(&fields, R_NAV_PER_SHARE),
+            subscription_amount: num(&fields, R_SUB_AMOUNT).unwrap_or(0.0).abs(),
+            redemption_amount: num(&fields, R_RED_AMOUNT).unwrap_or(0.0).abs(),
+        });
+    }
+    if rows.is_empty() {
+        return Err(ParseFailure::Workbook("no flow rows found".into()));
+    }
+    Ok(UniversalBatch {
+        primary_date: file_date,
+        nav_points: Vec::new(),
+        snapshots: Vec::new(),
+        dividends: None,
+        operations: None,
+        flows: Some(rows),
+        ref_hints: Vec::new(),
+        ref_facts: Vec::new(),
+        warnings: Vec::new(),
+    })
 }

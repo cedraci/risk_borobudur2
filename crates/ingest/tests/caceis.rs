@@ -216,3 +216,48 @@ fn detect_routes_recognizes_and_rejects() {
         Err(DetectError::Unrecognized(_))
     ));
 }
+
+const JOURSR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_joursr.csv");
+const JOURSR_FNAME: &str = "JOURSRLUX_165878_20260807_20260810130151.csv";
+
+#[test]
+fn joursr_reads_both_share_classes() {
+    let bytes = std::fs::read(JOURSR).unwrap();
+    let b = caceis::parse_joursr(JOURSR_FNAME, &bytes).expect("fixture parses");
+    assert_eq!(b.primary_date, chrono::NaiveDate::from_ymd_opt(2026, 8, 7).unwrap());
+    assert!(b.snapshots.is_empty(), "a flow file carries no positions");
+    assert!(b.nav_points.is_empty(), "NAV history stays HISTOVLLUX's job");
+    let flows = b.flows.as_ref().expect("flow journal present");
+    assert_eq!(flows.len(), 2);
+    let c1 = flows.iter().find(|f| f.share_class == "C1").unwrap();
+    assert_eq!(c1.outstanding_shares, Some(271_295.542));
+    assert_eq!(c1.nav_per_share, Some(104.04));
+    assert_eq!(c1.subscription_amount, 0.0);
+    assert_eq!(c1.redemption_amount, 200_000.0);
+}
+
+#[test]
+fn joursr_stores_both_amounts_as_magnitudes() {
+    // The depositary's sign convention for the redemption column is not
+    // observable without a real file, so direction comes from which column
+    // the amount sat in and never from its sign. The same file with the
+    // redemption written negative must parse to the same magnitude.
+    let text = String::from_utf8(std::fs::read(JOURSR).unwrap()).unwrap();
+    let flipped = text.replace(";1922.15;200000.;", ";1922.15;-200000.;");
+    assert_ne!(flipped, text, "the fixture's redemption amount must be present to flip");
+    let b = caceis::parse_joursr(JOURSR_FNAME, flipped.as_bytes()).unwrap();
+    let c1 = b.flows.unwrap().into_iter().find(|f| f.share_class == "C1").unwrap();
+    assert_eq!(c1.redemption_amount, 200_000.0);
+}
+
+#[test]
+fn joursr_rejects_a_mis_shaped_or_mislabelled_file() {
+    let short = b"165878;20260807;C1\n";
+    assert!(caceis::parse_joursr(JOURSR_FNAME, short).is_err());
+
+    let bytes = std::fs::read(JOURSR).unwrap();
+    // Filename fund code disagreeing with the rows is a routing accident, not
+    // a row-level anomaly: reject the file rather than import it elsewhere.
+    assert!(caceis::parse_joursr("JOURSRLUX_999999_20260807_1.csv", &bytes).is_err());
+    assert!(caceis::parse_joursr("JOURSRLUX_165878_20260806_1.csv", &bytes).is_err());
+}
