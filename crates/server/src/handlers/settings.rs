@@ -26,6 +26,16 @@ fn validate(s: &AppSettings) -> Result<(), String> {
     if !(s.redemption_shock > 0.0 && s.redemption_shock < 1.0) {
         return Err("redemption_shock must be in (0, 1)".into());
     }
+    if !(s.participation_rate > 0.0 && s.participation_rate <= 1.0) {
+        return Err("participation_rate must be in (0, 1]".into());
+    }
+    if !(s.adv_stress_factor > 0.0 && s.adv_stress_factor <= 1.0) {
+        return Err("adv_stress_factor must be in (0, 1]".into());
+    }
+    if s.liquidity_horizon_days < 1 { return Err("liquidity_horizon_days must be >= 1".into()); }
+    if s.settlement_deadline_days < 1 { return Err("settlement_deadline_days must be >= 1".into()); }
+    if s.adv_max_age_days < 1 { return Err("adv_max_age_days must be >= 1".into()); }
+    if s.flow_lookback_days < 1 { return Err("flow_lookback_days must be >= 1".into()); }
     let Some(obj) = s.liquidity_default_days.as_object() else {
         return Err("liquidity_default_days must be a JSON object".into());
     };

@@ -370,6 +370,8 @@ function RefsCard({ rows, advMaxAgeDays, onSaved }: { rows: import("../api").Ref
                         <option value="">—</option>
                         <option value="1">annual</option>
                         <option value="2">semi-annual</option>
+                        <option value="4">quarterly</option>
+                        <option value="12">monthly</option>
                       </select>
                     </td>
                   </>
