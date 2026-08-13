@@ -118,10 +118,50 @@ export type CheckStatus = "ok" | "watch" | "breach";
 export interface CheckRow { group: string; weight: number; status: CheckStatus }
 export interface Check { check: string; scope_label: string; limit: number; rows: CheckRow[]; status: CheckStatus }
 export interface Concentration { dates: string[]; date: string | null; checks: Check[]; excluded_note: string }
+
 export interface BucketWeight { bucket: Bucket; weight: number }
+export interface AssetProfile { buckets: BucketWeight[]; cumulative: BucketWeight[] }
+
+export interface LiquidityParams {
+  participation_rate: number; adv_stress_factor: number;
+  liquidity_horizon_days: number; settlement_deadline_days: number;
+  adv_max_age_days: number; redemption_shock: number; day_unit: string;
+}
+
+export interface LiquidityCoverage {
+  adv_pct_of_nav: number;
+  fallbacks: { code: string; reason: string }[];
+  coupon_gaps: { code: string; reason: string }[];
+  register: { count: number; as_of: string | null; stale: boolean };
+}
+
+export interface Scenario {
+  key: "top5" | "fixed" | "hybrid_top5" | "hybrid_fixed";
+  status: "ok" | "breach" | "unavailable";
+  reason?: string;
+  required_eur?: number;
+  required_pct?: number;
+  register_count?: number;
+  waterfall?: { days: number | null; unmet_eur: number };
+  slice_days?: number | null;
+  residual?: { slow_share_before: number; slow_share_after: number };
+  curve?: { day: number; available_eur: number }[];
+}
+
 export interface Liquidity {
-  dates: string[]; date: string | null; buckets: BucketWeight[]; cumulative: BucketWeight[];
-  negative_memo: number; shock: number; stress_status: "ok" | "breach";
+  dates: string[]; date: string | null; nav: number | null;
+  params: LiquidityParams;
+  coverage: LiquidityCoverage | null;
+  asset: { normal: AssetProfile; stressed: AssetProfile } | null;
+  scenarios: Scenario[];
+  negative_memo: number; negative_memo_eur: number;
+}
+
+export interface FlowStats {
+  status?: "unavailable"; reason?: string;
+  n_observations: number; from?: string; to?: string;
+  worst?: { window: number; pct_of_nav: number }[];
+  dates_excluded_no_nav: number;
 }
 export interface BondRow {
   code: string; name: string | null; missing: boolean;
@@ -269,6 +309,7 @@ export const getConcentration = (pid: number, date?: string) =>
   req<Concentration>(`/api/portfolios/${pid}/metrics/concentration${date ? `?date=${date}` : ""}`);
 export const getLiquidity = (pid: number, date?: string) =>
   req<Liquidity>(`/api/portfolios/${pid}/metrics/liquidity${date ? `?date=${date}` : ""}`);
+export const getFlows = (pid: number) => req<FlowStats>(`/api/portfolios/${pid}/flows`);
 export const getRates = (pid: number, date?: string) =>
   req<Rates>(`/api/portfolios/${pid}/metrics/rates${date ? `?date=${date}` : ""}`);
 export const getBacktest = (pid: number) => req<Backtest>(`/api/portfolios/${pid}/metrics/backtest`);
