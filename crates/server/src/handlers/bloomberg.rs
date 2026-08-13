@@ -1,11 +1,11 @@
 use crate::error::AppError;
 use crate::state::AppState;
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use analytics::pnl::asset_class_of;
-use ingest::bloomberg::{build_request, market_sector_for, parse_response, region_for, RequestItem};
+use ingest::bloomberg::{build_adv_request, build_request, market_sector_for, parse_response, region_for, RequestItem};
 use std::collections::BTreeSet;
 
 /// Export the request workbook for everything still unclassified.
@@ -68,6 +68,82 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
     Ok((StatusCode::OK, h, bytes))
 }
 
+/// Every eligible instrument held in the fleet's latest snapshots, split into
+/// those whose stored volume has gone stale and the full held set.
+/// Deduplicated by ISIN: an instrument held by three portfolios is requested
+/// once.
+async fn adv_scope(st: &AppState) -> Result<(Vec<RequestItem>, Vec<RequestItem>), AppError> {
+    let refs = db::repo::refs_all(&st.pool).await?;
+    let by: std::collections::HashMap<&str, &db::repo::InstrumentRef> =
+        refs.iter().map(|r| (r.code.as_str(), r)).collect();
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let (mut due, mut held) = (Vec::new(), Vec::new());
+    for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
+        let dates = db::repo::position_dates(&st.pool, pf.id).await?;
+        let Some(latest) = dates.first().copied() else { continue };
+        let settings = db::settings::get_settings(&st.pool, pf.id).await?;
+        for p in db::repo::positions_for(&st.pool, pf.id, latest).await? {
+            let r = by.get(p.isin.as_str());
+            let probe = analytics::LiqPosition {
+                code: p.isin.clone(), asset_type: p.asset_type.clone(),
+                valuation_eur: p.valuation_eur.unwrap_or(0.0), quantity: p.quantity,
+                adv_30d: None, adv_stale: false,
+                adv_eligible: r.and_then(|r| r.adv_eligible),
+                market_place: r.and_then(|r| r.market_place.clone()),
+                liquidity_days: None, default_days: 1.0,
+            };
+            if !analytics::adv_eligible(&probe) { continue; }
+            if !seen.insert(p.isin.clone()) { continue; }
+            let item = RequestItem {
+                isin: p.isin.clone(),
+                market_sector: market_sector_for(asset_class_of(&p.asset_type)).to_string(),
+            };
+            let stale = r.and_then(|r| r.adv_asof)
+                .map(|d| (latest - d).num_days() > settings.adv_max_age_days as i64)
+                .unwrap_or(true);   // never fetched is always due
+            if stale { due.push(item.clone()); }
+            held.push(item);
+        }
+    }
+    Ok((due, held))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct AdvQuery {
+    #[serde(default)]
+    all: bool,
+}
+
+/// Export the ADV request workbook. By default only instruments whose stored
+/// volume has gone stale (or was never fetched) — `?all=true` serves the full
+/// held set instead. Both come from the same `adv_scope` call so the two
+/// endpoints (`adv_request`, `adv_due`) can never disagree.
+pub async fn adv_request(
+    State(st): State<AppState>,
+    Query(q): Query<AdvQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let (due, held) = adv_scope(&st).await?;
+    let items = if q.all { held } else { due };
+    let asof = chrono::Utc::now().date_naive();
+    let bytes = build_adv_request(&items, asof)?;
+
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+    h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
+        &format!("attachment; filename=\"bloomberg_adv_request_{asof}.xlsx\""))?);
+    Ok((StatusCode::OK, h, bytes))
+}
+
+/// The cost of the ADV request before it is paid: due and held counts, read
+/// from the database alone. Never builds a workbook — a Bloomberg fetch is
+/// only ever triggered by the user clicking `adv_request`/`?all=true`.
+pub async fn adv_due(State(st): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    let (due, held) = adv_scope(&st).await?;
+    Ok(Json(serde_json::json!({ "due": due.len(), "held": held.len() })))
+}
+
 pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Json<serde_json::Value>, AppError> {
     let mut bytes: Option<Vec<u8>> = None;
     while let Some(f) = mp.next_field().await.map_err(|e| AppError::BadRequest(e.to_string()))? {
@@ -121,9 +197,21 @@ pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Jso
         }
     }
 
+    // ADV: stored only for cells Bloomberg actually resolved to a plausible
+    // volume — `parse_response` never fabricates a value for an unresolved
+    // cell, but a defensive filter here still guards against a stray
+    // negative or non-finite number reaching the store. `adv_upsert_many`
+    // writes `adv_30d` and `adv_asof` only; the as-of is the upload date.
+    let adv_rows: Vec<(String, f64)> = parsed.adv.iter()
+        .filter(|a| a.adv_30d.is_finite() && a.adv_30d >= 0.0)
+        .map(|a| (a.isin.clone(), a.adv_30d)).collect();
+    let adv_stored = db::repo::adv_upsert_many(
+        &st.pool, &adv_rows, chrono::Utc::now().date_naive()).await?;
+
     Ok(Json(serde_json::json!({
         "classified": classified,
         "fx_rows": fx_stored,
+        "adv_rows": adv_stored,
         "skipped": parsed.skipped,
         "fx_check": fx_check,
     })))

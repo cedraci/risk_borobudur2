@@ -860,6 +860,36 @@ pub async fn classify_upsert_many(
     Ok(n)
 }
 
+/// Store the Bloomberg ADV response: `adv_30d` and `adv_asof` only, touching
+/// no other column. `refs_upsert` deliberately never writes this pair — it is
+/// owned exclusively by this upload path, where `asof` is the upload date. A
+/// fresh pull always wins, matching `fx_upsert_many`'s replace discipline
+/// rather than `classify_upsert_many`'s COALESCE-preserve one: an ADV value
+/// is a snapshot in time, not a fact that only needs discovering once.
+pub async fn adv_upsert_many(
+    pool: &PgPool,
+    rows: &[(String, f64)],
+    asof: NaiveDate,
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for (isin, adv_30d) in rows {
+        n += sqlx::query(
+            "INSERT INTO instrument_refs (code, adv_30d, adv_asof)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (code) DO UPDATE SET
+               adv_30d = EXCLUDED.adv_30d,
+               adv_asof = EXCLUDED.adv_asof,
+               updated_at = now()",
+        )
+        .bind(isin).bind(adv_30d).bind(asof)
+        .execute(&mut *tx).await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(n)
+}
+
 // ---- EMIR monthly KPIs ----
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]

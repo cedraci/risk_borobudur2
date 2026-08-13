@@ -119,6 +119,53 @@ pub fn build_request(
     Ok(wb.save_to_buffer()?)
 }
 
+/// The ADV request workbook. Separate from `build_request` on purpose:
+/// country and GICS are one-and-done, so that sheet shrinks toward empty,
+/// while ADV decays daily and never drops out. Bundling them would turn every
+/// classification export into a fleet-wide volume request.
+///
+/// One `BDP` cell per instrument — a point value, not a `BDH` history series.
+/// That is the smallest possible footprint per instrument, and it makes a
+/// typical daily refresh a handful of formulas rather than a sweep.
+pub fn build_adv_request(items: &[RequestItem], asof: NaiveDate) -> anyhow::Result<Vec<u8>> {
+    let mut wb = Workbook::new();
+    let bold = Format::new().set_bold();
+    let s = wb.add_worksheet();
+    s.set_name("ADV")?;
+    for (c, h) in ["isin", "adv_30d", "market_sector"].iter().enumerate() {
+        s.write_string_with_format(0, c as u16, *h, &bold)?;
+    }
+    s.set_column_width(0, 16)?;
+    s.set_column_width(2, 14)?;
+    for (i, it) in items.iter().enumerate() {
+        let r = (i + 1) as u32;
+        s.write_string(r, 0, &it.isin)?;
+        s.write_string(r, 2, &it.market_sector)?;
+        let row = r + 1;
+        s.write_formula(r, 1, Formula::new(
+            format!("=BDP(A{row}&\" \"&C{row},\"VOLUME_AVG_30D\")")))?;
+    }
+
+    let r = wb.add_worksheet();
+    r.set_name("README")?;
+    r.set_column_width(0, 100)?;
+    for (i, l) in [
+        "Borobudur Risk - Bloomberg 30-day average volume request".to_string(),
+        format!("Exported {asof}. {} instrument(s).", items.len()),
+        String::new(),
+        "1. Open in Excel on a machine with a logged-in Bloomberg Terminal.".into(),
+        "2. Wait for every formula to resolve. #N/A cells are reported on upload and not stored.".into(),
+        "3. Save as .xlsx and upload on the Data page, Bloomberg panel.".into(),
+        String::new(),
+        "Volumes are stored with the upload date as their as-of. A volume older than the".into(),
+        "configured maximum age is treated as stale: the position falls back to its assumed".into(),
+        "days figure and is flagged, and nothing in the tool ever refreshes it on your behalf.".into(),
+    ].iter().enumerate() {
+        r.write_string(i as u32, 0, l)?;
+    }
+    Ok(wb.save_to_buffer()?)
+}
+
 #[derive(Debug, Clone)]
 pub struct ClassificationRow {
     pub isin: String,
@@ -135,10 +182,17 @@ pub struct FxObservation {
     pub rate_to_eur: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct AdvRow {
+    pub isin: String,
+    pub adv_30d: f64,
+}
+
 #[derive(Debug, Default)]
 pub struct ParsedResponse {
     pub classifications: Vec<ClassificationRow>,
     pub fx: Vec<FxObservation>,
+    pub adv: Vec<AdvRow>,
     /// Cells that did not resolve, reported so the user can fix and re-upload.
     pub skipped: Vec<RowError>,
 }
@@ -171,7 +225,8 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
 
     let refs_sheet = wb.worksheet_range("REFS");
     let fx_sheet = wb.worksheet_range("FX");
-    if refs_sheet.is_err() && fx_sheet.is_err() {
+    let adv_sheet = wb.worksheet_range("ADV");
+    if refs_sheet.is_err() && fx_sheet.is_err() && adv_sheet.is_err() {
         return Err(ParseFailure::Workbook(
             "workbook has neither a REFS nor an FX sheet; not a Bloomberg response file".into(),
         ));
@@ -239,6 +294,27 @@ pub fn parse_response(bytes: &[u8]) -> Result<ParsedResponse, ParseFailure> {
                 // needs EUR per unit, so invert.
                 out.fx.push(FxObservation { date, currency: ccy.clone(), rate_to_eur: 1.0 / raw });
             }
+        }
+    }
+
+    if let Ok(adv) = adv_sheet {
+        let end = adv.end().map(|(r, _)| r).unwrap_or(0);
+        for row in 1..=end {
+            let Some(isin) = text(&adv, row, 0) else { continue };
+            if unresolved(adv.get_value((row, 1))) {
+                out.skipped.push(RowError {
+                    sheet: "ADV".into(),
+                    row: row + 1,
+                    message: format!("{isin}: adv_30d did not resolve; not stored"),
+                });
+                continue;
+            }
+            let raw = match adv.get_value((row, 1)) {
+                Some(Data::Float(f)) => *f,
+                Some(Data::Int(i)) => *i as f64,
+                _ => continue,
+            };
+            out.adv.push(AdvRow { isin, adv_30d: raw });
         }
     }
 

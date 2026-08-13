@@ -1,6 +1,6 @@
 use calamine::Reader;
 use chrono::NaiveDate;
-use ingest::bloomberg::{build_request, market_sector_for, parse_response, region_for, RequestItem};
+use ingest::bloomberg::{build_adv_request, build_request, market_sector_for, parse_response, region_for, RequestItem};
 use ingest::ParseFailure;
 
 fn d(y: i32, m: u32, dd: u32) -> NaiveDate { NaiveDate::from_ymd_opt(y, m, dd).unwrap() }
@@ -305,6 +305,89 @@ fn data_error_cells_are_treated_as_unresolved_same_as_the_na_string() {
     assert!(c.country.is_none(), "Data::Error cell must not be stored as data");
     assert_eq!(c.sector.as_deref(), Some("Industrials"));
     assert!(!out.skipped.is_empty(), "the Data::Error cell must be reported");
+}
+
+/// The ADV request is a separate workbook: one `BDP` point-value cell per
+/// instrument (not a `BDH` history series), keyed off ISIN + market sector
+/// exactly like the REFS sheet, with the volume field's Bloomberg mnemonic
+/// `VOLUME_AVG_30D`.
+#[test]
+fn adv_request_workbook_has_expected_sheet_headers_and_bdp_formula() {
+    let items = vec![equity("FR0000121014"), RequestItem { isin: "US105756CL22".into(), market_sector: "Corp".into() }];
+    let bytes = build_adv_request(&items, NaiveDate::from_ymd_opt(2026, 8, 12).unwrap()).unwrap();
+
+    let mut wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
+    let names = calamine::Reader::sheet_names(&wb);
+    assert!(names.iter().any(|n| n == "ADV"));
+    assert!(names.iter().any(|n| n == "README"));
+
+    let vals = calamine::Reader::worksheet_range(&mut wb, "ADV").unwrap();
+    let header: Vec<String> = vals.rows().next().unwrap().iter().map(|c| c.to_string()).collect();
+    assert_eq!(header[0], "isin");
+    assert_eq!(header[1], "adv_30d");
+    assert_eq!(header[2], "market_sector");
+    assert_eq!(vals.get_value((1, 0)).map(|d| d.to_string()), Some("FR0000121014".to_string()));
+    assert_eq!(vals.get_value((1, 2)).map(|d| d.to_string()), Some("Equity".to_string()));
+    assert_eq!(vals.get_value((2, 0)).map(|d| d.to_string()), Some("US105756CL22".to_string()));
+    assert_eq!(vals.get_value((2, 2)).map(|d| d.to_string()), Some("Corp".to_string()));
+
+    let formulas = calamine::Reader::worksheet_formula(&mut wb, "ADV").unwrap();
+    let f = |r: u32, c: u32| formulas.get_value((r, c)).cloned().unwrap_or_default();
+    assert_eq!(f(1, 1), "BDP(A2&\" \"&C2,\"VOLUME_AVG_30D\")");
+    assert_eq!(f(2, 1), "BDP(A3&\" \"&C3,\"VOLUME_AVG_30D\")");
+}
+
+#[test]
+fn an_empty_adv_request_still_produces_a_readable_workbook() {
+    let bytes = build_adv_request(&[], NaiveDate::from_ymd_opt(2026, 8, 12).unwrap()).unwrap();
+    let wb: calamine::Xlsx<_> = calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
+    assert!(calamine::Reader::sheet_names(&wb).iter().any(|n| n == "ADV"));
+}
+
+/// Build a resolved ADV response workbook the way Excel would leave it:
+/// values, not formulas.
+fn adv_response_xlsx(rows: &[(&str, calamine::Data)]) -> Vec<u8> {
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let s = wb.add_worksheet().set_name("ADV").unwrap();
+    for (c, h) in ["isin", "adv_30d", "market_sector"].iter().enumerate() {
+        s.write_string(0, c as u16, *h).unwrap();
+    }
+    for (i, (isin, val)) in rows.iter().enumerate() {
+        let r = (i + 1) as u32;
+        s.write_string(r, 0, *isin).unwrap();
+        match val {
+            calamine::Data::Float(f) => { s.write_number(r, 1, *f).unwrap(); }
+            calamine::Data::String(t) => { s.write_string(r, 1, t).unwrap(); }
+            _ => {}
+        }
+        s.write_string(r, 2, "Equity").unwrap();
+    }
+    wb.save_to_buffer().unwrap()
+}
+
+#[test]
+fn adv_sheet_parses_into_adv_rows_and_reports_unresolved_cells() {
+    let bytes = adv_response_xlsx(&[
+        ("AT000000STR1", calamine::Data::Float(125_000.0)),
+        ("FR0010599399", calamine::Data::String("#N/A N/A".into())),
+    ]);
+    let out = parse_response(&bytes).unwrap();
+    assert_eq!(out.adv.len(), 1);
+    assert_eq!(out.adv[0].isin, "AT000000STR1");
+    assert!((out.adv[0].adv_30d - 125_000.0).abs() < 1e-9);
+    assert!(out.skipped.iter().any(|e| e.sheet == "ADV" && e.message.contains("FR0010599399")),
+        "unresolved ADV cell must be reported: {:?}", out.skipped);
+}
+
+/// One upload path serves both the classification and the ADV workbook: a
+/// file carrying only an ADV sheet (no REFS, no FX) must not be rejected.
+#[test]
+fn a_workbook_with_only_an_adv_sheet_is_accepted() {
+    let bytes = adv_response_xlsx(&[("AT000000STR1", calamine::Data::Float(125_000.0))]);
+    let out = parse_response(&bytes).unwrap();
+    assert_eq!(out.adv.len(), 1);
+    assert!(out.classifications.is_empty());
+    assert!(out.fx.is_empty());
 }
 
 #[test]
