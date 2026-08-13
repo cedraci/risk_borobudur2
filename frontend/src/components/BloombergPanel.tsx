@@ -1,10 +1,15 @@
 import { useState } from "react";
-import { bloombergRequestUrl, uploadBloomberg, ApiError, type BloombergUpload } from "../api";
+import {
+  advRequestUrl, bloombergRequestUrl, getAdvDue, uploadBloomberg, ApiError, type BloombergUpload,
+} from "../api";
+import { useFetch } from "../hooks";
 
 export default function BloombergPanel() {
   const [result, setResult] = useState<BloombergUpload | null>(null);
   const [err, setErr] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
+  const [all, setAll] = useState(false);
+  const due = useFetch(() => getAdvDue(), []);
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -36,6 +41,17 @@ export default function BloombergPanel() {
         <input type="file" accept=".xlsx" disabled={busy} onChange={(e) => void onFile(e)} />
         {busy && <span className="kpi-sub">Uploading…</span>}
       </div>
+
+      <div className="controls">
+        <a href={all ? `${advRequestUrl}?all=true` : advRequestUrl} download>
+          Export ADV request{due.data != null ? ` (${due.data.due} of ${due.data.held} due)` : ""}
+        </a>
+        <label><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> full rebuild</label>
+      </div>
+      <p className="kpi-sub">
+        Formulas resolve only when you open the file in Excel on a machine with a
+        logged-in Bloomberg Terminal. Nothing here queries Bloomberg on its own.
+      </p>
 
       {result && (
         <div>

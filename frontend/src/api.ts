@@ -113,6 +113,16 @@ export const getCodes = (pid: number) => req<PortfolioCode[]>(`/api/portfolios/$
 export const putCodes = (pid: number, codes: { source: string; code: string }[]) =>
   req<PortfolioCode[]>(`/api/portfolios/${pid}/codes`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(codes) });
 
+export interface Shareholder { id?: number; label: string; pct_of_nav: number; as_of: string }
+export const getShareholders = (pid: number) => req<Shareholder[]>(`/api/portfolios/${pid}/shareholders`);
+export const putShareholders = (pid: number, rows: Shareholder[]) =>
+  req<Shareholder[]>(`/api/portfolios/${pid}/shareholders`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(rows),
+  });
+
+export const advRequestUrl = "/api/bloomberg/adv-request";
+export const getAdvDue = () => req<{ due: number; held: number }>("/api/bloomberg/adv-due");
+
 export type Bucket = "d1" | "d2_7" | "d8_30" | "d30p";
 export type CheckStatus = "ok" | "watch" | "breach";
 export interface CheckRow { group: string; weight: number; status: CheckStatus }

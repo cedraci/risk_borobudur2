@@ -1,11 +1,12 @@
 import { useState } from "react";
 import {
-  ApiError, getImports, getPositions, getSettings, getRefs, putRef, putSettings, uploadFiles,
+  ApiError, getFlows, getImports, getPositions, getSettings, getRefs, putRef, putSettings, uploadFiles,
   type FileImportResult, type Settings,
 } from "../api";
 import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
 import PortfoliosAdmin from "../components/PortfoliosAdmin";
+import ShareholderRegister from "../components/ShareholderRegister";
 import { useFetch } from "../hooks";
 import { usePortfolio, useReloadPortfolios } from "../PortfolioContext";
 import { eur, num, pct } from "../fmt";
@@ -135,7 +136,9 @@ export default function DataPage() {
 
       <SettingsCard settings={settings.data} onSaved={settings.reload} />
 
-      <RefsCard rows={refs.data} onSaved={refs.reload} />
+      <RefsCard rows={refs.data} advMaxAgeDays={settings.data?.adv_max_age_days ?? 7} onSaved={refs.reload} />
+
+      <ShareholderRegister />
 
       <FuturesContracts />
 
@@ -171,9 +174,13 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
   const portfolio = usePortfolio();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const flows = useFetch(() => getFlows(portfolio.id), [portfolio.id]);
   const s = draft ?? settings;
   if (!s) return <div className="card"><h3>Settings</h3><p>Loading…</p></div>;
   const set = (patch: Partial<Settings>) => setDraft({ ...s, ...patch });
+  const worst20 = flows.data && flows.data.status !== "unavailable"
+    ? flows.data.worst?.find((w) => w.window === 20)?.pct_of_nav ?? null
+    : null;
   return (
     <div className="card">
       <h3>Settings</h3>
@@ -192,6 +199,27 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
           onChange={(e) => set({ short_dd_max_days: Number(e.target.value) })} /></label>
         <label>Redemption stress % <input type="number" step="5" value={(s.redemption_shock * 100).toFixed(0)}
           onChange={(e) => set({ redemption_shock: Number(e.target.value) / 100 })} /></label>
+        {worst20 != null && (
+          <span className="kpi-sub">
+            Observed worst 20-day outflow: <strong>{pct(worst20)}</strong>
+            <button type="button" disabled={worst20 <= 0}
+              onClick={() => set({ redemption_shock: worst20 })}>
+              Adopt as fixed shock
+            </button>
+          </span>
+        )}
+        <label>Participation rate % of ADV <input type="number" step="5" value={(s.participation_rate * 100).toFixed(0)}
+          onChange={(e) => set({ participation_rate: Number(e.target.value) / 100 })} /></label>
+        <label>ADV stress factor % <input type="number" step="5" value={(s.adv_stress_factor * 100).toFixed(0)}
+          onChange={(e) => set({ adv_stress_factor: Number(e.target.value) / 100 })} /></label>
+        <label>Liquidity horizon days <input type="number" value={s.liquidity_horizon_days}
+          onChange={(e) => set({ liquidity_horizon_days: Number(e.target.value) })} /></label>
+        <label>Settlement deadline days <input type="number" value={s.settlement_deadline_days}
+          onChange={(e) => set({ settlement_deadline_days: Number(e.target.value) })} /></label>
+        <label>ADV max age days <input type="number" value={s.adv_max_age_days}
+          onChange={(e) => set({ adv_max_age_days: Number(e.target.value) })} /></label>
+        <label>Flow lookback days <input type="number" value={s.flow_lookback_days}
+          onChange={(e) => set({ flow_lookback_days: Number(e.target.value) })} /></label>
         <button disabled={!draft} onClick={() => {
           putSettings(portfolio.id, s).then(() => { setDraft(null); setMsg("Saved."); onSaved(); },
             (e) => setMsg(`Error: ${e.detail ?? e.message}`));
@@ -211,7 +239,7 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
   );
 }
 
-function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; onSaved: () => void }) {
+function RefsCard({ rows, advMaxAgeDays, onSaved }: { rows: import("../api").RefRow[] | null; advMaxAgeDays: number; onSaved: () => void }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Partial<import("../api").RefBody>>>({});
   if (!rows) return <div className="card"><h3>Reference data</h3><p>Loading…</p></div>;
@@ -259,16 +287,35 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
       <p className="kpi-sub">Shared across all portfolios.</p>
       <p className="kpi-sub">
         Issuer groups drive the concentration checks (merge connected issuers by giving them the same group);
-        buckets drive the liquidity view; bond fields drive YTM/duration. Blank override = default.
+        bond fields drive YTM/duration. Blank override = default.
+      </p>
+      <p className="kpi-sub">
+        Days-to-liquidate drives the liquidity view; bond fields drive YTM and duration.
+        Blank days = the asset-type default. ADV, market place and the bond schedule are
+        maintained by the depositary feed and Bloomberg and cannot be edited here.
+      </p>
+      <p className="kpi-sub">
+        Because the depositary's feed overwrites coupon and maturity on every import, editing
+        those fields for a CACEIS-sourced instrument is effectively futile — the next import
+        restores the depositary's value.
       </p>
       {msg && <p>{msg}</p>}
       <table className="tbl">
-        <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Issuer group</th><th>Days</th><th>Coupon %</th><th>Maturity</th><th>Freq</th><th></th></tr></thead>
+        <thead>
+          <tr>
+            <th>Code</th><th>Name</th><th>Type</th><th>Issuer group</th><th>Days</th>
+            <th>ADV 30d</th><th>ADV as-of</th><th>Market place</th><th>ADV eligible</th>
+            <th>Coupon %</th><th>Maturity</th><th>Freq</th><th></th>
+          </tr>
+        </thead>
         <tbody>
           {rows.map((r) => {
             const d = draftFor(r.code);
             const dirty = Object.keys(d).length > 0;
-            const overridden = r.issuer_group_override != null || r.days_override != null;
+            const overridden = r.issuer_group_override != null || r.days_override != null || r.adv_eligible != null;
+            const advStale = r.adv_asof != null &&
+              (Date.now() - new Date(r.adv_asof).getTime()) / 86_400_000 > advMaxAgeDays;
+            const eligibleValue = d.adv_eligible !== undefined ? d.adv_eligible : r.adv_eligible;
             return (
               <tr key={r.code}>
                 <td>{r.code}</td>
@@ -288,6 +335,24 @@ function RefsCard({ rows, onSaved }: { rows: import("../api").RefRow[] | null; o
                     value={d.liquidity_days !== undefined ? (d.liquidity_days ?? "") : (r.days_override ?? "")}
                     onChange={(e) => setDraft(r.code, { liquidity_days: e.target.value === "" ? null : Number(e.target.value) })}
                   />
+                </td>
+                <td>{num(r.adv_30d, 0)}</td>
+                <td>
+                  {r.adv_asof ?? "—"}
+                  {advStale && <span className="warn-badge">stale</span>}
+                </td>
+                <td>{r.market_place_name ?? "—"}</td>
+                <td>
+                  <select
+                    value={eligibleValue === null || eligibleValue === undefined ? "" : String(eligibleValue)}
+                    onChange={(e) => setDraft(r.code, {
+                      adv_eligible: e.target.value === "" ? null : e.target.value === "true",
+                    })}
+                  >
+                    <option value="">derived</option>
+                    <option value="true">always</option>
+                    <option value="false">never</option>
+                  </select>
                 </td>
                 {r.is_bond ? (
                   <>

@@ -112,6 +112,21 @@ export default function LimitsPage() {
                 A position on the assumed-days fallback is already an assumption and is not
                 re-stressed, so the stressed profile moves {pct(liq.data.coverage.adv_pct_of_nav)} of the fund.
               </p>
+              <p className="kpi-sub">
+                {liq.data.coverage.coupon_gaps.length} bond(s) contribute no coupon inflow (frequency
+                could not be resolved from INVJCPLUX or accrued-interest inference)
+                {liq.data.coverage.coupon_gaps.length > 0 && (
+                  <details style={{ display: "inline" }}>
+                    <summary style={{ display: "inline", cursor: "pointer" }}>details</summary>
+                    <ul>
+                      {liq.data.coverage.coupon_gaps.map((f, i) => (
+                        <li key={i}>{f.code}: {f.reason}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                .
+              </p>
               {liq.data.coverage.register.stale && (
                 <p className="warn-badge">
                   Shareholder register is stale (as of {liq.data.coverage.register.as_of ?? "unknown"}).
@@ -202,6 +217,8 @@ export default function LimitsPage() {
           {flows.data && (flows.data.status === "unavailable" ? (
             <p className="kpi-sub">
               Observed outflows: {flows.data.reason}. Load JOURSRLUX files on the Data page.
+              {flows.data.dates_excluded_no_nav > 0 &&
+                ` (${flows.data.dates_excluded_no_nav} date(s) excluded for missing NAV)`}
             </p>
           ) : (
             <p className="kpi-sub">
@@ -209,6 +226,8 @@ export default function LimitsPage() {
               <strong>{pct(flows.data.worst?.find((w) => w.window === 20)?.pct_of_nav ?? 0)}</strong>{" "}
               of NAV over {flows.data.n_observations} observations, {flows.data.from} to {flows.data.to}.
               Configured shock is {pct(liq.data.params.redemption_shock, 0)}.
+              {flows.data.dates_excluded_no_nav > 0 &&
+                ` (${flows.data.dates_excluded_no_nav} date(s) excluded for missing NAV)`}
             </p>
           ))}
 
