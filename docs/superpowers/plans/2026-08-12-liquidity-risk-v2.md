@@ -20,7 +20,11 @@
 - **Days are business days**, Monday to Friday, no holiday calendar.
 - **"Signal, don't hide."** A missing input is reported with its reason and named in the coverage block. It is never silently defaulted to something that looks like an answer.
 - **Frontend gate:** `cd frontend && npm run build` must be clean. There are no frontend unit tests.
-- Test commands: `cargo test -p analytics`, `cargo test -p ingest`, `cargo test -p db`, `cargo test -p server`, `cargo test --workspace`.
+- **Never run `cargo test --workspace`, and never run a whole `db` or `server` package suite.** Cargo runs test *binaries* concurrently and this workspace has ~28 `db`/`server` test files that each boot their own embedded PostgreSQL cluster. `--test-threads=1` does not help — it limits threads *within* a binary. The machine cannot sustain that many clusters and the run never terminates (one attempt ran ~15 hours). Verify instead with:
+  1. `cargo build --workspace --tests` — bounded, catches all compile-level breakage.
+  2. `cargo test -p analytics` / `cargo test -p ingest` — no database, seconds.
+  3. The affected `db` / `server` binaries **one at a time**: `cargo test -p <crate> --test <file> -- --test-threads=1`.
+- Before starting a run, confirm no stray embedded cluster is alive. Test clusters live under `.theseus\postgresql` — kill only those. The machine's own installed PostgreSQL service (its `pg_ctl` is parented by `services.exe`) must be left running.
 
 ---
 
@@ -3311,10 +3315,25 @@ git commit   # message as above, with the Co-Authored-By trailer
 
 The embedded PostgreSQL instances collide with a running server. Confirm nothing is listening on the dev port before continuing.
 
-- [ ] **Step 2: Run the whole suite**
+- [ ] **Step 2: Sweep every test binary, serially**
 
-Run: `cargo test --workspace`
-Expected: PASS across `analytics`, `ingest`, `db` and `server`. Read the output to the Doc-tests lines for all four crates — piping through `tail` returns *tail's* exit code, not cargo's, so a green tail proves nothing on its own.
+`cargo test --workspace` does not terminate here (see Global Constraints). Sweep instead, one binary at a time, collecting results into a file:
+
+```bash
+cargo build --workspace --tests || exit 1
+cargo test -p analytics && cargo test -p ingest || exit 1
+for t in $(ls crates/db/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
+  echo "== db/$t" >> sweep.log
+  cargo test -p db --test "$t" -- --test-threads=1 >> sweep.log 2>&1 || echo "FAILED db/$t" >> sweep.log
+done
+for t in $(ls crates/server/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
+  echo "== server/$t" >> sweep.log
+  cargo test -p server --test "$t" -- --test-threads=1 >> sweep.log 2>&1 || echo "FAILED server/$t" >> sweep.log
+done
+grep -E "^FAILED|test result" sweep.log | grep -v " 0 failed" || echo "every binary green"
+```
+
+Expected: no `FAILED` lines and every `test result` reporting `0 failed`. Read the collected results — a green tail proves nothing, since a pipeline's exit code is the last stage's.
 
 - [ ] **Step 3: Build the frontend**
 
