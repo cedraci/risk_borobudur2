@@ -286,10 +286,10 @@ fn joursr_treats_an_empty_amount_cell_as_zero() {
     // An empty cell is a legitimate "no flow that day" — only a present but
     // unparsable cell should be fatal, not a blank one.
     let text = String::from_utf8(std::fs::read(JOURSR).unwrap()).unwrap();
-    let blanked = text.replace("104.04;0.;0.;1922.15", "104.04;;0.;1922.15");
+    let blanked = text.replace("104.04;0.;0.;1922.15", "104.04;0.;;1922.15");
     assert_ne!(blanked, text, "the fixture's C1 subscription amount must be present to blank");
     let b = caceis::parse_joursr(JOURSR_FNAME, blanked.as_bytes()).expect("empty cell still parses");
     let c1 = b.flows.unwrap().into_iter().find(|f| f.share_class == "C1").unwrap();
-    assert_eq!(c1.subscription_amount, 0.0);
-    assert_eq!(c1.redemption_amount, 200_000.0, "the other amount column is untouched");
+    assert_eq!(c1.subscription_amount, 0.0, "the empty cell was accepted, not rejected");
+    assert_eq!(c1.redemption_amount, 200_000.0, "the neighbouring amount column is untouched");
 }
