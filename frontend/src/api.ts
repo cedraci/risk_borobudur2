@@ -306,7 +306,7 @@ export const getPnl = (pid: number, p: { from: string; to: string; dimension: Pn
 
 export const bloombergRequestUrl = "/api/bloomberg/request";
 export interface BloombergUpload {
-  classified: number; fx_rows: number; skipped: RowError[];
+  classified: number; fx_rows: number; adv_rows: number; skipped: RowError[];
   fx_check: { currency: string; date: string; workbook: number; bloomberg: number; drift: number }[];
 }
 export const uploadBloomberg = (f: File) => {

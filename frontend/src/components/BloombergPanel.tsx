@@ -19,6 +19,7 @@ export default function BloombergPanel() {
     setResult(null);
     try {
       setResult(await uploadBloomberg(f));
+      due.reload();
     } catch (x) {
       setErr(x as ApiError);
     } finally {
@@ -56,7 +57,8 @@ export default function BloombergPanel() {
       {result && (
         <div>
           <p className="pos">
-            {result.classified} instrument(s) classified, {result.fx_rows} FX rate(s) stored.
+            {result.classified} instrument(s) classified, {result.fx_rows} FX rate(s) stored,{" "}
+            {result.adv_rows} ADV volume(s) stored.
           </p>
           {result.skipped.length === 0 && result.fx_check.length === 0 && (
             <p className="kpi-sub">No skipped cells and no FX cross-check drift.</p>

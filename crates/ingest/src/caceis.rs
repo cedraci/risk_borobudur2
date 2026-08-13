@@ -384,24 +384,32 @@ pub fn parse_joursr(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
     })
 }
 
-// INVJCPLUX columns (0-based), from the depositary glossary.
+// INVJCPLUX columns (0-based), from the depositary glossary. Columns 17
+// (maturity) and 22 (rate) are deliberately not read: see the comment on
+// the `RefFact` construction below.
 const J_FUND_CODE: usize = 0;
 const J_NAV_DATE: usize = 2;
 const J_ISIN: usize = 3;
 const J_FREQ: usize = 15;
-const J_MATURITY: usize = 17;
-const J_RATE: usize = 22;
 const J_MIN_FIELDS: usize = 36;
 
-/// CACEIS's frequency encoding is not visible in the glossary. An integer in
-/// 1..=12 is taken as given, a small set of letter codes is mapped, and
+/// CACEIS's frequency encoding is not visible in the glossary. An integer
+/// matching one of the four standard payment frequencies (1, 2, 4, 12 — the
+/// same set the `instrument_refs_bond_coupon_freq_check` CHECK constraint
+/// allows) is taken as given, a small set of letter codes is mapped, and
 /// anything else warns and yields NULL. Nothing is ever guessed: a wrong
-/// frequency scales the coupon directly.
+/// frequency scales the coupon directly. In particular, a French depositary
+/// may plausibly encode frequency as a month count (e.g. "6" for
+/// semi-annual) rather than a payment count; such a value is not a member of
+/// {1, 2, 4, 12} and must fall through to the warn-and-NULL path below
+/// rather than being accepted and later rejected by the database CHECK,
+/// which would fail the entire import and discard every valid row in the
+/// file.
 fn coupon_freq(token: &str) -> Result<Option<i32>, ()> {
     let t = token.trim();
     if t.is_empty() { return Ok(None); }
     if let Ok(n) = t.parse::<i32>() {
-        return if (1..=12).contains(&n) { Ok(Some(n)) } else { Err(()) };
+        return if [1, 2, 4, 12].contains(&n) { Ok(Some(n)) } else { Err(()) };
     }
     match t.to_ascii_uppercase().as_str() {
         "A" | "ANNUEL" | "ANNUAL" => Ok(Some(1)),
@@ -464,9 +472,22 @@ pub fn parse_invjcp(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
             isin,
             market_place: None,
             market_place_name: None,
-            bond_maturity: date(&fields, J_MATURITY),
+            // bond_maturity and bond_coupon_pct are deliberately left None,
+            // even though INVJCPLUX carries columns (17, 22) that look like
+            // them. Those two indices are inferred from the depositary's
+            // glossary with no real sample file to confirm them, whereas
+            // HISINVLUX already supplies both fields from columns verified
+            // against a real file and restates them daily. RefFact upserts
+            // overwrite, so a wrong guess here would silently flip-flop the
+            // sample-verified HISINVLUX values on every import instead of
+            // failing loudly — the one failure mode the sniff-and-cross-check
+            // protection cannot detect, since the file's shape, fund code
+            // and date would all still be correct. The coupon frequency is
+            // the one field INVJCPLUX uniquely contributes, so it is the
+            // only one emitted here.
+            bond_maturity: None,
             bond_next_coupon: None,
-            bond_coupon_pct: num(&fields, J_RATE),
+            bond_coupon_pct: None,
             bond_nominal: None,
             bond_coupon_freq,
         });

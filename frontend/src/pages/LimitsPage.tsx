@@ -203,7 +203,12 @@ export default function LimitsPage() {
                         lineStyle: { color: "#c62828", type: "dashed" },
                         data: [
                           { yAxis: sel.required_eur, label: { formatter: "Required" } },
-                          { xAxis: liq.data.params.settlement_deadline_days, label: { formatter: "Deadline" } },
+                          // The x-axis is an ECharts category axis over [1..horizon]; a
+                          // numeric markLine value there is read as an index, not a
+                          // value (so 3 would draw at the 4th category / day 4). Passing
+                          // the day as a string makes ECharts match it against the
+                          // category data instead.
+                          { xAxis: String(liq.data.params.settlement_deadline_days), label: { formatter: "Deadline" } },
                         ],
                       },
                     }],

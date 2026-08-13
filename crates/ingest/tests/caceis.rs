@@ -291,11 +291,34 @@ fn invjcp_supplies_the_coupon_frequency() {
     assert!(b.snapshots.is_empty() && b.flows.is_none());
     let f = b.ref_facts.iter().find(|f| f.isin == "US105756CL22").unwrap();
     assert_eq!(f.bond_coupon_freq, Some(2));
-    assert_eq!(f.bond_maturity, chrono::NaiveDate::from_ymd_opt(2035, 3, 15));
-    // J_RATE (index 22) is otherwise unasserted anywhere in the suite: a
-    // wrong constant there would silently populate bond_coupon_pct from the
-    // wrong column, and it feeds the coupon amount directly.
-    assert_eq!(f.bond_coupon_pct, Some(6.625));
+    // bond_maturity and bond_coupon_pct are deliberately left unset by
+    // parse_invjcp, even though the fixture carries real-looking values in
+    // those columns (2035-03-15, 6.625): those two column indices are
+    // inferred from the depositary's glossary with no real sample to
+    // confirm them, and RefFact upserts overwrite, so a wrong guess would
+    // silently flip-flop against HISINVLUX's sample-verified values on every
+    // import. The frequency is the one field INVJCPLUX uniquely contributes.
+    assert_eq!(f.bond_maturity, None);
+    assert_eq!(f.bond_coupon_pct, None);
+}
+
+#[test]
+fn a_month_count_frequency_token_is_not_accepted() {
+    // The database CHECK constraint only allows {1, 2, 4, 12}. A French
+    // depositary may plausibly encode frequency as a month count (e.g. "6"
+    // for semi-annual), which is a real integer but not a member of that
+    // set. It must take the warn-and-NULL path — exactly like an
+    // unrecognised letter code — rather than being accepted here and later
+    // rejected by the CHECK constraint, which would fail the entire import
+    // and discard every valid row in the file.
+    let text = String::from_utf8(std::fs::read(INVJCP).unwrap()).unwrap();
+    let substituted = text.replace(";2;20250915;20350315;", ";6;20250915;20350315;");
+    assert_ne!(substituted, text, "the fixture's frequency token 2 must be present to substitute");
+    let b = caceis::parse_invjcp(INVJCP_FNAME, substituted.as_bytes()).unwrap();
+    let f = b.ref_facts.iter().find(|f| f.isin == "US105756CL22").unwrap();
+    assert_eq!(f.bond_coupon_freq, None, "a month-count 6 must never resolve to a frequency");
+    assert!(b.warnings.iter().any(|w| w.contains("\"6\"")),
+            "the 6 token must be named in the warning: {:?}", b.warnings);
 }
 
 #[test]

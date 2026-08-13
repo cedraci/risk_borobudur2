@@ -132,25 +132,35 @@ pub async fn liquidity_h(
     let negative_memo: f64 = rows.iter().filter_map(|p| p.weight).filter(|w| *w < 0.0).sum();
 
     // Coupon and redemption inflows, from the depositary's own schedule.
-    let coupon_inputs: Vec<analytics::CouponInput> = rows.iter()
-        .filter(|p| p.asset_type == "Obligation")
-        .filter_map(|p| {
-            let r = by.get(p.isin.as_str())?;
-            Some(analytics::CouponInput {
-                code: p.isin.clone(),
-                quantity: p.quantity.unwrap_or(0.0),
-                coupon_pct: r.bond_coupon_pct,
-                // Only a fixed coupon reaches instrument_refs at all, so its
-                // presence is the FIX gate the parser already applied.
-                coupon_type: r.bond_coupon_pct.map(|_| "FIX".to_string()),
-                next_coupon: r.bond_next_coupon,
-                maturity: r.bond_maturity,
-                freq: r.bond_coupon_freq,
-                accrued_eur: p.accrued_interest,
-                fx_rate: p.fx_rate.unwrap_or(1.0),
-            })
-        }).collect();
-    let coupons = analytics::bond_inflows(&coupon_inputs, asof, horizon);
+    // CACEIS derives fx_rate from market-value-EUR / market-value-local, so
+    // it is NULL when the local market value is missing. A missing rate is
+    // never defaulted to parity (that would silently convert a non-EUR
+    // coupon at 1.0, a unit assumption on a cash inflow); the bond is
+    // skipped and surfaced in the coverage block instead.
+    let mut coupon_inputs: Vec<analytics::CouponInput> = Vec::new();
+    let mut fx_gaps: Vec<analytics::CouponGap> = Vec::new();
+    for p in rows.iter().filter(|p| p.asset_type == "Obligation") {
+        let Some(r) = by.get(p.isin.as_str()) else { continue };
+        let Some(fx_rate) = p.fx_rate else {
+            fx_gaps.push(analytics::CouponGap { code: p.isin.clone(), reason: "no fx rate" });
+            continue;
+        };
+        coupon_inputs.push(analytics::CouponInput {
+            code: p.isin.clone(),
+            quantity: p.quantity.unwrap_or(0.0),
+            coupon_pct: r.bond_coupon_pct,
+            // Only a fixed coupon reaches instrument_refs at all, so its
+            // presence is the FIX gate the parser already applied.
+            coupon_type: r.bond_coupon_pct.map(|_| "FIX".to_string()),
+            next_coupon: r.bond_next_coupon,
+            maturity: r.bond_maturity,
+            freq: r.bond_coupon_freq,
+            accrued_eur: p.accrued_interest,
+            fx_rate,
+        });
+    }
+    let mut coupons = analytics::bond_inflows(&coupon_inputs, asof, horizon);
+    coupons.gaps.extend(fx_gaps);
 
     let register = db::repo::shareholders_for(&st.pool, pid).await?;
     let top5_pct: f64 = register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0;
