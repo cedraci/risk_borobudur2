@@ -132,7 +132,7 @@ pub async fn shareholders_list(
 pub async fn shareholders_put(
     State(st): State<AppState>, Path(pid): Path<i64>, Json(body): Json<Vec<ShareholderBody>>,
 ) -> Result<Json<Vec<db::repo::Shareholder>>, AppError> {
-    ensure(&st.pool, pid, false).await?;
+    ensure(&st.pool, pid, true).await?;
     let mut total = 0.0;
     let mut rows = Vec::with_capacity(body.len());
     for b in &body {

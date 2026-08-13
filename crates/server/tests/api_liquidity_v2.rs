@@ -91,3 +91,35 @@ async fn shareholder_register_crud_and_validation() {
     pool.close().await;
     edb.stop().await;
 }
+
+// `shareholders_put` is a mutating write and must be refused on an archived
+// portfolio, same as settings/imports/CTD/codes puts. `shareholders_list`
+// is a read and must stay available even when archived, so history remains
+// inspectable — a "fix" that also locked down the read would pass a test
+// that only checked the refusal, so both halves are asserted here.
+#[tokio::test]
+async fn shareholders_put_refused_but_read_allowed_on_archived_portfolio() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+
+    // Archive portfolio 1 (seeded by migration as "Borobudur").
+    let (st, _) = put_json(&app, "/api/portfolios/1",
+        serde_json::json!({"name": "Borobudur", "archived": true})).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Mutating write refused: ensure() maps this to AppError::Conflict, 409.
+    let (st, _) = put_json(&app, "/api/portfolios/1/shareholders", serde_json::json!([
+        {"label": "Founder family", "pct_of_nav": 18.0, "as_of": "2026-08-07"}
+    ])).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+
+    // Read stays available on an archived portfolio.
+    let (st, body) = get_json(&app, "/api/portfolios/1/shareholders").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0);
+
+    pool.close().await;
+    edb.stop().await;
+}
