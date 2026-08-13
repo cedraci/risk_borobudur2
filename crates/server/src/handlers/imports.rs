@@ -7,7 +7,8 @@ use sha2::Digest;
 #[derive(serde::Serialize)]
 pub struct FileImportResult {
     pub filename: String,
-    /// "nav_recap" | "caceis_hisinv" | "caceis_histovl"; None when detection failed.
+    /// "nav_recap" | "caceis_hisinv" | "caceis_histovl" | "caceis_joursr" |
+    /// "caceis_invjcp"; None when detection failed.
     pub kind: Option<String>,
     pub portfolio_id: Option<i64>,
     pub portfolio_name: Option<String>,
@@ -21,6 +22,8 @@ fn kind_label(k: ingest::adapter::FileKind) -> &'static str {
         ingest::adapter::FileKind::NavRecap => "nav_recap",
         ingest::adapter::FileKind::CaceisHisinv => "caceis_hisinv",
         ingest::adapter::FileKind::CaceisHistovl => "caceis_histovl",
+        ingest::adapter::FileKind::CaceisJoursr => "caceis_joursr",
+        ingest::adapter::FileKind::CaceisInvjcp => "caceis_invjcp",
     }
 }
 

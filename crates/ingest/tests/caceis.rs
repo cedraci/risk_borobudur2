@@ -281,6 +281,31 @@ fn joursr_rejects_a_non_numeric_redemption_amount() {
     assert!(caceis::parse_joursr(JOURSR_FNAME, corrupted.as_bytes()).is_err());
 }
 
+const INVJCP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/caceis_invjcp.csv");
+const INVJCP_FNAME: &str = "INVJCPLUX_165878_20260807_20260810130151.csv";
+
+#[test]
+fn invjcp_supplies_the_coupon_frequency() {
+    let bytes = std::fs::read(INVJCP).unwrap();
+    let b = caceis::parse_invjcp(INVJCP_FNAME, &bytes).expect("fixture parses");
+    assert!(b.snapshots.is_empty() && b.flows.is_none());
+    let f = b.ref_facts.iter().find(|f| f.isin == "US105756CL22").unwrap();
+    assert_eq!(f.bond_coupon_freq, Some(2));
+    assert_eq!(f.bond_maturity, chrono::NaiveDate::from_ymd_opt(2035, 3, 15));
+}
+
+#[test]
+fn an_unrecognised_frequency_warns_and_stays_null() {
+    // Never a guess: the engine falls to the accrued-interest inference, and
+    // if that is inconclusive it credits no coupon at all.
+    let bytes = std::fs::read(INVJCP).unwrap();
+    let b = caceis::parse_invjcp(INVJCP_FNAME, &bytes).unwrap();
+    let f = b.ref_facts.iter().find(|f| f.isin == "XS9999999999").unwrap();
+    assert_eq!(f.bond_coupon_freq, None);
+    assert!(b.warnings.iter().any(|w| w.contains("frequency")),
+            "the first real file settles the encoding; the warning is how we find out: {:?}", b.warnings);
+}
+
 #[test]
 fn joursr_treats_an_empty_amount_cell_as_zero() {
     // An empty cell is a legitimate "no flow that day" — only a present but

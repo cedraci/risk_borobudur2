@@ -61,7 +61,7 @@ pub struct UniversalBatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind { NavRecap, CaceisHisinv, CaceisHistovl }
+pub enum FileKind { NavRecap, CaceisHisinv, CaceisHistovl, CaceisJoursr, CaceisInvjcp }
 
 #[derive(Debug)]
 pub struct Identification {
@@ -74,7 +74,7 @@ pub struct Identification {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DetectError {
-    #[error("unrecognized file format: {0:?}. Supported: NAV Recap (.xlsx), CACEIS HISINVLUX / HISTOVLLUX (.csv)")]
+    #[error("unrecognized file format: {0:?}. Supported: NAV Recap (.xlsx), CACEIS HISINVLUX / HISTOVLLUX / JOURSRLUX / INVJCPLUX (.csv)")]
     Unrecognized(String),
     #[error("{0}")]
     Rejected(String),
@@ -119,6 +119,29 @@ pub fn detect(filename: &str, bytes: &[u8]) -> Result<Identification, DetectErro
         if !sniff_semicolons(bytes, 20) { return Err(DetectError::Unrecognized(filename.to_string())); }
         return Ok(Identification { kind: FileKind::CaceisHistovl, fund_code: Some(fund_code) });
     }
+    if lower.starts_with("joursrlux_") {
+        let Some(fund_code) = caceis_meta() else {
+            return Err(DetectError::Unrecognized(filename.to_string()));
+        };
+        if !sniff_semicolons(bytes, 15) { return Err(DetectError::Unrecognized(filename.to_string())); }
+        return Ok(Identification { kind: FileKind::CaceisJoursr, fund_code: Some(fund_code) });
+    }
+    if lower.starts_with("invjcplux_") {
+        let Some(fund_code) = caceis_meta() else {
+            return Err(DetectError::Unrecognized(filename.to_string()));
+        };
+        if !sniff_semicolons(bytes, 36) { return Err(DetectError::Unrecognized(filename.to_string())); }
+        return Ok(Identification { kind: FileKind::CaceisInvjcp, fund_code: Some(fund_code) });
+    }
+    if lower.starts_with("reglmtlux_") || lower.starts_with("rapdeclux_") {
+        return Err(DetectError::Rejected(
+            "REGLMTLUX and RAPDECLUX are recognized but not consumed yet. Everything they carry is \
+             already in the snapshot under a different name — the settlement ledger's pending trades \
+             are the Provisions ordres and Frais provisionnés rows, and the detached dividends are the \
+             CPON positions. They add dates to amounts we already hold, so importing them without a \
+             de-duplication rule written against real transaction codes would double-count the \
+             liability side. Provide one sample of each and the rule can be written.".into()));
+    }
     if lower.starts_with("invxdvlux_") {
         return Err(DetectError::Rejected(
             "INVXDVLUX is not needed: HISINVLUX already carries the positions. Upload HISINVLUX and HISTOVLLUX.".into()));
@@ -143,5 +166,7 @@ pub fn parse(kind: FileKind, filename: &str, bytes: &[u8]) -> Result<UniversalBa
         FileKind::NavRecap => crate::parse_workbook(bytes).map(to_batch),
         FileKind::CaceisHisinv => crate::caceis::parse_hisinv(filename, bytes),
         FileKind::CaceisHistovl => crate::caceis::parse_histovl(filename, bytes),
+        FileKind::CaceisJoursr => crate::caceis::parse_joursr(filename, bytes),
+        FileKind::CaceisInvjcp => crate::caceis::parse_invjcp(filename, bytes),
     }
 }

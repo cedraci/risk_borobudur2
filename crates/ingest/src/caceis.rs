@@ -383,3 +383,105 @@ pub fn parse_joursr(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, Pars
         warnings: Vec::new(),
     })
 }
+
+// INVJCPLUX columns (0-based), from the depositary glossary.
+const J_FUND_CODE: usize = 0;
+const J_NAV_DATE: usize = 2;
+const J_ISIN: usize = 3;
+const J_FREQ: usize = 15;
+const J_MATURITY: usize = 17;
+const J_RATE: usize = 22;
+const J_MIN_FIELDS: usize = 36;
+
+/// CACEIS's frequency encoding is not visible in the glossary. An integer in
+/// 1..=12 is taken as given, a small set of letter codes is mapped, and
+/// anything else warns and yields NULL. Nothing is ever guessed: a wrong
+/// frequency scales the coupon directly.
+fn coupon_freq(token: &str) -> Result<Option<i32>, ()> {
+    let t = token.trim();
+    if t.is_empty() { return Ok(None); }
+    if let Ok(n) = t.parse::<i32>() {
+        return if (1..=12).contains(&n) { Ok(Some(n)) } else { Err(()) };
+    }
+    match t.to_ascii_uppercase().as_str() {
+        "A" | "ANNUEL" | "ANNUAL" => Ok(Some(1)),
+        "T" | "TRIMESTRIEL" | "QUARTERLY" => Ok(Some(4)),
+        "M" | "MENSUEL" | "MONTHLY" => Ok(Some(12)),
+        _ => Err(()),
+    }
+}
+
+/// The depositary's bond coupon detail file. Its only real value is the
+/// coupon frequency, which HISINVLUX does not carry: `analytics::infer_coupon_freq`
+/// covers for its absence, so this adapter confirms a number rather than
+/// enabling one. Emits `RefFact`s only — no positions, no NAV, no flows.
+pub fn parse_invjcp(filename: &str, bytes: &[u8]) -> Result<UniversalBatch, ParseFailure> {
+    let (fund_code, file_date) = filename_meta(filename)
+        .ok_or_else(|| ParseFailure::Workbook(format!(
+            "filename {filename:?} does not match INVJCPLUX_<fund>_<yyyymmdd>_<ts>.csv")))?;
+
+    let textual = decode_latin1(bytes);
+    let mut ref_facts: Vec<RefFact> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    for (i, line) in textual.lines().enumerate() {
+        let lineno = i + 1;
+        if line.trim().is_empty() { continue; }
+        let fields: Vec<&str> = line.split(';').collect();
+        if fields.len() < J_MIN_FIELDS {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: {} columns, expected at least {J_MIN_FIELDS} — not an INVJCPLUX layout",
+                fields.len())));
+        }
+        if field(&fields, J_FUND_CODE) != fund_code {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: fund code {:?} differs from filename code {fund_code:?}",
+                field(&fields, J_FUND_CODE))));
+        }
+        let row_date = NaiveDate::parse_from_str(field(&fields, J_NAV_DATE), "%Y%m%d")
+            .map_err(|_| ParseFailure::Workbook(format!(
+                "line {lineno}: bad NAV date {:?}", field(&fields, J_NAV_DATE))))?;
+        if row_date != file_date {
+            return Err(ParseFailure::Workbook(format!(
+                "line {lineno}: row date {row_date} differs from filename date {file_date}")));
+        }
+
+        let isin = field(&fields, J_ISIN).to_string();
+        let freq_token = field(&fields, J_FREQ);
+        let bond_coupon_freq = match coupon_freq(freq_token) {
+            Ok(f) => f,
+            Err(()) => {
+                warnings.push(format!(
+                    "line {lineno}: unrecognised coupon frequency {freq_token:?} for {isin} — left unset"));
+                None
+            }
+        };
+
+        ref_facts.push(RefFact {
+            isin,
+            market_place: None,
+            market_place_name: None,
+            bond_maturity: date(&fields, J_MATURITY),
+            bond_next_coupon: None,
+            bond_coupon_pct: num(&fields, J_RATE),
+            bond_nominal: None,
+            bond_coupon_freq,
+        });
+    }
+
+    if ref_facts.is_empty() {
+        return Err(ParseFailure::Workbook("no coupon rows found".into()));
+    }
+
+    Ok(UniversalBatch {
+        primary_date: file_date,
+        nav_points: Vec::new(),
+        snapshots: Vec::new(),
+        dividends: None,
+        operations: None,
+        flows: None,
+        ref_hints: Vec::new(),
+        ref_facts,
+        warnings,
+    })
+}
