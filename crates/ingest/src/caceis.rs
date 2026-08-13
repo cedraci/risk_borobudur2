@@ -407,6 +407,9 @@ fn coupon_freq(token: &str) -> Result<Option<i32>, ()> {
         "A" | "ANNUEL" | "ANNUAL" => Ok(Some(1)),
         "T" | "TRIMESTRIEL" | "QUARTERLY" => Ok(Some(4)),
         "M" | "MENSUEL" | "MONTHLY" => Ok(Some(12)),
+        // "S" is deliberately absent: ambiguous between *semestriel* (2) and
+        // *semaine* (weekly), which differ by a factor of 26. Do not add it —
+        // let it fall through to the warning-and-NULL path below.
         _ => Err(()),
     }
 }

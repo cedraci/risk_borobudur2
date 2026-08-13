@@ -292,6 +292,10 @@ fn invjcp_supplies_the_coupon_frequency() {
     let f = b.ref_facts.iter().find(|f| f.isin == "US105756CL22").unwrap();
     assert_eq!(f.bond_coupon_freq, Some(2));
     assert_eq!(f.bond_maturity, chrono::NaiveDate::from_ymd_opt(2035, 3, 15));
+    // J_RATE (index 22) is otherwise unasserted anywhere in the suite: a
+    // wrong constant there would silently populate bond_coupon_pct from the
+    // wrong column, and it feeds the coupon amount directly.
+    assert_eq!(f.bond_coupon_pct, Some(6.625));
 }
 
 #[test]
@@ -304,6 +308,37 @@ fn an_unrecognised_frequency_warns_and_stays_null() {
     assert_eq!(f.bond_coupon_freq, None);
     assert!(b.warnings.iter().any(|w| w.contains("frequency")),
             "the first real file settles the encoding; the warning is how we find out: {:?}", b.warnings);
+}
+
+#[test]
+fn a_bare_s_frequency_token_is_not_accepted() {
+    // "S" is ambiguous between *semestriel* (2) and *semaine* (weekly),
+    // which differ by a factor of 26. The fixture's other unrecognised-token
+    // test uses "SEMI", which would still fall through to the warning path
+    // even if someone later "helpfully" mapped "S" to 2 — so this test must
+    // exercise the bare token directly, or the exclusion has no coverage.
+    let text = String::from_utf8(std::fs::read(INVJCP).unwrap()).unwrap();
+    let substituted = text.replace(";SEMI;", ";S;");
+    assert_ne!(substituted, text, "the fixture's SEMI token must be present to substitute");
+    let b = caceis::parse_invjcp(INVJCP_FNAME, substituted.as_bytes()).unwrap();
+    let f = b.ref_facts.iter().find(|f| f.isin == "XS9999999999").unwrap();
+    assert_eq!(f.bond_coupon_freq, None, "a bare S must never resolve to a frequency");
+    assert!(b.warnings.iter().any(|w| w.contains("\"S\"")),
+            "the S token must be named in the warning: {:?}", b.warnings);
+}
+
+#[test]
+fn invjcp_rejects_a_mis_shaped_or_mislabelled_file() {
+    let short = b"165878;INVJCP-DETAIL;20260807\n";
+    assert!(caceis::parse_invjcp(INVJCP_FNAME, short).is_err(), "too few fields must reject the file");
+
+    let bytes = std::fs::read(INVJCP).unwrap();
+    // Filename fund code disagreeing with the rows is a routing accident, not
+    // a row-level anomaly: reject the file rather than import it elsewhere.
+    assert!(caceis::parse_invjcp("INVJCPLUX_999999_20260807_1.csv", &bytes).is_err(),
+            "fund-code mismatch must reject the file");
+    assert!(caceis::parse_invjcp("INVJCPLUX_165878_20260806_1.csv", &bytes).is_err(),
+            "date mismatch must reject the file");
 }
 
 #[test]
