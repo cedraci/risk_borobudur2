@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod embedded;
 pub mod repo;
 pub mod settings;
