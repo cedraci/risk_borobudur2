@@ -362,6 +362,84 @@ async fn liquidity_marks_issuer_overrides_unavailable_when_reference_is_denied()
     edb.stop().await;
 }
 
+/// CRITICAL RESIDUAL (round 2 review): `issuer_overrides` is a sibling
+/// marker, not a suppression — on `a75d84f` the scenario itself still
+/// computed a pass-reading "ok"/"breach" status (plus waterfall/slice_days/
+/// residual) from the same Reference-degraded `caps`, one field away from
+/// the marker. This pins the actual non-flip, not just the marker's
+/// presence: override nearly every held instrument's `liquidity_days` to 90
+/// (a Reference fact), which pushes the fixed 30% redemption scenario past
+/// the 3-day settlement deadline — a genuine breach — whenever the override
+/// is visible. With Reference denied, the same portfolio, same positions,
+/// same settings must read `"unavailable"`, never "ok" and never "breach":
+/// the fallback (`liquidity_default_days`, 1 day for equities) would
+/// otherwise silently report same-week liquidity and flip the verdict.
+#[tokio::test]
+async fn liquidity_scenario_status_does_not_flip_from_breach_to_ok_when_reference_is_denied() {
+    let (desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    seed(&desktop, pid).await;
+
+    // Every instrument this portfolio holds becomes "slow" (90 days) via a
+    // Reference-domain fact (instrument_refs.liquidity_days), not a
+    // Positions fact — direct SQL rather than the HTTP PUT endpoint purely
+    // to avoid enumerating every ISIN by hand; the effect on the read path
+    // is identical either way. An `INSERT ... ON CONFLICT`, not a bare
+    // `UPDATE`: the NAV Recap adapter (`sample.xlsx`'s kind) emits no ref
+    // hints/facts at import time (`ingest::adapter::to_batch`), so no
+    // `instrument_refs` row exists yet for any of these codes — a plain
+    // `UPDATE` would match zero rows and silently do nothing.
+    sqlx::query(
+        "INSERT INTO instrument_refs (code, liquidity_days)
+         SELECT DISTINCT isin, 90 FROM position_snapshots WHERE portfolio_id = $1
+         ON CONFLICT (code) DO UPDATE SET liquidity_days = EXCLUDED.liquidity_days",
+    )
+    .bind(pid)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // With Reference granted, the override is visible: cash/margin is the
+    // only instantly-liquid slice of this fund (a small fraction of NAV —
+    // see the concentration suite's deposit_20 check), so raising 30% of
+    // NAV within the 3-day settlement deadline is not possible. The test
+    // setup itself must produce a breach, or this test proves nothing about
+    // the flip.
+    let cookie_granted = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Reference, action: Action::View, portfolio: None },
+    ]).await;
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/liquidity"), Some(&cookie_granted)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fixed_granted = body["scenarios"].as_array().unwrap().iter().find(|s| s["key"] == "fixed").unwrap();
+    assert_eq!(fixed_granted["status"], "breach", "test setup did not produce a breach: {fixed_granted}");
+
+    // With Reference denied — same portfolio, same positions, same
+    // settings — the scenario must read "unavailable", never "ok" and never
+    // "breach": a plain `assert_ne!(status, "ok")` would not catch a
+    // regression that instead started emitting a (wrong) "breach" without
+    // the reason/marker, so every one of the three is checked.
+    let cookie_denied = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid) },
+    ]).await;
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/liquidity"), Some(&cookie_denied)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fixed_denied = body["scenarios"].as_array().unwrap().iter().find(|s| s["key"] == "fixed").unwrap();
+    assert_ne!(fixed_denied["status"], "ok", "{fixed_denied}");
+    assert_ne!(fixed_denied["status"], "breach", "{fixed_denied}");
+    assert_eq!(fixed_denied["status"], "unavailable", "{fixed_denied}");
+    assert_eq!(fixed_denied["reason"], "not permitted: reference data", "{fixed_denied}");
+    assert!(fixed_denied["waterfall"].is_null(), "{fixed_denied}");
+    assert!(fixed_denied["slice_days"].is_null(), "{fixed_denied}");
+    assert!(fixed_denied["residual"].is_null(), "{fixed_denied}");
+    assert!(fixed_denied["curve"].is_null(), "{fixed_denied}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 /// Critical item 3 (round 1 review): a denied Nav grant must be
 /// distinguishable from a genuinely empty NAV history — both currently
 /// collapse into the same "no data yet" empty shape.
@@ -398,6 +476,30 @@ async fn liquidity_nav_denial_is_distinguishable_from_empty_nav_history() {
     assert_eq!(reason_denied, "not permitted: NAV history");
 
     assert_ne!(reason_missing, reason_denied);
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Round 2 review item 3: with no position snapshot at all (`date: None`),
+/// Nav authorization must still be consulted — on the pre-fix code the
+/// `None` branch hardcoded "no NAV data" without ever checking the grant,
+/// so a denied Nav on an empty portfolio silently read as missing data
+/// rather than a denial.
+#[tokio::test]
+async fn liquidity_nav_denial_is_reported_even_with_no_position_snapshot_at_all() {
+    let (_desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    // Deliberately not seeded: no position snapshot exists, so `date`
+    // resolves to `None` inside `liquidity_h`.
+
+    let cookie = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
+    ]).await;
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/liquidity"), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["nav_status"]["status"], "unavailable", "{body}");
+    assert_eq!(body["nav_status"]["reason"], "not permitted: NAV history", "{body}");
 
     pool.close().await;
     edb.stop().await;

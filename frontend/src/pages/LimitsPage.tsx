@@ -5,10 +5,15 @@ import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
 
-const STATUS_LABEL: Record<CheckStatus, string> = { ok: "OK", watch: "WATCH", breach: "BREACH" };
+const STATUS_LABEL: Record<CheckStatus, string> = {
+  ok: "OK", watch: "WATCH", breach: "BREACH", unavailable: "N/A",
+};
 
 function StatusChip({ s }: { s: CheckStatus }) {
-  const cls = s === "ok" ? "pos" : s === "watch" ? "warn-badge" : "neg";
+  // "unavailable" (Reference denied, so this status is not computed from
+  // real overrides) must never render as a pass — its own neutral class,
+  // never "pos".
+  const cls = s === "unavailable" ? "kpi-sub" : s === "ok" ? "pos" : s === "watch" ? "warn-badge" : "neg";
   return <span className={cls}>{STATUS_LABEL[s]}</span>;
 }
 
@@ -27,7 +32,13 @@ function CheckCard({ c }: { c: Check }) {
                 <td>
                   <div style={{ background: "#eee", height: 8, width: 120 }}>
                     <div style={{
-                      background: r.status === "breach" ? "#c62828" : r.status === "watch" ? "#b26a00" : "#2e7d32",
+                      // "unavailable" must never paint as a pass: its own
+                      // neutral grey, never the "ok" green the fallthrough
+                      // used to reach.
+                      background: r.status === "breach" ? "#c62828"
+                        : r.status === "watch" ? "#b26a00"
+                        : r.status === "unavailable" ? "#9e9e9e"
+                        : "#2e7d32",
                       height: 8,
                       width: Math.min(120, (r.weight / c.limit) * 120),
                     }} />

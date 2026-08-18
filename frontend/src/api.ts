@@ -124,10 +124,19 @@ export const advRequestUrl = "/api/bloomberg/adv-request";
 export const getAdvDue = () => req<{ due: number; held: number }>("/api/bloomberg/adv-due");
 
 export type Bucket = "d1" | "d2_7" | "d8_30" | "d30p";
-export type CheckStatus = "ok" | "watch" | "breach";
+// "unavailable": Reference (issuer-group/liquidity overrides) was denied,
+// so the check/row was computed without them and its own status is not
+// trustworthy — the server stamps every check and row unavailable in that
+// case rather than leaving a possibly-wrong "ok"/"watch"/"breach" beside
+// `issuer_overrides`. Never render this as a pass.
+export type CheckStatus = "ok" | "watch" | "breach" | "unavailable";
 export interface CheckRow { group: string; weight: number; status: CheckStatus }
 export interface Check { check: string; scope_label: string; limit: number; rows: CheckRow[]; status: CheckStatus }
-export interface Concentration { dates: string[]; date: string | null; checks: Check[]; excluded_note: string }
+export interface AuthzMarker { status: "ok" | "unavailable"; reason?: string }
+export interface Concentration {
+  dates: string[]; date: string | null; checks: Check[]; excluded_note: string;
+  issuer_overrides: AuthzMarker;
+}
 
 export interface BucketWeight { bucket: Bucket; weight: number }
 export interface AssetProfile { buckets: BucketWeight[]; cumulative: BucketWeight[] }
@@ -165,6 +174,11 @@ export interface Liquidity {
   asset: { normal: AssetProfile; stressed: AssetProfile } | null;
   scenarios: Scenario[];
   negative_memo: number; negative_memo_eur: number;
+  // Reference denied -> every scenario's own status/waterfall/slice_days/
+  // residual is already stamped unavailable/null server-side; this marker
+  // just names the reason.
+  issuer_overrides: AuthzMarker;
+  nav_status: AuthzMarker;
 }
 
 export interface FlowStats {

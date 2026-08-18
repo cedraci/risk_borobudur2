@@ -21,9 +21,12 @@ type Snapshot = (Vec<NaiveDate>, Option<NaiveDate>, Vec<db::repo::PositionRecord
 /// supplies. Soft-checked (the query is skipped, not the whole request
 /// failed) so the absence of that secondary grant degrades the enrichment
 /// rather than failing the whole request. Callers that build a compliance
-/// verdict out of the enrichment (`concentration_h`) must not stop here:
-/// they re-check the same grant themselves and surface an explicit
-/// `unavailable` marker — see `concentration_h`'s `issuer_overrides` field.
+/// verdict out of the enrichment must not stop here: they re-check the same
+/// grant themselves and surface an explicit `unavailable` marker (and
+/// suppress any computed pass/fail value that would otherwise ride on the
+/// degraded enrichment) — see `concentration_h`'s `issuer_overrides` field
+/// and suppressed `checks`, and `liquidity_h`'s `issuer_overrides` field and
+/// suppressed `scenarios`.
 async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q: &DateQuery) -> Result<Snapshot, AppError> {
     let dates = scoped.position_dates(a).await?;
     let date = match &q.date {
@@ -181,16 +184,21 @@ pub async fn liquidity_h(
     // keeps those two cases distinguishable the same way
     // `shareholders_denied_reason` does below: a denial reads "not
     // permitted: NAV history", a genuinely absent row reads "no NAV data".
-    let (nav_opt, nav_unavailable_reason): (Option<f64>, Option<String>) = match date {
-        Some(d) => match scoped.authorize::<Nav, View>(pid) {
-            Ok(nv) => {
+    // Authorization is checked FIRST, before looking at `date` at all
+    // (round 2 review): checking it only inside the `Some(d)` arm meant a
+    // denied Nav grant on a portfolio with no position snapshot at all
+    // (`date: None`) silently read as "no NAV data" — a denial disguised as
+    // missing data, exactly what this marker exists to prevent.
+    let (nav_opt, nav_unavailable_reason): (Option<f64>, Option<String>) = match scoped.authorize::<Nav, View>(pid) {
+        Ok(nv) => match date {
+            Some(d) => {
                 let v = scoped.aum_for(&nv, d).await?;
                 let reason = if v.is_none() { Some("no NAV data".to_string()) } else { None };
                 (v, reason)
             }
-            Err(denied) => (None, Some(denied.reason())),
+            None => (None, Some("no NAV data".to_string())),
         },
-        None => (None, Some("no NAV data".to_string())),
+        Err(denied) => (None, Some(denied.reason())),
     };
     let nav_status = match &nav_unavailable_reason {
         None => serde_json::json!({"status": "ok"}),
@@ -276,6 +284,19 @@ pub async fn liquidity_h(
     // silently shipped `reason: ""` if that ever stopped being true. `.expect`
     // makes an actual regression fail loudly instead of shipping a blank
     // reason.
+    //
+    // CRITICAL residual (Task 9 review round 2): `caps` (`normal`/`stressed`)
+    // are built from `positions`, which is built from `by` — the same
+    // Reference-degraded map `issuer_overrides` warns about. Every scenario
+    // below reads `caps`, so with Reference denied EVERY scenario's
+    // "ok"/"breach" verdict, `waterfall`, `slice_days` and `residual` are
+    // computed on the default-days fallback, not the fund's real liquidity —
+    // exactly the breach-reads-as-ok risk `issuer_overrides` exists to flag.
+    // A sibling marker is not a suppression: the computed fields must
+    // themselves read `unavailable`/`null` (mirrors what `concentration_h`
+    // now does to `checks`), checked here, uniformly, for every key —
+    // including `top5`/`hybrid_top5` when the register happens to be loaded
+    // even though Reference is denied.
     let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity], unavailable_reason: Option<&str>| -> serde_json::Value {
         let Some(pct) = required_pct else {
             return serde_json::json!({
@@ -284,6 +305,20 @@ pub async fn liquidity_h(
             });
         };
         let required = pct * nav;
+        if let Some(denied) = &reference_denied {
+            return serde_json::json!({
+                "key": key,
+                "required_eur": required,
+                "required_pct": pct,
+                "register_count": register.len().min(5),
+                "status": "unavailable",
+                "reason": denied.reason(),
+                "waterfall": serde_json::Value::Null,
+                "slice_days": serde_json::Value::Null,
+                "residual": serde_json::Value::Null,
+                "curve": serde_json::Value::Null,
+            });
+        }
         let w = analytics::waterfall(caps, &coupons.inflows, negative_eur, required, horizon);
         let status = match w.days {
             Some(d) if d <= settings.settlement_deadline_days => "ok",
