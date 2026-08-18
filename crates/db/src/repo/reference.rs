@@ -233,8 +233,8 @@ impl<'a> Scoped<'a> {
             .bind(id).fetch_optional(self.pool).await?)
     }
 
-    pub async fn portfolio_get(&self, _a: &Access<Reference, View>, id: i64) -> anyhow::Result<Option<Portfolio>> {
-        self.portfolio_row(id).await
+    pub async fn portfolio_get(&self, a: &Access<Reference, View>) -> anyhow::Result<Option<Portfolio>> {
+        self.portfolio_row(a.portfolio_id()).await
     }
 
     /// Filters rather than authorizes — it answers "what may I see", so a

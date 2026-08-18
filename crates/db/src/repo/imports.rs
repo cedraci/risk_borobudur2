@@ -43,8 +43,12 @@ impl<'a> Scoped<'a> {
         transactions: &Access<Transactions, Import>,
         filename: &str, sha256: &str, b: &ingest::adapter::UniversalBatch,
     ) -> anyhow::Result<ImportOutcome> {
-        debug_assert_eq!(positions_a.portfolio_id(), nav.portfolio_id());
-        debug_assert_eq!(positions_a.portfolio_id(), transactions.portfolio_id());
+        // Must hold in release builds too: a mismatch here means a caller
+        // minted the three tokens against different portfolios, which would
+        // otherwise silently import into whichever one `positions_a` names
+        // while `nav`/`transactions` authorized a different one.
+        assert_eq!(positions_a.portfolio_id(), nav.portfolio_id());
+        assert_eq!(positions_a.portfolio_id(), transactions.portfolio_id());
         let portfolio_id = positions_a.portfolio_id();
         let pool = self.pool;
         let all_positions = || b.snapshots.iter().flat_map(|s| s.positions.iter());

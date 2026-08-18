@@ -46,16 +46,18 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/settings", get(handlers::settings::get), Domain::Reference, Action::View)
         .protected("/api/portfolios/{id}/settings", axum::routing::put(handlers::settings::put), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}/imports", get(handlers::imports::list), Domain::Reference, Action::View)
-        // `import_batch`/`import_workbook` write across several domains at
-        // once (Task 6's table: "multi (see Task 9)"). `positions` is the
-        // interim router-level gate — the core holdings picture every
-        // ingest adapter writes — until Task 9 checks `import` on each
-        // domain the batch actually touches. Self-identifying (CACEIS) files
-        // resolve their own target portfolio via `portfolio_by_code` inside
-        // the handler and write to THAT portfolio without ever being
-        // authorized against it — this gate only checks the URL `{id}`.
-        // Task 9 must authorize each resolved `target_id`, not just the URL
-        // id, for every domain the batch writes.
+        // `import_batch`/`import_workbook` write across positions, nav and
+        // transactions at once (Task 6's table: "multi"). `positions` on
+        // the URL `{id}` is only a coarse route-level pre-filter — the core
+        // holdings picture every ingest adapter writes. Self-identifying
+        // (CACEIS) files resolve their own target portfolio via
+        // `portfolio_by_code` inside the handler and can land somewhere
+        // other than the URL portfolio; the handler separately authorizes
+        // Positions/Nav/Transactions Import against that RESOLVED
+        // portfolio — not just the URL `{id}` — before reading its row at
+        // all, so a principal outside a file's resolved target learns
+        // neither its name nor whether it exists (task-9 review round 1;
+        // see the ordering comment in handlers/imports.rs::import_one).
         .protected("/api/portfolios/{id}/imports", axum::routing::post(handlers::imports::upload), Domain::Positions, Action::Import)
         .protected("/api/portfolios/{id}/nav", get(handlers::data::nav), Domain::Nav, Action::View)
         .protected("/api/portfolios/{id}/positions", get(handlers::data::positions), Domain::Positions, Action::View)
@@ -65,9 +67,17 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/metrics/calendar", get(handlers::metrics::calendar), Domain::Nav, Action::View)
         .protected("/api/portfolios/{id}/metrics/var", get(handlers::metrics::var), Domain::Nav, Action::View)
         .protected("/api/portfolios/{id}/metrics/concentration", get(handlers::limits::concentration_h), Domain::Positions, Action::View)
-        // Liquidity also reads the shareholder register (for the top-5
-        // redemption scenario); that extra domain degrades the scenario to
-        // "unavailable" rather than gating the whole endpoint — Task 11.
+        // Liquidity's route gate is Positions only, but the handler also
+        // reads Reference (issuer-group/liquidity overrides, via the shared
+        // `snapshot` helper), Nav (AUM at the snapshot date) and
+        // Shareholders (the top-5 redemption register) — each a secondary
+        // domain here. All three are soft-checked today and degrade to an
+        // empty/no-data read (lost enrichment, the established "no data
+        // yet" response shape, or "no shareholder register") rather than
+        // hard-gating the whole endpoint on a grant this route doesn't
+        // declare. Task 11 owns turning that silent degrade into an
+        // explicit unavailable/degraded marker in the response — see the
+        // VERDICT-FALSIFICATION comment on `refs_all` in handlers/limits.rs.
         .protected("/api/portfolios/{id}/metrics/liquidity", get(handlers::limits::liquidity_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/rates", get(handlers::limits::rates_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/derivatives", get(handlers::limits::derivatives_h), Domain::Positions, Action::View)

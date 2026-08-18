@@ -78,6 +78,10 @@ pub async fn assemble(
     // Reference is a secondary domain here (this route is gated on
     // Positions) — see routes.rs's comment on this route: `contracts_all`
     // and `emir_kpis_all` degrade to empty rather than gating the endpoint.
+    // VERDICT-FALSIFICATION (Task 11): a denied Reference read degrades to
+    // empty contract specs, which renders every clearing-obligation verdict
+    // "ok" and flows into the EMIR export as a pass. Task 11 must replace
+    // this with an explicit unavailable status and refuse the export.
     let specs = match scoped.authorize_global::<Reference, View>() {
         Ok(rv) => scoped.contracts_all(&rv).await?,
         Err(_) => Vec::new(),

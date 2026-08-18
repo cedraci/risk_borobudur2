@@ -105,18 +105,25 @@ pub async fn upload_ctd(
 
         let date = rows[0].nav_date;
         // Positions is a secondary domain here (this route is gated on
-        // MarketData): the known-tickers cross-check degrades to "nothing
-        // known" — which surfaces as every row being unknown — for a
-        // principal without a separate Positions grant, rather than
-        // failing the whole upload outright.
-        let known = match scoped.authorize::<Positions, View>(pid) {
-            Ok(pv) => scoped.positions_for(&pv, date).await?,
+        // MarketData): the known-tickers cross-check reads it softly rather
+        // than hard-authorizing, so a denial is reported in the response as
+        // its own reason instead of a generic "no snapshot" that would also
+        // be shown for a portfolio that genuinely has none yet — those are
+        // different problems with different fixes (grant a role vs. upload
+        // the NAV Recap first), and conflating them under one message was
+        // itself the bug.
+        let positions_access = scoped.authorize::<Positions, View>(pid);
+        let known = match &positions_access {
+            Ok(pv) => scoped.positions_for(pv, date).await?,
             Err(_) => Vec::new(),
         };
         if known.is_empty() {
-            return Err(AppError::Unprocessable(format!(
-                "no NAV snapshot for {date}; upload the NAV Recap first"
-            )));
+            let reason = match &positions_access {
+                Err(d) => format!(
+                    "cannot verify futures tickers against the {date} snapshot: {}", d.reason()),
+                Ok(_) => format!("no NAV snapshot for {date}; upload the NAV Recap first"),
+            };
+            return Err(AppError::Unprocessable(reason));
         }
         let tickers: Vec<&str> = known
             .iter()

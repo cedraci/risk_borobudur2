@@ -31,6 +31,10 @@ async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q:
         Some(d) => scoped.positions_for(a, d).await?,
         None => Vec::new(),
     };
+    // VERDICT-FALSIFICATION (Task 11): a denied Reference read drops
+    // issuer-group overrides, silently hiding 5/10/40 breaches with no
+    // marker in the output. Task 11 must surface an explicit
+    // unavailable/degraded status here.
     let refs = match scoped.authorize_global::<Reference, View>() {
         Ok(rv) => scoped.refs_all(&rv).await?,
         Err(_) => Vec::new(),

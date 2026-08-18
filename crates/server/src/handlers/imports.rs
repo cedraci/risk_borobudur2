@@ -45,6 +45,18 @@ fn err_msg(e: AppError) -> String {
     }
 }
 
+/// Renders an authorization denial for a per-file import result without
+/// naming the target portfolio or revealing whether it exists or is
+/// archived. `Denied::reason()` already renders identically for
+/// `OutOfScope` and `NotGranted` (both "not permitted: {domain}"), so a
+/// principal outside a portfolio's scope entirely cannot distinguish "that
+/// portfolio doesn't exist" from "it exists but I can't touch it" — the same
+/// non-disclosure a 404 gives at the route level, reproduced here at the
+/// per-file level since a per-file result can't itself carry an HTTP status.
+fn import_denied_msg(filename: &str, d: &db::auth::Denied) -> String {
+    format!("not permitted to import {filename:?}: {}", d.reason())
+}
+
 /// Multi-file upload. The URL portfolio is where non-identifying files
 /// (NAV Recap) land, and must be active — 404/409 up front, preserving the
 /// existing single-file contract. Self-identifying files (CACEIS) route by
@@ -97,8 +109,12 @@ async fn import_one(scoped: &Scoped<'_>, selected: &db::repo::Portfolio, filenam
     r.kind = Some(kind_label(id.kind).to_string());
 
     // Route: self-identifying files by code lookup; others to the URL portfolio.
-    let (target_id, target_name) = match &id.fund_code {
-        None => (selected.id, selected.name.clone()),
+    // Only the id is resolved here — NOT the row (name, archived state):
+    // reading the row before authorization is exactly the leak this ordering
+    // fixes (see the comment on the authorize block below), so resolution
+    // stays limited to the bare id until every Import token is proven.
+    let target_id = match &id.fund_code {
+        None => selected.id,
         Some((source, code)) => {
             let ref_view = match scoped.authorize_global::<Reference, View>() {
                 Ok(a) => a,
@@ -111,32 +127,45 @@ async fn import_one(scoped: &Scoped<'_>, selected: &db::repo::Portfolio, filenam
                         "unknown {source} code {code:?} — map it to a portfolio in the Portfolios panel, then re-upload"));
                     return r;
                 }
-                Ok(Some(tid)) => match super::portfolios::ensure(scoped, tid, true).await {
-                    Ok(p) => (p.id, p.name),
-                    Err(e) => { r.error = Some(err_msg(e)); return r; }
-                },
+                Ok(Some(tid)) => tid,
             }
         }
     };
-    r.portfolio_id = Some(target_id);
-    r.portfolio_name = Some(target_name);
 
     // Authorize the domains this batch actually writes, against the portfolio
     // it actually targets — not just the coarse URL-level gate checked above.
     // A principal who may import into the URL portfolio but not this file's
     // resolved target is refused for this file alone; siblings still run.
+    //
+    // This runs BEFORE any existence/archived check (`ensure`, below): a
+    // self-identifying file can route to a portfolio the caller has no grant
+    // on at all, and `ensure`'s errors name the portfolio and its archived
+    // state (`"portfolio 'X' is archived"`). Resolving existence first would
+    // let an out-of-scope principal learn a target portfolio's name — and
+    // whether it exists at all — just by uploading a file coded to it. Only
+    // once every token is proven does this handler touch the row at all.
     let positions_a = match scoped.authorize::<Positions, Import>(target_id) {
         Ok(a) => a,
-        Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+        Err(d) => { r.error = Some(import_denied_msg(&filename, &d)); return r; }
     };
     let nav_a = match scoped.authorize::<Nav, Import>(target_id) {
         Ok(a) => a,
-        Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+        Err(d) => { r.error = Some(import_denied_msg(&filename, &d)); return r; }
     };
     let transactions_a = match scoped.authorize::<Transactions, Import>(target_id) {
         Ok(a) => a,
-        Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+        Err(d) => { r.error = Some(import_denied_msg(&filename, &d)); return r; }
     };
+
+    // Existence + archived guard, now that authorization has already proven
+    // the principal may act on this portfolio — the row (name included) is
+    // only ever read, and only ever put in the response, after that proof.
+    let target = match super::portfolios::ensure(scoped, target_id, true).await {
+        Ok(p) => p,
+        Err(e) => { r.error = Some(err_msg(e)); return r; }
+    };
+    r.portfolio_id = Some(target.id);
+    r.portfolio_name = Some(target.name);
 
     let batch = match ingest::adapter::parse(id.kind, &filename, bytes) {
         Ok(b) => b,

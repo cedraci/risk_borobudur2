@@ -9,6 +9,10 @@ const HISTOVL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixt
 const JOURSR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/caceis_joursr.csv");
 
 fn multi_upload_req(uri: &str, files: &[(&str, &[u8])]) -> Request<Body> {
+    multi_upload_req_with_cookie(uri, files, None)
+}
+
+fn multi_upload_req_with_cookie(uri: &str, files: &[(&str, &[u8])], cookie: Option<&str>) -> Request<Body> {
     let mut body = Vec::new();
     for (filename, bytes) in files {
         body.extend_from_slice(format!(
@@ -18,9 +22,10 @@ fn multi_upload_req(uri: &str, files: &[(&str, &[u8])]) -> Request<Body> {
         body.extend_from_slice(b"\r\n");
     }
     body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
-    Request::post(uri)
-        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
-        .body(Body::from(body)).unwrap()
+    let mut b = Request::post(uri)
+        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"));
+    if let Some(c) = cookie { b = b.header("cookie", c); }
+    b.body(Body::from(body)).unwrap()
 }
 
 async fn json_of(res: axum::response::Response) -> serde_json::Value {
@@ -187,6 +192,99 @@ async fn joursrlux_routes_by_fund_code_like_hisinvlux() {
     assert!(body[0]["error"].is_null(), "{body}");
     assert_eq!(body[0]["portfolio_id"].as_i64().unwrap(), pid2, "{body}");
     assert!(body[0]["outcome"]["import_id"].is_i64(), "{body}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Task-9 review round 1, finding 1: a self-identifying (CACEIS) file can
+/// resolve to a portfolio the uploading principal has no grant on at all.
+/// Before the fix, `ensure()` ran before authorization, so its "portfolio
+/// 'X' is archived" / existence errors could leak that portfolio's name and
+/// archived state to a principal with zero visibility into it. This pins
+/// the fixed order (authorize all three Import tokens against the resolved
+/// target FIRST, only then read/report the row) end to end over the real
+/// HTTP surface, with a server-mode (non-desktop) scoped principal — and
+/// that a sibling file coded to the principal's own granted portfolio still
+/// imports successfully in the same request.
+#[tokio::test]
+async fn caceis_file_coded_to_an_ungranted_portfolio_is_refused_without_leaking_its_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let pool = db::connect(&edb.url).await.unwrap();
+    let app = server::routes::router(server::state::AppState::server(pool.clone()));
+
+    // Portfolio A (the principal's own, granted) and portfolio B (given a
+    // deliberately distinctive name — the assertion below is that this
+    // exact string never appears anywhere in the response), NOT granted to
+    // the principal in any domain.
+    let a_id: i64 = sqlx::query_scalar(
+        "INSERT INTO portfolios (name, kind) VALUES ('Mine', 'mandate') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let b_id: i64 = sqlx::query_scalar(
+        "INSERT INTO portfolios (name, kind) VALUES ('Confidential Fund B', 'mandate') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO portfolio_codes (portfolio_id, source, code) VALUES ($1, 'caceis', '165878')")
+        .bind(b_id).execute(&pool).await.unwrap();
+
+    // A principal scoped to A's three import domains, plus a wildcard
+    // Reference/View grant (needed to resolve the CACEIS code at all) — but
+    // no grant of any kind, on any domain, for B.
+    let hash = server::auth::local::hash_password("pw").unwrap();
+    let admin = db::admin::Admin::new(&pool);
+    let uid = admin.create_user("scoped@f.lu", "Scoped", &hash, false).await.unwrap();
+    for g in [
+        db::auth::Grant { domain: db::auth::Domain::Positions, action: db::auth::Action::Import, portfolio: Some(a_id) },
+        db::auth::Grant { domain: db::auth::Domain::Nav, action: db::auth::Action::Import, portfolio: Some(a_id) },
+        db::auth::Grant { domain: db::auth::Domain::Transactions, action: db::auth::Action::Import, portfolio: Some(a_id) },
+        db::auth::Grant { domain: db::auth::Domain::Reference, action: db::auth::Action::View, portfolio: None },
+    ] {
+        admin.grant_add(uid, g, None).await.unwrap();
+    }
+    let token = "scoped-token";
+    admin.session_create(&server::auth::local::token_hash(token), uid, 1).await.unwrap();
+    let cookie = format!("borobudur_session={token}");
+
+    let hisinv = std::fs::read(HISINV).unwrap();
+    let sample = std::fs::read(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
+
+    // One file coded to B (out of scope), one non-identifying file that
+    // lands at the URL portfolio A (granted) — uploaded through A's URL in
+    // the same request.
+    let req = multi_upload_req_with_cookie(
+        &format!("/api/portfolios/{a_id}/imports"),
+        &[
+            ("HISINVLUX_165878_20260807_20260810130151.csv", &hisinv),
+            ("sample.xlsx", &sample),
+        ],
+        Some(&cookie),
+    );
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_of(res).await;
+
+    // B's name must not appear anywhere in the response body — not in the
+    // refused file's error message, not in any other field.
+    assert!(!body.to_string().contains("Confidential Fund B"), "{body}");
+
+    let items = body.as_array().unwrap();
+    let hisinv_result = items.iter()
+        .find(|i| i["filename"] == "HISINVLUX_165878_20260807_20260810130151.csv")
+        .unwrap();
+    assert!(hisinv_result["error"].as_str().is_some(), "expected a per-file refusal: {hisinv_result}");
+    assert!(hisinv_result["portfolio_id"].is_null(),
+        "an out-of-scope target's id must not be surfaced either: {hisinv_result}");
+    assert!(hisinv_result["portfolio_name"].is_null(), "{hisinv_result}");
+    assert!(hisinv_result["outcome"].is_null(), "{hisinv_result}");
+
+    // The sibling file (no fund code -> lands at the URL portfolio A, which
+    // this principal IS granted on) must still import successfully — a
+    // denial on one file's resolved target does not abort the batch.
+    let sample_result = items.iter().find(|i| i["filename"] == "sample.xlsx").unwrap();
+    assert!(sample_result["error"].is_null(), "{sample_result}");
+    assert_eq!(sample_result["portfolio_id"].as_i64().unwrap(), a_id, "{sample_result}");
+    assert!(sample_result["outcome"]["import_id"].is_i64(), "{sample_result}");
 
     pool.close().await;
     edb.stop().await;
