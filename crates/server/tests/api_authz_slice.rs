@@ -75,6 +75,25 @@ async fn a_visible_portfolio_with_a_denied_domain_is_403() {
 }
 
 #[tokio::test]
+async fn a_portfolio_scoped_principal_is_403_on_a_global_route() {
+    let (app, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    // Only a portfolio-scoped grant — no wildcard, so it must not reach an
+    // instance-wide (`.protected_global`) route at all, regardless of domain
+    // match. `/api/refs/{code}` is instance-wide reference data, not scoped
+    // to any single portfolio.
+    let c = user_with(&pool, &[Grant { domain: Domain::Reference, action: Action::Configure, portfolio: Some(pid) }]).await;
+    let req = Request::put("/api/refs/SOMECODE")
+        .header("cookie", &c)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let status = app.clone().oneshot(req).await.unwrap().status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    edb.stop().await;
+}
+
+#[tokio::test]
 async fn desktop_mode_reaches_everything_without_a_cookie() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();

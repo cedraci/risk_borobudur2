@@ -14,19 +14,26 @@ pub fn router(state: AppState) -> Router {
         .public("/api/login", axum::routing::post(handlers::session::login))
         .public("/api/logout", axum::routing::post(handlers::session::logout))
         .public("/api/me", get(handlers::session::me))
-        .protected("/api/refs", get(handlers::refs::list), Domain::Reference, Action::View)
-        .protected("/api/refs/{code}", axum::routing::put(handlers::refs::put), Domain::Reference, Action::Configure)
-        .protected("/api/futures-contracts", get(handlers::futures::contracts), Domain::Reference, Action::View)
-        .protected("/api/futures-contracts/{root}", axum::routing::put(handlers::futures::put_contract), Domain::Reference, Action::Configure)
-        // Bloomberg endpoints hold the fleet's third-party licensed data —
-        // the spec places "Bloomberg ADV" under `market_data` alongside
-        // `fx_history`/`futures_analytics`.
-        .protected("/api/bloomberg/request", get(handlers::bloomberg::request), Domain::MarketData, Action::Export)
-        .protected("/api/bloomberg/adv-request", get(handlers::bloomberg::adv_request), Domain::MarketData, Action::Export)
-        .protected("/api/bloomberg/adv-due", get(handlers::bloomberg::adv_due), Domain::MarketData, Action::View)
-        .protected("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload), Domain::MarketData, Action::Import)
-        .protected("/api/portfolios", get(handlers::portfolios::list), Domain::Reference, Action::View)
-        .protected("/api/portfolios", axum::routing::post(handlers::portfolios::create), Domain::Reference, Action::Configure)
+        .protected_global("/api/refs", get(handlers::refs::list), Domain::Reference, Action::View)
+        .protected_global("/api/refs/{code}", axum::routing::put(handlers::refs::put), Domain::Reference, Action::Configure)
+        .protected_global("/api/futures-contracts", get(handlers::futures::contracts), Domain::Reference, Action::View)
+        .protected_global("/api/futures-contracts/{root}", axum::routing::put(handlers::futures::put_contract), Domain::Reference, Action::Configure)
+        // `request`/`adv-request` iterate every portfolio's positions and NAV
+        // to build a fleet-wide holdings workbook — gating them on
+        // `market_data` alone would let an instance-wide market-data grant
+        // with zero positions grants extract every fund's holdings. Gated on
+        // `positions` instead; the reference/market_data data they also read
+        // is secondary — Task 11's worklist.
+        .protected_global("/api/bloomberg/request", get(handlers::bloomberg::request), Domain::Positions, Action::Export)
+        .protected_global("/api/bloomberg/adv-request", get(handlers::bloomberg::adv_request), Domain::Positions, Action::Export)
+        // adv-due's counts are also derived from fleet-wide position data
+        // even though the primary gate stays `market_data` (it discloses
+        // counts only, not the holdings themselves); that extra domain isn't
+        // gated here — Task 11's secondary-domain worklist.
+        .protected_global("/api/bloomberg/adv-due", get(handlers::bloomberg::adv_due), Domain::MarketData, Action::View)
+        .protected_global("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload), Domain::MarketData, Action::Import)
+        .protected_global("/api/portfolios", get(handlers::portfolios::list), Domain::Reference, Action::View)
+        .protected_global("/api/portfolios", axum::routing::post(handlers::portfolios::create), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}", axum::routing::put(handlers::portfolios::update), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}/codes", get(handlers::portfolios::codes_list), Domain::Reference, Action::View)
         .protected("/api/portfolios/{id}/codes", axum::routing::put(handlers::portfolios::codes_put), Domain::Reference, Action::Configure)
@@ -40,7 +47,12 @@ pub fn router(state: AppState) -> Router {
         // once (Task 6's table: "multi (see Task 9)"). `positions` is the
         // interim router-level gate — the core holdings picture every
         // ingest adapter writes — until Task 9 checks `import` on each
-        // domain the batch actually touches.
+        // domain the batch actually touches. Self-identifying (CACEIS) files
+        // resolve their own target portfolio via `portfolio_by_code` inside
+        // the handler and write to THAT portfolio without ever being
+        // authorized against it — this gate only checks the URL `{id}`.
+        // Task 9 must authorize each resolved `target_id`, not just the URL
+        // id, for every domain the batch writes.
         .protected("/api/portfolios/{id}/imports", axum::routing::post(handlers::imports::upload), Domain::Positions, Action::Import)
         .protected("/api/portfolios/{id}/nav", get(handlers::data::nav), Domain::Nav, Action::View)
         .protected("/api/portfolios/{id}/positions", get(handlers::data::positions), Domain::Positions, Action::View)
@@ -57,7 +69,14 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/metrics/rates", get(handlers::limits::rates_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/derivatives", get(handlers::limits::derivatives_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/backtest", get(handlers::metrics::backtest), Domain::Nav, Action::View)
+        // P&L also reads transaction-level trade history (`operations_all`)
+        // to decompose flows; that extra domain isn't gated here — Task 11's
+        // secondary-domain worklist.
         .protected("/api/portfolios/{id}/pnl", get(handlers::pnl::get), Domain::Positions, Action::View)
+        // EMIR also reads futures contract specs and counterparty/OTC
+        // classification data (`contracts_all`, `emir_kpis_all` — reference);
+        // that extra domain isn't gated here — Task 11's secondary-domain
+        // worklist.
         .protected("/api/portfolios/{id}/emir", get(handlers::emir::get), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/emir/kpis/{month}", axum::routing::put(handlers::emir::put_kpi), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}/emir/export", get(handlers::emir::export), Domain::Positions, Action::Export)

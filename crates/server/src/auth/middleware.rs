@@ -22,8 +22,9 @@ pub async fn resolve_principal(
     Ok(next.run(req).await)
 }
 
-/// Enforces one route's declared primary requirement. Attached per route by
-/// `.protected`.
+/// Enforces one route's declared primary requirement on a portfolio-scoped
+/// route. Attached per route by `.protected`, which requires `{id}` in the
+/// route's path — scope is declared at the call site, never inferred here.
 pub async fn require(
     domain: Domain, action: Action, req: Request, next: Next,
 ) -> Result<Response, AppError> {
@@ -44,6 +45,27 @@ pub async fn require(
             Some(id) if !ctx.grants.any_domain_on(id) => db::auth::DeniedKind::OutOfScope,
             _ => db::auth::DeniedKind::NotGranted,
         },
+    }))
+}
+
+/// Enforces one route's declared primary requirement on an instance-wide
+/// route. Attached per route by `.protected_global` — never reads path
+/// params, so a `{id}` segment that happens to name something other than a
+/// portfolio (a future `/api/admin/users/{id}`, say) cannot be mistaken for
+/// portfolio scope. Mirrors `Scoped::global_denial`: there is no "out of
+/// scope" for an instance-wide resource, only granted or not.
+pub async fn require_global(
+    domain: Domain, action: Action, req: Request, next: Next,
+) -> Result<Response, AppError> {
+    let ctx = req.extensions().get::<AuthCtx>().cloned().ok_or(AppError::Unauthenticated)?;
+    if ctx.grants.allows(domain, action, None) {
+        return Ok(next.run(req).await);
+    }
+    Err(AppError::Forbidden(db::auth::Denied {
+        domain,
+        action,
+        portfolio: None,
+        kind: db::auth::DeniedKind::NotGranted,
     }))
 }
 
