@@ -27,10 +27,6 @@ impl Db {
         Ok(Db { pool: connect(url).await? })
     }
 
-    pub fn from_pool(pool: PgPool) -> Db {
-        Db { pool }
-    }
-
     pub fn admin(&self) -> crate::admin::Admin<'_> {
         crate::admin::Admin::new(self.pool())
     }
