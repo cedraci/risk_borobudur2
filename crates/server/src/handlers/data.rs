@@ -1,12 +1,17 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::NaiveDate;
+use db::auth::marker::{Nav, Positions, View};
+use db::auth::AuthCtx;
 
-pub async fn nav(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::NavRow>>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    Ok(Json(db::repo::nav_rows(&st.pool, pid).await?))
+pub async fn nav(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>,
+) -> Result<Json<Vec<db::repo::NavRow>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Nav, View>(pid)?;
+    Ok(Json(scoped.nav_rows(&a).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -22,18 +27,18 @@ pub struct PositionsResponse {
 }
 
 pub async fn positions(
-    State(st): State<AppState>,
-    Path(pid): Path<i64>,
-    Query(q): Query<PositionsQuery>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path(pid): Path<i64>, Query(q): Query<PositionsQuery>,
 ) -> Result<Json<PositionsResponse>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    let dates = db::repo::position_dates(&st.pool, pid).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    let dates = scoped.position_dates(&a).await?;
     let date = match q.date {
         Some(s) => Some(s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?),
         None => dates.first().copied(),
     };
     let rows = match date {
-        Some(d) => db::repo::positions_for(&st.pool, pid, d).await?,
+        Some(d) => scoped.positions_for(&a, d).await?,
         None => Vec::new(),
     };
     Ok(Json(PositionsResponse { dates, date, rows }))

@@ -1,3 +1,6 @@
+use crate::auth::marker::{Positions, View};
+use crate::auth::Access;
+use crate::scoped::Scoped;
 use chrono::NaiveDate;
 use sqlx::PgPool;
 
@@ -27,6 +30,7 @@ pub struct DividendRecord {
     pub currency: String,
 }
 
+#[deprecated(note = "migrating to Scoped in Task 9")]
 pub async fn position_dates(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<NaiveDate>> {
     Ok(sqlx::query_scalar(
         "SELECT DISTINCT nav_date FROM position_snapshots WHERE portfolio_id = $1 ORDER BY nav_date DESC",
@@ -36,6 +40,7 @@ pub async fn position_dates(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<
     .await?)
 }
 
+#[deprecated(note = "migrating to Scoped in Task 9")]
 pub async fn positions_for(pool: &PgPool, portfolio_id: i64, date: NaiveDate) -> anyhow::Result<Vec<PositionRecord>> {
     Ok(sqlx::query_as(
         "SELECT nav_date, asset_type, isin, name, currency,
@@ -49,6 +54,34 @@ pub async fn positions_for(pool: &PgPool, portfolio_id: i64, date: NaiveDate) ->
     .bind(date)
     .fetch_all(pool)
     .await?)
+}
+
+impl<'a> Scoped<'a> {
+    pub async fn position_dates(&self, a: &Access<Positions, View>) -> anyhow::Result<Vec<NaiveDate>> {
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT nav_date FROM position_snapshots WHERE portfolio_id = $1 ORDER BY nav_date DESC",
+        )
+        .bind(a.portfolio_id())
+        .fetch_all(self.pool)
+        .await?)
+    }
+
+    pub async fn positions_for(
+        &self, a: &Access<Positions, View>, date: NaiveDate,
+    ) -> anyhow::Result<Vec<PositionRecord>> {
+        Ok(sqlx::query_as(
+            "SELECT nav_date, asset_type, isin, name, currency,
+                    quantity::float8 AS quantity, avg_cost::float8 AS avg_cost, price::float8 AS price,
+                    valuation_ccy::float8 AS valuation_ccy, accrued_interest::float8 AS accrued_interest,
+                    fx_rate::float8 AS fx_rate, valuation_eur::float8 AS valuation_eur,
+                    weight::float8 AS weight, ticker
+             FROM position_snapshots WHERE portfolio_id = $1 AND nav_date = $2 ORDER BY id",
+        )
+        .bind(a.portfolio_id())
+        .bind(date)
+        .fetch_all(self.pool)
+        .await?)
+    }
 }
 
 pub async fn dividends_all(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<DividendRecord>> {

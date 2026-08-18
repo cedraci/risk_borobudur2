@@ -2,6 +2,7 @@ pub mod admin;
 pub mod auth;
 pub mod embedded;
 pub mod repo;
+pub mod scoped;
 pub mod settings;
 
 use sqlx::postgres::PgPoolOptions;

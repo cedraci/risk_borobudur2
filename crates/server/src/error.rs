@@ -11,6 +11,7 @@ pub enum AppError {
     Conflict(String),
     Unauthenticated,
     LockedOut(u64),
+    Forbidden(db::auth::Denied),
 }
 
 impl From<anyhow::Error> for AppError {
@@ -22,6 +23,12 @@ impl From<anyhow::Error> for AppError {
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         AppError::Internal(e.into())
+    }
+}
+
+impl From<db::auth::Denied> for AppError {
+    fn from(d: db::auth::Denied) -> Self {
+        AppError::Forbidden(d)
     }
 }
 
@@ -83,6 +90,18 @@ impl IntoResponse for AppError {
                                         "detail": "too many failed sign-in attempts"})),
             )
                 .into_response(),
+            AppError::Forbidden(d) => match d.kind {
+                db::auth::DeniedKind::OutOfScope => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"title": "Not Found", "status": 404, "detail": "no such portfolio"})),
+                ).into_response(),
+                db::auth::DeniedKind::NotGranted => (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"title": "Forbidden", "status": 403,
+                        "detail": d.reason(), "domain": d.domain.as_str(), "action": d.action.as_str(),
+                        "portfolio_id": d.portfolio})),
+                ).into_response(),
+            },
         }
     }
 }

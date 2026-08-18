@@ -35,8 +35,10 @@ fn err_msg(e: AppError) -> String {
         AppError::Internal(e) => e.to_string(),
         AppError::BadRequest(m) | AppError::Unprocessable(m) | AppError::NotFound(m) | AppError::Conflict(m) => m,
         AppError::UnprocessableRows(rows) => format!("{} row error(s)", rows.len()),
-        // `ensure()` cannot produce these — session-only variants, unreachable here.
+        // `ensure()` cannot produce these — session-only and authz variants,
+        // unreachable here.
         AppError::Unauthenticated | AppError::LockedOut(_) => "unauthenticated".to_string(),
+        AppError::Forbidden(d) => d.reason(),
     }
 }
 
