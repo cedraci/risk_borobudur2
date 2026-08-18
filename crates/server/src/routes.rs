@@ -85,11 +85,19 @@ pub fn router(state: AppState) -> Router {
         // `snapshot` helper), Nav (AUM at the snapshot date) and
         // Shareholders (the top-5 redemption register) — each a secondary
         // domain here, soft-checked rather than hard-gating the whole
-        // endpoint on a grant this route doesn't declare. Reference and Nav
-        // still degrade to lost enrichment / the established "no data yet"
-        // shape (neither one flips a verdict from breach to pass — see
-        // Task 11's report). Shareholders is the one that feeds a pass/fail
-        // scenario status: a denied grant now reports the top-5 scenario
+        // endpoint on a grant this route doesn't declare. All three can
+        // flip a scenario's status: Reference is the sharpest case — a
+        // denied grant drops every position's ADV/liquidity-days override,
+        // `build_positions` falls back to `liquidity_default_days` (1 day
+        // for equities), and a holding that measures tens-of-days liquid
+        // reports same-week liquid, which can flip a scenario from breach to
+        // ok behind nothing but a `"no adv"` fallback reason (Task 9 review
+        // round 1, Task 11's report). `liquidity_h` now carries an
+        // `issuer_overrides` marker (mirroring concentration_h's) and a
+        // `nav_status` marker distinguishing a denied Nav grant
+        // ("not permitted: NAV history") from a genuinely empty one ("no NAV
+        // data"). Shareholders is the one that feeds a pass/fail scenario
+        // status directly: a denied grant reports the top-5 scenario
         // `unavailable` with "not permitted: shareholder register",
         // distinguishable from the pre-existing "no shareholder register"
         // (register granted but never loaded) — see `liquidity_h`.

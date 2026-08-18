@@ -60,8 +60,15 @@ export default function BloombergPanel() {
             {result.classified} instrument(s) classified, {result.fx_rows} FX rate(s) stored,{" "}
             {result.adv_rows} ADV volume(s) stored.
           </p>
-          {result.skipped.length === 0 && result.fx_check.length === 0 && (
+          {result.skipped.length === 0 && result.fx_check.length === 0 && result.fx_check_skipped.length === 0 && (
             <p className="kpi-sub">No skipped cells and no FX cross-check drift.</p>
+          )}
+          {result.fx_check_skipped.length > 0 && (
+            <p className="warn-badge">
+              FX cross-check not run for {result.fx_check_skipped.length} portfolio(s) you cannot
+              view: {result.fx_check_skipped.map((s) => s.portfolio_name).join(", ")}. Absence of
+              drift above does not cover these.
+            </p>
           )}
           {result.skipped.length > 0 && (
             <>

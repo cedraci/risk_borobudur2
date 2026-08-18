@@ -72,14 +72,31 @@ pub async fn concentration_h(
     // breach behind a checks array that still reads "ok". Re-checked here
     // (not derived from `snapshot`'s soft-degrade) so a reader can always
     // tell "no breach" from "could not check the overrides".
-    let issuer_overrides = match scoped.authorize_global::<Reference, View>() {
-        Ok(_) => serde_json::json!({"status": "ok"}),
-        Err(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+    let reference_denied = scoped.authorize_global::<Reference, View>().err();
+    let issuer_overrides = match &reference_denied {
+        None => serde_json::json!({"status": "ok"}),
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
     };
+    // Round 1 review (Important 2): a per-check "ok"/"watch"/"breach" is a
+    // pass-adjacent value one field away from `issuer_overrides` — with the
+    // overrides denied, under-aggregation across issuers can hide a real
+    // breach, so no check (or row within it) may still present a computed
+    // status. Stamped here rather than in `analytics::concentration` itself,
+    // which has no notion of authorization.
+    let checks: Vec<serde_json::Value> = concentration(&cons).iter().map(|c| {
+        let mut v = serde_json::to_value(c).expect("Check always serializes");
+        if reference_denied.is_some() {
+            v["status"] = serde_json::json!("unavailable");
+            if let Some(rows) = v["rows"].as_array_mut() {
+                for r in rows.iter_mut() { r["status"] = serde_json::json!("unavailable"); }
+            }
+        }
+        v
+    }).collect();
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
-        "checks": concentration(&cons),
+        "checks": checks,
         "issuer_overrides": issuer_overrides,
         "excluded_note": "Futures are excluded from issuer limits (not issuer exposure under 5/10/40); fee and order provisions are excluded.",
     })))
@@ -131,6 +148,22 @@ pub async fn liquidity_h(
     let by = ref_map(&refs);
     let horizon = settings.liquidity_horizon_days;
 
+    // CRITICAL (Task 9 review round 1): `by` above silently drops every
+    // position's ADV/liquidity-days override when Reference is denied.
+    // `build_positions` then falls back to `liquidity_default_days` (1 day
+    // for equities — db/src/settings.rs), so a holding that measures
+    // tens-of-days liquid reports same-week liquid instead, and a scenario
+    // can flip from breach to ok with only a `"no adv"` fallback reason —
+    // which reads as missing data, not denial. Mirrors concentration_h's
+    // `issuer_overrides` marker: re-checked directly (not derived from
+    // `snapshot`'s soft-degrade) so a reader can tell "checked" from
+    // "computed on a denied read".
+    let reference_denied = scoped.authorize_global::<Reference, View>().err();
+    let issuer_overrides = match &reference_denied {
+        None => serde_json::json!({"status": "ok"}),
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+    };
+
     let params = serde_json::json!({
         "participation_rate": settings.participation_rate,
         "adv_stress_factor": settings.adv_stress_factor,
@@ -143,13 +176,25 @@ pub async fn liquidity_h(
 
     // Nav is a secondary domain here (this route is gated on Positions): a
     // principal without a separate Nav grant degrades to the same "no data
-    // yet" empty shape a portfolio with no NAV history at all would produce.
-    let nav_opt = match date {
+    // yet" empty shape a portfolio with no NAV history at all would
+    // produce. `nav_unavailable_reason` (Critical item 3, round 1 review)
+    // keeps those two cases distinguishable the same way
+    // `shareholders_denied_reason` does below: a denial reads "not
+    // permitted: NAV history", a genuinely absent row reads "no NAV data".
+    let (nav_opt, nav_unavailable_reason): (Option<f64>, Option<String>) = match date {
         Some(d) => match scoped.authorize::<Nav, View>(pid) {
-            Ok(nv) => scoped.aum_for(&nv, d).await?,
-            Err(_) => None,
+            Ok(nv) => {
+                let v = scoped.aum_for(&nv, d).await?;
+                let reason = if v.is_none() { Some("no NAV data".to_string()) } else { None };
+                (v, reason)
+            }
+            Err(denied) => (None, Some(denied.reason())),
         },
-        None => None,
+        None => (None, Some("no NAV data".to_string())),
+    };
+    let nav_status = match &nav_unavailable_reason {
+        None => serde_json::json!({"status": "ok"}),
+        Some(reason) => serde_json::json!({"status": "unavailable", "reason": reason}),
     };
 
     // An absent snapshot or NAV returns the established empty shape rather
@@ -159,6 +204,8 @@ pub async fn liquidity_h(
             "dates": dates, "date": date, "nav": null, "params": params,
             "coverage": serde_json::Value::Null, "asset": serde_json::Value::Null,
             "scenarios": [], "negative_memo": 0.0, "negative_memo_eur": 0.0,
+            "issuer_overrides": issuer_overrides,
+            "nav_status": nav_status,
         })));
     };
 
@@ -221,10 +268,19 @@ pub async fn liquidity_h(
         .clone()
         .unwrap_or_else(|| "no shareholder register".to_string());
 
-    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity], unavailable_reason: &str| -> serde_json::Value {
+    // `unavailable_reason` is `Option<&str>` rather than a bare `&str`: the
+    // "fixed"/"hybrid_fixed" scenarios pass `None` because their
+    // `required_pct` is always `Some` (the redemption shock always has a
+    // configured value) and the `None` branch below is therefore
+    // unreachable for them — an empty-string sentinel there could have
+    // silently shipped `reason: ""` if that ever stopped being true. `.expect`
+    // makes an actual regression fail loudly instead of shipping a blank
+    // reason.
+    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity], unavailable_reason: Option<&str>| -> serde_json::Value {
         let Some(pct) = required_pct else {
             return serde_json::json!({
-                "key": key, "status": "unavailable", "reason": unavailable_reason,
+                "key": key, "status": "unavailable",
+                "reason": unavailable_reason.expect("only top5/hybrid_top5 can be unavailable, and both pass a reason"),
             });
         };
         let required = pct * nav;
@@ -253,10 +309,10 @@ pub async fn liquidity_h(
     let top5 = (!register.is_empty()).then_some(top5_pct);
     let fixed = Some(settings.redemption_shock);
     let scenarios = vec![
-        scenario("top5", top5, &normal, &top5_unavailable_reason),
-        scenario("fixed", fixed, &normal, ""),
-        scenario("hybrid_top5", top5, &stressed, &top5_unavailable_reason),
-        scenario("hybrid_fixed", fixed, &stressed, ""),
+        scenario("top5", top5, &normal, Some(&top5_unavailable_reason)),
+        scenario("fixed", fixed, &normal, None),
+        scenario("hybrid_top5", top5, &stressed, Some(&top5_unavailable_reason)),
+        scenario("hybrid_fixed", fixed, &stressed, None),
     ];
 
     let measured_eur: f64 = normal.iter().filter(|c| c.measured).map(|c| c.valuation_eur).sum();
@@ -288,6 +344,8 @@ pub async fn liquidity_h(
         "scenarios": scenarios,
         "negative_memo": negative_memo,
         "negative_memo_eur": negative_eur,
+        "issuer_overrides": issuer_overrides,
+        "nav_status": nav_status,
     })))
 }
 

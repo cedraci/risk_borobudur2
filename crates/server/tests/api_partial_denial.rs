@@ -145,17 +145,10 @@ async fn concentration_is_unavailable_rather_than_a_pass_when_positions_are_deni
     // Grant positions/view on a DIFFERENT portfolio and re-check the same
     // portfolio: still 403. No computed result is ever produced from a
     // cross-portfolio grant.
-    let admin = db::admin::Admin::new(&pool);
-    // Look the user id back up via a fresh grant on `other`.
-    let cookie2 = {
-        let hash = server::auth::local::hash_password("pw").unwrap();
-        let id = admin.create_user("second@f.lu", "U", &hash, false).await.unwrap();
-        admin.grant_add(id, Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid) }, None).await.unwrap();
-        admin.grant_add(id, Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(other) }, None).await.unwrap();
-        let token = "second-token";
-        admin.session_create(&server::auth::local::token_hash(token), id, 1).await.unwrap();
-        format!("borobudur_session={token}")
-    };
+    let cookie2 = user_with(&pool, &[
+        Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(other) },
+    ]).await;
     assert_eq!(
         get(&server, &format!("/api/portfolios/{pid}/metrics/concentration"), Some(&cookie2)).await,
         StatusCode::FORBIDDEN
@@ -218,9 +211,21 @@ async fn concentration_marks_reference_overrides_unavailable_when_reference_is_d
     ]).await;
     let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/concentration"), Some(&cookie)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body["checks"].as_array().is_some(), "{body}");
     assert_eq!(body["issuer_overrides"]["status"], "unavailable", "{body}");
     assert_eq!(body["issuer_overrides"]["reason"], "not permitted: reference data", "{body}");
+
+    // Round 1 review (Important 2): a green check beside the marker is
+    // exactly the under-aggregation risk the marker exists to flag — no
+    // check's own status may still read "ok"/"watch"/"breach" (a pass-
+    // adjacent value) when the overrides behind its grouping were denied.
+    let checks = body["checks"].as_array().unwrap();
+    assert!(!checks.is_empty(), "{body}");
+    for c in checks {
+        assert_eq!(c["status"], "unavailable", "check {c} still carries a computed status");
+        for r in c["rows"].as_array().unwrap() {
+            assert_eq!(r["status"], "unavailable", "row {r} still carries a computed status");
+        }
+    }
 
     pool.close().await;
     edb.stop().await;
@@ -246,14 +251,28 @@ async fn emir_marks_clearing_obligation_unavailable_and_export_refuses_when_refe
     assert_eq!(body["clearing_obligation"]["status"], "unavailable", "{body}");
     assert_eq!(body["clearing_obligation"]["reason"], "not permitted: reference data", "{body}");
 
+    // Round 1 review (Important 2): a per-class "ok" verdict beside the
+    // marker is a pass value one field away from the denial — every class's
+    // own verdict must also read "unavailable", not the computed pass/fail
+    // the (empty, denied) contract specs happened to produce.
+    let classes = body["classes"].as_array().unwrap();
+    assert!(!classes.is_empty(), "{body}");
+    for c in classes {
+        assert_eq!(c["verdict"], "unavailable", "class {c} still carries a computed verdict");
+        assert!(c["avg_otc_eur"].is_null(), "class {c} still carries a computed avg_otc_eur");
+    }
+
     // Export refuses outright rather than emitting an evidence document
-    // whose verdicts were computed on a denied read.
+    // whose verdicts were computed on a denied read. `Denied::kind` is
+    // `NotGranted` here (the portfolio itself is visible via Positions), so
+    // this is a 403, not a 404 — DeniedKind exists precisely to make that
+    // distinction, so pin it exactly rather than merely "not 200".
     let cookie_export = user_with(&pool, &[
         Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
         Grant { domain: Domain::Positions, action: Action::Export, portfolio: Some(pid) },
     ]).await;
     let status = get(&server, &format!("/api/portfolios/{pid}/emir/export"), Some(&cookie_export)).await;
-    assert_ne!(status, StatusCode::OK, "export must refuse when its verdicts are built on a denied Reference read");
+    assert_eq!(status, StatusCode::FORBIDDEN, "export must refuse when its verdicts are built on a denied Reference read");
 
     pool.close().await;
     edb.stop().await;
@@ -293,6 +312,139 @@ async fn pnl_marks_transaction_detail_unavailable_when_transactions_are_denied()
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["transaction_detail"]["status"], "unavailable", "{body}");
     assert_eq!(body["transaction_detail"]["reason"], "not permitted: transactions", "{body}");
+
+    // Regression pin (round 1 review): the denial also surfaces in
+    // `warnings`, not only in the new `transaction_detail` field — a reader
+    // who only skims `warnings` (the pre-existing UI surface) must not miss
+    // that the reconciliation residual may be distorted by the denial.
+    let warnings = body["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap().contains("not permitted: transactions")),
+        "{body}"
+    );
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Critical (round 1 review): liquidity's `refs_all` degrade is verdict-
+/// falsifying, not merely lossy enrichment. With Reference denied, every
+/// position's ADV/liquidity-days override is dropped, `build_positions`
+/// falls back to `liquidity_default_days` (1 day for equities —
+/// db/src/settings.rs), and a holding that measures tens-of-days liquid
+/// reports same-week liquid instead — flipping a scenario from breach to
+/// ok with only a `"no adv"` fallback reason, which reads as missing data,
+/// not denial. The fix required here is the marker (mirroring
+/// concentration's `issuer_overrides`), not (yet) suppressing the
+/// scenario's own status — see the round-1 report for the reviewer's exact
+/// scope.
+#[tokio::test]
+async fn liquidity_marks_issuer_overrides_unavailable_when_reference_is_denied() {
+    let (desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    seed(&desktop, pid).await;
+
+    // Positions + market_data + shareholders + nav granted, but NOT
+    // Reference.
+    let cookie = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::MarketData, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Shareholders, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid) },
+    ]).await;
+
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/liquidity"), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issuer_overrides"]["status"], "unavailable", "{body}");
+    assert_eq!(body["issuer_overrides"]["reason"], "not permitted: reference data", "{body}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Critical item 3 (round 1 review): a denied Nav grant must be
+/// distinguishable from a genuinely empty NAV history — both currently
+/// collapse into the same "no data yet" empty shape.
+#[tokio::test]
+async fn liquidity_nav_denial_is_distinguishable_from_empty_nav_history() {
+    let (desktop, server, pool, edb) = app().await;
+
+    // (a) Nav granted, but the NAV history row for this date is genuinely
+    // absent — not a denial.
+    let pid_empty = portfolio(&pool, "Empty").await;
+    seed(&desktop, pid_empty).await;
+    sqlx::query("DELETE FROM nav_history WHERE portfolio_id = $1")
+        .bind(pid_empty).execute(&pool).await.unwrap();
+    let cookie_a = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid_empty) },
+        Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid_empty) },
+    ]).await;
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid_empty}/metrics/liquidity"), Some(&cookie_a)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["nav_status"]["status"], "unavailable", "{body}");
+    let reason_missing = body["nav_status"]["reason"].as_str().unwrap().to_string();
+
+    // (b) Nav denied outright, on a different portfolio whose NAV history
+    // is intact.
+    let pid_denied = portfolio(&pool, "Denied").await;
+    seed(&desktop, pid_denied).await;
+    let cookie_b = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid_denied) },
+    ]).await;
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid_denied}/metrics/liquidity"), Some(&cookie_b)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["nav_status"]["status"], "unavailable", "{body}");
+    let reason_denied = body["nav_status"]["reason"].as_str().unwrap().to_string();
+    assert_eq!(reason_denied, "not permitted: NAV history");
+
+    assert_ne!(reason_missing, reason_denied);
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Regression pin (round 1 review): `fx_check_skipped` was added but had no
+/// coverage. A portfolio the uploader cannot see (no Positions grant) must
+/// be named, not silently absent from the fleet-wide fx-drift check.
+#[tokio::test]
+async fn bloomberg_upload_names_a_positions_denied_portfolio_in_fx_check_skipped() {
+    let (desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    seed(&desktop, pid).await;
+
+    // Global MarketData/Import (the route's own gate), but no Positions
+    // grant on `pid` at all.
+    let cookie = user_with(&pool, &[
+        Grant { domain: Domain::MarketData, action: Action::Import, portfolio: None },
+    ]).await;
+
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let s = wb.add_worksheet().set_name("REFS").unwrap();
+    for (c, h) in ["isin", "ticker", "country_of_risk", "gics_sector", "gics_industry"].iter().enumerate() {
+        s.write_string(0, c as u16, *h).unwrap();
+    }
+    let bytes = wb.save_to_buffer().unwrap();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"resp.xlsx\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    ).as_bytes());
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let req = Request::post("/api/bloomberg/upload")
+        .header("cookie", &cookie)
+        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
+        .body(Body::from(body)).unwrap();
+    let res = server.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp_body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    let skipped = resp_body["fx_check_skipped"].as_array().unwrap();
+    assert!(
+        skipped.iter().any(|s| s["portfolio_id"] == pid && s["reason"] == "not permitted: positions"),
+        "{resp_body}"
+    );
 
     pool.close().await;
     edb.stop().await;

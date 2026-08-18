@@ -152,15 +152,37 @@ pub async fn get(
         return Ok(Json(serde_json::json!({"empty": true, "warnings": ["No snapshots imported yet."]})));
     };
     // Ruling 1 (Task 9 review, Task 11): a denied Reference read must not
-    // silently render every clearing-obligation verdict "ok". `classes` is
-    // still returned (it may be useful alongside the marker, e.g. to show
-    // which classes have zero OTC exposure from data that IS visible), but a
-    // reader must be told the verdicts were computed without any OTC
-    // classification at all when the read was denied.
+    // silently render every clearing-obligation verdict "ok". Every future
+    // with no resolvable spec falls back to `Category::Other` (see
+    // `future_positions`), so with `contracts_all` denied EVERY position in
+    // the fleet misclassifies into `CommodityOther` as well as defaulting
+    // `otc: false` — the misclassification taints `avg_total_eur` and
+    // `pct_of_threshold`, not only `avg_otc_eur`. Round 1 review (Important
+    // 2): a computed "ok" verdict or a computed number beside the
+    // `clearing_obligation` marker is still a pass-adjacent value one field
+    // away, so every class's verdict AND every one of its computed numbers
+    // are stamped unavailable/null here — only the static per-class shape
+    // (class/label/threshold_eur/month labels) survives.
     let clearing_obligation = match &a.contracts_denied {
         Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
         None => serde_json::json!({"status": "ok"}),
     };
+    let classes: Vec<serde_json::Value> = a.report.classes.iter().map(|c| {
+        let mut v = serde_json::to_value(c).expect("ClassReport always serializes");
+        if a.contracts_denied.is_some() {
+            v["verdict"] = serde_json::json!("unavailable");
+            v["avg_total_eur"] = serde_json::Value::Null;
+            v["avg_otc_eur"] = serde_json::Value::Null;
+            v["pct_of_threshold"] = serde_json::Value::Null;
+            if let Some(months) = v["months"].as_array_mut() {
+                for m in months.iter_mut() {
+                    m["total_eur"] = serde_json::Value::Null;
+                    m["otc_eur"] = serde_json::Value::Null;
+                }
+            }
+        }
+        v
+    }).collect();
     let kpis_status = match &a.kpis_denied {
         Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
         None => serde_json::json!({"status": "ok"}),
@@ -170,7 +192,7 @@ pub async fn get(
         "date": a.anchor,
         "months_present": a.report.months_present,
         "months_total": a.report.months_total,
-        "classes": a.report.classes,
+        "classes": classes,
         "clearing_obligation": clearing_obligation,
         "warnings": a.report.warnings,
         "monitors": a.monitors,

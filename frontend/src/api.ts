@@ -308,6 +308,9 @@ export const bloombergRequestUrl = "/api/bloomberg/request";
 export interface BloombergUpload {
   classified: number; fx_rows: number; adv_rows: number; skipped: RowError[];
   fx_check: { currency: string; date: string; workbook: number; bloomberg: number; drift: number }[];
+  // Portfolios the fx-drift cross-check could not walk because the uploader
+  // lacks Positions/View there — distinct from "checked, no drift found".
+  fx_check_skipped: { portfolio_id: number; portfolio_name: string; reason: string }[];
 }
 export const uploadBloomberg = (f: File) => {
   const fd = new FormData();
