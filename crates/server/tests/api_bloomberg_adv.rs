@@ -82,8 +82,9 @@ async fn set_adv_max_age_days(app: &axum::Router, pid: i64, days: u32) {
 async fn app_with_hisinv() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb, i64) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let res = app.clone().oneshot(
         Request::post("/api/portfolios")
@@ -225,8 +226,9 @@ async fn a_fresh_adv_drops_out_until_it_goes_stale() {
 async fn a_stricter_portfolios_threshold_is_not_overridden_by_a_looser_one_walked_first() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
     let bytes = std::fs::read(SAMPLE).unwrap();
 
     // Portfolio 1 (pre-existing, id 1) imports the sample workbook.

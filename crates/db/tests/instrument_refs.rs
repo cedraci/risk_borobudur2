@@ -10,8 +10,8 @@ fn fixture_bytes() -> Vec<u8> {
 async fn refs_upsert_seed_and_no_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let ref_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
@@ -84,8 +84,8 @@ async fn refs_upsert_seed_and_no_overwrite() {
 async fn bond_coupon_freq_accepts_quarterly_and_monthly() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let ref_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
@@ -121,8 +121,8 @@ async fn bond_coupon_freq_accepts_quarterly_and_monthly() {
 async fn liquidity_days_replaces_bucket_and_new_columns_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let ref_configure = scoped.authorize_global::<Reference, Configure>().unwrap();

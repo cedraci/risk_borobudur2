@@ -43,8 +43,9 @@ fn spec(cat: &str, pv: f64, ccy: &str, conv: &str) -> serde_json::Value {
 async fn rates_includes_bond_futures_when_ctd_present() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let wb = std::fs::read(SAMPLE).unwrap();
     assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
@@ -133,8 +134,9 @@ async fn rates_includes_bond_futures_when_ctd_present() {
 async fn a_future_with_no_spec_at_all_blocks_the_completeness_claim() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let wb = std::fs::read(SAMPLE).unwrap();
     assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);
@@ -194,8 +196,9 @@ async fn a_future_with_no_spec_at_all_blocks_the_completeness_claim() {
 async fn confirmed_non_rate_future_drops_out_of_rates_section() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let wb = std::fs::read(SAMPLE).unwrap();
     assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &wb)).await.unwrap().status(), StatusCode::OK);

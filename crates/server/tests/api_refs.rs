@@ -54,8 +54,9 @@ fn upload_req_to(uri: &str, bytes: &[u8]) -> Request<Body> {
 async fn refs_list_unions_instruments_held_only_by_another_portfolio() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     // Portfolio 1 stays empty for the whole test. The sample is imported
     // into portfolio 2 only — the editor context must still show its
@@ -91,8 +92,9 @@ async fn refs_list_unions_instruments_held_only_by_another_portfolio() {
 async fn refs_editor_flow() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     // empty DB -> empty list
     let (st, body) = get_json(&app, "/api/refs").await;

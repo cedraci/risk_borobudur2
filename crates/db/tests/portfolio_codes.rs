@@ -5,8 +5,8 @@ use db::auth::AuthCtx;
 async fn codes_roundtrip_and_uniqueness() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
 

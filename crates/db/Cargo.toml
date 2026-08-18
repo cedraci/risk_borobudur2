@@ -13,6 +13,11 @@ postgresql_embedded = "0.18"
 ingest = { path = "../ingest" }
 analytics = { path = "../analytics" }
 
+[features]
+test-util = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+trybuild = "1"
+db = { path = ".", features = ["test-util"] }

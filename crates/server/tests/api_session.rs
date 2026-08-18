@@ -6,9 +6,10 @@ use tower::util::ServiceExt;
 async fn server_app() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     std::mem::forget(dir);
-    let app = server::routes::router(server::state::AppState::server(pool.clone()));
+    let app = server::routes::router(server::state::AppState::server(dbh.clone()));
     (app, pool, edb)
 }
 
@@ -121,9 +122,9 @@ async fn logout_revokes_the_session_immediately() {
 async fn desktop_mode_needs_no_login_at_all() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
     std::mem::forget(dir);
-    let app = server::routes::router(server::state::AppState::desktop(pool));
+    let app = server::routes::router(server::state::AppState::desktop(dbh));
     let me = app.clone().oneshot(Request::get("/api/me").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(me.status(), StatusCode::OK);
     let body: serde_json::Value =

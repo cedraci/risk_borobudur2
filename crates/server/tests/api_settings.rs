@@ -6,8 +6,8 @@ use tower::util::ServiceExt;
 async fn test_app() -> (axum::Router, db::embedded::EmbeddedDb, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    (server::routes::router(server::state::AppState::desktop(pool)), edb, dir)
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    (server::routes::router(server::state::AppState::desktop(dbh)), edb, dir)
 }
 
 #[tokio::test]

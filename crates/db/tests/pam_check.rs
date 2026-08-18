@@ -53,8 +53,8 @@ const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtu
 async fn pam_check_distinguishes_incomplete_history_from_genuine_drift() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let p = scoped.authorize::<Positions, Import>(1).unwrap();

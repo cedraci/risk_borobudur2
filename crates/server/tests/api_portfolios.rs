@@ -6,8 +6,9 @@ use tower::util::ServiceExt;
 async fn app() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
     (app, pool, edb)
 }
 

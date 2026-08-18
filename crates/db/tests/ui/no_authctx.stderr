@@ -1,0 +1,21 @@
+warning: unreachable statement
+ --> tests/ui/no_authctx.rs:4:5
+  |
+2 |     let db: db::Db = unimplemented!();
+  |                      ---------------- any code following this expression is unreachable
+3 |     // No AuthCtx: there is no constructor for Scoped and no accessible pool.
+4 |     let _ = db.pool();
+  |     ^^^^^^^^^^^^^^^^^^ unreachable statement
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0624]: method `pool` is private
+ --> tests/ui/no_authctx.rs:4:16
+  |
+4 |     let _ = db.pool();
+  |                ^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  |     pub(crate) fn pool(&self) -> &PgPool {
+  |     ------------------------------------ private method defined here

@@ -29,6 +29,7 @@ rust-embed = "8"
 mime_guess = "2"
 
 [dev-dependencies]
+db = { path = "../db", features = ["test-util"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

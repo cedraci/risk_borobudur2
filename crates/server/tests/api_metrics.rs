@@ -29,8 +29,9 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Val
 async fn metrics_pipeline_on_sample() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     // empty state first
     let (st, body) = get_json(&app, "/api/portfolios/1/metrics/summary").await;

@@ -10,16 +10,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn desktop(pool: sqlx::PgPool) -> Self {
+    pub fn desktop(db: db::Db) -> Self {
         AppState {
-            db: Arc::new(db::Db::from_pool(pool)),
+            db: Arc::new(db),
             identity: Arc::new(DesktopSingleUser),
             mode: Mode::Desktop,
         }
     }
 
-    pub fn server(pool: sqlx::PgPool) -> Self {
-        let db = Arc::new(db::Db::from_pool(pool));
+    pub fn server(db: db::Db) -> Self {
+        let db = Arc::new(db);
         AppState {
             identity: Arc::new(LocalAccounts::new(db.clone())),
             db,

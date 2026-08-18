@@ -23,8 +23,8 @@ fn flow(date: NaiveDate, class: &str, outstanding: f64, nav: f64, sub: f64, red:
 async fn flows_upsert_is_idempotent_per_portfolio_date_and_share_class() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let import = scoped.authorize::<Shareholders, Import>(1).unwrap();
@@ -85,8 +85,8 @@ async fn import_batch_stores_flows_and_row_count() {
 
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let p = scoped.authorize::<Positions, Import>(1).unwrap();
@@ -142,8 +142,8 @@ async fn import_batch_stores_flows_and_row_count() {
 async fn shareholders_replace_is_transactional_and_ordered_largest_first() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let import = scoped.authorize::<Shareholders, Import>(1).unwrap();

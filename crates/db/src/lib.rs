@@ -8,7 +8,7 @@ pub mod settings;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
+pub(crate) async fn connect(url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new().max_connections(5).connect(url).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
@@ -36,6 +36,13 @@ impl Db {
     }
 
     pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Seeding helper for integration tests only. Not compiled into a release
+    /// build, so it cannot become a production escape hatch.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_pool(&self) -> &PgPool {
         &self.pool
     }
 }

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/wrong_domain.rs:7:29
+  |
+7 |     let _ = s.positions_for(&nav_token, chrono::NaiveDate::MIN).await;
+  |               ------------- ^^^^^^^^^^ expected `&Access<Positions, View>`, found `&Access<Nav, View>`
+  |               |
+  |               arguments to this method are incorrect
+  |
+  = note: expected reference `&Access<db::auth::marker::Positions, db::auth::marker::View>`
+             found reference `&Access<db::auth::marker::Nav, db::auth::marker::View>`
+note: method defined here
+ --> src/repo/positions.rs
+  |
+  |     pub async fn positions_for(
+  |                  ^^^^^^^^^^^^^

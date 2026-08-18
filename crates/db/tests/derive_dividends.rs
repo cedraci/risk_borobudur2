@@ -30,7 +30,8 @@ async fn derived_rows(pool: &sqlx::PgPool) -> Vec<(NaiveDate, String, f64, Strin
 async fn cpon_deltas_become_derived_dividends() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
 
     // Day 1 (baseline): a GBP receivable of 500 local and an equity (noise).
     seed_snapshot(&pool, "2026-08-05", &[
@@ -51,7 +52,6 @@ async fn cpon_deltas_become_derived_dividends() {
         ("Action", "FR0000000001", "EUR", 1000.0, 1000.0),
     ]).await;
 
-    let dbh = db::Db::from_pool(pool.clone());
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let a = scoped.authorize::<Positions, Import>(1).unwrap();

@@ -38,8 +38,9 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Val
 async fn upload_sample() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     assert_eq!(app.clone().oneshot(upload_req(&bytes)).await.unwrap().status(), StatusCode::OK);
@@ -231,8 +232,9 @@ async fn a_range_resolving_to_a_single_snapshot_reports_empty_with_a_reason() {
 async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let import_id: i64 = sqlx::query_scalar(
         "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts)
@@ -338,8 +340,9 @@ async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
 async fn duplicate_isin_receivable_rows_do_not_evict_the_instrument() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
 
     let import_id: i64 = sqlx::query_scalar(
         "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts)

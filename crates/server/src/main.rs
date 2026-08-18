@@ -25,8 +25,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let pool = db::connect(&url).await?;
-    let app = router(AppState::desktop(pool));
+    let dbh = db::Db::connect(&url).await?;
+    let app = router(AppState::desktop(dbh));
     if static_assets::assets_empty() {
         tracing::warn!("frontend assets are empty — build the frontend first (see build.ps1)");
     }

@@ -6,9 +6,10 @@ use db::auth::{Action, Domain, Grant};
 async fn app() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     std::mem::forget(dir);
-    let app = server::routes::router(server::state::AppState::server(pool.clone()));
+    let app = server::routes::router(server::state::AppState::server(dbh.clone()));
     (app, pool, edb)
 }
 
@@ -97,9 +98,10 @@ async fn a_portfolio_scoped_principal_is_403_on_a_global_route() {
 async fn desktop_mode_reaches_everything_without_a_cookie() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     std::mem::forget(dir);
-    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
+    let app = server::routes::router(server::state::AppState::desktop(dbh.clone()));
     let pid = portfolio(&pool, "F").await;
     assert_eq!(get(&app, &format!("/api/portfolios/{pid}/nav"), None).await, StatusCode::OK);
     assert_eq!(get(&app, &format!("/api/portfolios/{pid}/positions"), None).await, StatusCode::OK);

@@ -8,8 +8,8 @@ fn d(y: i32, m: u32, dd: u32) -> NaiveDate { NaiveDate::from_ymd_opt(y, m, dd).u
 async fn fx_upsert_is_idempotent_and_readable() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
 
@@ -37,8 +37,8 @@ async fn fx_upsert_is_idempotent_and_readable() {
 async fn classify_upsert_never_overwrites_an_existing_value() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let configure = scoped.authorize_global::<Reference, Configure>().unwrap();

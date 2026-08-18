@@ -31,8 +31,8 @@ fn tokens(scoped: &db::scoped::Scoped<'_>, id: i64) -> (
 async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let (p, n, t) = tokens(&scoped, 1);
@@ -108,8 +108,8 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
 async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let (p, n, t) = tokens(&scoped, 1);
@@ -167,8 +167,8 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
 async fn nav_recap_replace_preserves_and_re_derives_dividends() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let (p, n, t) = tokens(&scoped, 1);
@@ -273,8 +273,8 @@ const HISINV_FNAME: &str = "HISINVLUX_165878_20260807_20260810130151.csv";
 async fn hisinv_facts_overwrite_on_reimport_but_never_touch_user_owned_columns() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let (p, n, t) = tokens(&scoped, 1);

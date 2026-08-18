@@ -19,8 +19,8 @@ fn futures_warnings(warnings: &[String]) -> Vec<&String> {
 async fn import_seeds_futures_contracts_unconfirmed() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let p = scoped.authorize::<Positions, Import>(1).unwrap();
@@ -75,8 +75,8 @@ async fn import_seeds_futures_contracts_unconfirmed() {
 async fn duplicate_import_seeds_specs_a_pre_existing_database_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let p = scoped.authorize::<Positions, Import>(1).unwrap();
@@ -136,8 +136,8 @@ async fn duplicate_import_seeds_specs_a_pre_existing_database_is_missing() {
 async fn reimport_warns_on_point_value_mismatch_and_never_overwrites() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
-    let dbh = db::Db::from_pool(pool.clone());
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let p = scoped.authorize::<Positions, Import>(1).unwrap();

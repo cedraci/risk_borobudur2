@@ -4,7 +4,7 @@ use db::auth::{Action, Domain, Grant, Role};
 async fn fresh() -> (sqlx::PgPool, db::embedded::EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let pool = db::connect(&edb.url).await.unwrap();
+    let pool = db::Db::connect(&edb.url).await.unwrap().test_pool().clone();
     std::mem::forget(dir);
     (pool, edb)
 }
