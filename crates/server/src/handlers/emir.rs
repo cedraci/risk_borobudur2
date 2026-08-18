@@ -7,8 +7,11 @@ use analytics::emir;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::{Datelike, NaiveDate};
+use db::auth::marker::{Configure, Export, Positions, Reference, View};
+use db::auth::{Access, AuthCtx};
+use db::scoped::Scoped;
 use ingest::emir_file;
 
 #[derive(serde::Deserialize)]
@@ -38,16 +41,13 @@ pub struct Assembly {
 /// One month-end's positions as EMIR sees them: the exposure path computes
 /// the EUR notional (aum is irrelevant here, pass 0.0 — pct_nav is unused),
 /// then each row picks up its contract's OTC flag by root.
-async fn emir_positions(
-    st: &AppState,
-    pid: i64,
-    date: NaiveDate,
+fn emir_positions(
+    rows: Vec<db::repo::PositionRecord>,
     specs: &[db::repo::FuturesContract],
-) -> Result<Vec<emir::EmirPosition>, AppError> {
-    let rows = db::repo::positions_for(&st.pool, pid, date).await?;
+) -> Vec<emir::EmirPosition> {
     let snap = super::limits::future_positions(&rows, specs);
     let rep = analytics::exposure(&snap.positions, 0.0);
-    Ok(rep
+    rep
         .rows
         .into_iter()
         .map(|r| {
@@ -62,22 +62,30 @@ async fn emir_positions(
                 unconfirmed: r.unconfirmed,
             }
         })
-        .collect())
+        .collect()
 }
 
-pub async fn assemble(st: &AppState, pid: i64, q_date: &Option<String>) -> Result<Option<Assembly>, AppError> {
-    let dates = db::repo::position_dates(&st.pool, pid).await?;
+pub async fn assemble(
+    scoped: &Scoped<'_>, a: &Access<Positions, View>, pid: i64, q_date: &Option<String>,
+) -> Result<Option<Assembly>, AppError> {
+    let dates = scoped.position_dates(a).await?;
     let anchor = match q_date {
         Some(s) => Some(s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?),
         None => dates.first().copied(),
     };
     let Some(anchor) = anchor else { return Ok(None) };
 
-    let specs = db::repo::contracts_all(&st.pool).await?;
+    // Reference is a secondary domain here (this route is gated on
+    // Positions) — see routes.rs's comment on this route: `contracts_all`
+    // and `emir_kpis_all` degrade to empty rather than gating the endpoint.
+    let specs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.contracts_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
     let mut months = Vec::with_capacity(12);
     for (month, chosen) in emir::month_window(anchor, &dates) {
         let snapshot = match chosen {
-            Some(d) => Some((d, emir_positions(st, pid, d, &specs).await?)),
+            Some(d) => Some((d, emir_positions(scoped.positions_for(a, d).await?, &specs))),
             None => None,
         };
         months.push(emir::MonthSnapshot { month, snapshot });
@@ -89,7 +97,7 @@ pub async fn assemble(st: &AppState, pid: i64, q_date: &Option<String>) -> Resul
     let monitors = emir::monitors(anchor_cell.as_ref().map(|(_, p)| p.as_slice()).unwrap_or(&[]));
     let (margin, futures_count) = match anchor_cell.as_ref().map(|(d, _)| *d) {
         Some(d) => {
-            let rows = db::repo::positions_for(&st.pool, pid, d).await?;
+            let rows = scoped.positions_for(a, d).await?;
             let margin = rows
                 .iter()
                 .filter(|r| r.asset_type == "Margin Acc")
@@ -107,17 +115,20 @@ pub async fn assemble(st: &AppState, pid: i64, q_date: &Option<String>) -> Resul
     };
 
     let report = emir::thresholds(&months);
-    let kpis = db::repo::emir_kpis_all(&st.pool, pid).await?;
+    let kpis = match scoped.authorize::<Reference, View>(pid) {
+        Ok(rv) => scoped.emir_kpis_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
     Ok(Some(Assembly { dates, anchor, report, monitors, margin, futures_count, kpis, contracts: specs }))
 }
 
 pub async fn get(
-    State(st): State<AppState>,
-    Path(pid): Path<i64>,
-    Query(q): Query<DateQuery>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    let Some(a) = assemble(&st, pid, &q.date).await? else {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let Some(a) = assemble(&scoped, &a, pid, &q.date).await? else {
         return Ok(Json(serde_json::json!({"empty": true, "warnings": ["No snapshots imported yet."]})));
     };
     Ok(Json(serde_json::json!({
@@ -137,12 +148,17 @@ pub async fn get(
 }
 
 pub async fn export(
-    State(st): State<AppState>,
-    Path(pid): Path<i64>,
-    Query(q): Query<DateQuery>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let portfolio = super::portfolios::ensure(&st.pool, pid, false).await?;
-    let Some(a) = assemble(&st, pid, &q.date).await? else {
+    let scoped = st.db.scope(&ctx);
+    // Export needs its own action authorized (routes.rs gates this route on
+    // Action::Export, not View); the reads inside `assemble` still take a
+    // View token, which the Export grant already implies (`GrantSet` adds
+    // the View entry alongside any non-View action).
+    scoped.authorize::<Positions, Export>(pid)?;
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    let portfolio = super::portfolios::ensure(&scoped, pid, false).await?;
+    let Some(a) = assemble(&scoped, &a, pid, &q.date).await? else {
         return Err(AppError::Unprocessable(
             "no snapshots imported yet; there is nothing to evidence".into(),
         ));
@@ -209,11 +225,12 @@ pub struct KpiBody {
 }
 
 pub async fn put_kpi(
-    State(st): State<AppState>,
-    Path((pid, month)): Path<(i64, String)>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path((pid, month)): Path<(i64, String)>,
     Json(b): Json<KpiBody>,
 ) -> Result<Json<db::repo::EmirKpi>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, true).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Reference, Configure>(pid)?;
+    super::portfolios::ensure(&scoped, pid, true).await?;
     let month = month
         .parse::<NaiveDate>()
         .map_err(|_| AppError::BadRequest(format!("bad month: {month}")))?;
@@ -235,6 +252,6 @@ pub async fn put_kpi(
         disputes: b.disputes,
         note: b.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     };
-    db::repo::emir_kpi_upsert(&st.pool, pid, &k).await?;
+    scoped.emir_kpi_upsert(&a, &k).await?;
     Ok(Json(k))
 }

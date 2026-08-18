@@ -1,7 +1,9 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
+use db::auth::marker::{Configure, Import, Reference, Shareholders, View};
+use db::auth::AuthCtx;
 
 #[derive(serde::Deserialize)]
 pub struct CreateBody { pub name: String, pub kind: String }
@@ -38,37 +40,48 @@ fn map_name_conflict(e: anyhow::Error) -> AppError {
     }
 }
 
-pub async fn list(State(st): State<AppState>) -> Result<Json<Vec<db::repo::Portfolio>>, AppError> {
-    Ok(Json(db::repo::portfolios_list(&st.pool).await?))
+/// Filters rather than authorizes — the route accepts any authenticated
+/// principal (`.authenticated`, not `.protected_global`); the visible set
+/// narrows to what the principal's grants actually cover.
+pub async fn list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>) -> Result<Json<Vec<db::repo::Portfolio>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    Ok(Json(scoped.portfolios_list().await?))
 }
 
-pub async fn create(State(st): State<AppState>, Json(b): Json<CreateBody>)
+pub async fn create(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Json(b): Json<CreateBody>)
     -> Result<Json<db::repo::Portfolio>, AppError>
 {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize_global::<Reference, Configure>()?;
     let name = valid_name(&b.name)?;
     valid_kind(&b.kind)?;
-    let p = db::repo::portfolio_create(&st.pool, &name, &b.kind).await
+    let p = scoped.portfolio_create(&a, &name, &b.kind).await
         .map_err(map_name_conflict)?;
     Ok(Json(p))
 }
 
-pub async fn update(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<UpdateBody>)
+pub async fn update(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(b): Json<UpdateBody>)
     -> Result<Json<db::repo::Portfolio>, AppError>
 {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Reference, Configure>(id)?;
     let name = valid_name(&b.name)?;
-    let p = db::repo::portfolio_update(&st.pool, id, &name, b.archived).await
+    let p = scoped.portfolio_update(&a, &name, b.archived).await
         .map_err(map_name_conflict)?
         .ok_or_else(|| AppError::NotFound(format!("no portfolio {id}")))?;
     Ok(Json(p))
 }
 
-/// Every scoped handler's first call. `mutating` requests (imports, CTD
-/// upload, KPI puts, settings puts) are refused on an archived portfolio;
-/// reads stay available so history remains inspectable.
-pub async fn ensure(pool: &sqlx::PgPool, id: i64, mutating: bool)
+/// Every scoped handler's first call, AFTER authorizing the domain it
+/// actually needs: a wildcard grant answers "yes" for any portfolio id,
+/// including one that was never created, so authorization alone cannot 404
+/// it. `mutating` requests (imports, CTD upload, KPI puts, settings puts)
+/// are refused on an archived portfolio; reads stay available so history
+/// remains inspectable.
+pub async fn ensure(scoped: &db::scoped::Scoped<'_>, id: i64, mutating: bool)
     -> Result<db::repo::Portfolio, AppError>
 {
-    let p = db::repo::portfolio_get(pool, id).await?
+    let p = scoped.portfolio_row(id).await?
         .ok_or_else(|| AppError::NotFound(format!("no portfolio {id}")))?;
     if mutating && p.archived {
         return Err(AppError::Conflict(format!("portfolio '{}' is archived", p.name)));
@@ -82,15 +95,19 @@ pub struct CodeBody {
     pub code: String,
 }
 
-pub async fn codes_list(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
-    ensure(&st.pool, pid, false).await?;
-    Ok(Json(db::repo::portfolio_codes_for(&st.pool, pid).await?))
+pub async fn codes_list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Reference, View>(pid)?;
+    ensure(&scoped, pid, false).await?;
+    Ok(Json(scoped.portfolio_codes_for(&a).await?))
 }
 
 /// Replace the portfolio's full code set. Codes are trimmed; empty entries
 /// are 422; a code already claimed by another portfolio is 422 too.
-pub async fn codes_put(State(st): State<AppState>, Path(pid): Path<i64>, Json(body): Json<Vec<CodeBody>>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
-    ensure(&st.pool, pid, true).await?;
+pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Json(body): Json<Vec<CodeBody>>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Reference, Configure>(pid)?;
+    ensure(&scoped, pid, true).await?;
     let mut codes: Vec<(String, String)> = Vec::with_capacity(body.len());
     for c in &body {
         let source = c.source.trim().to_lowercase();
@@ -100,7 +117,7 @@ pub async fn codes_put(State(st): State<AppState>, Path(pid): Path<i64>, Json(bo
         }
         codes.push((source, code));
     }
-    db::repo::portfolio_codes_replace(&st.pool, pid, &codes).await.map_err(|e| {
+    scoped.portfolio_codes_replace(&a, &codes).await.map_err(|e| {
         let is_unique = e.downcast_ref::<sqlx::Error>()
             .and_then(|se| se.as_database_error())
             .is_some_and(|de| de.is_unique_violation());
@@ -110,7 +127,10 @@ pub async fn codes_put(State(st): State<AppState>, Path(pid): Path<i64>, Json(bo
             AppError::Internal(e)
         }
     })?;
-    Ok(Json(db::repo::portfolio_codes_for(&st.pool, pid).await?))
+    // `a` (Configure) already implies View in the grant set, so this
+    // authorize cannot fail for a principal who reached this handler.
+    let view = scoped.authorize::<Reference, View>(pid)?;
+    Ok(Json(scoped.portfolio_codes_for(&view).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -121,18 +141,22 @@ pub struct ShareholderBody {
 }
 
 pub async fn shareholders_list(
-    State(st): State<AppState>, Path(pid): Path<i64>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>,
 ) -> Result<Json<Vec<db::repo::Shareholder>>, AppError> {
-    ensure(&st.pool, pid, false).await?;
-    Ok(Json(db::repo::shareholders_for(&st.pool, pid).await?))
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Shareholders, View>(pid)?;
+    ensure(&scoped, pid, false).await?;
+    Ok(Json(scoped.shareholders_for(&a).await?))
 }
 
 /// Replace the portfolio's whole register. Every check runs before any
 /// write, so a rejected payload leaves the stored register untouched.
 pub async fn shareholders_put(
-    State(st): State<AppState>, Path(pid): Path<i64>, Json(body): Json<Vec<ShareholderBody>>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Json(body): Json<Vec<ShareholderBody>>,
 ) -> Result<Json<Vec<db::repo::Shareholder>>, AppError> {
-    ensure(&st.pool, pid, true).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Shareholders, Import>(pid)?;
+    ensure(&scoped, pid, true).await?;
     let mut total = 0.0;
     let mut rows = Vec::with_capacity(body.len());
     for b in &body {
@@ -152,19 +176,24 @@ pub async fn shareholders_put(
         return Err(AppError::Unprocessable(format!(
             "register totals {total:.2}% of NAV, which exceeds 100%")));
     }
-    db::repo::shareholders_replace(&st.pool, pid, &rows).await?;
-    Ok(Json(db::repo::shareholders_for(&st.pool, pid).await?))
+    scoped.shareholders_replace(&a, &rows).await?;
+    // `a` (Import) already implies View in the grant set, so this authorize
+    // cannot fail for a principal who reached this handler.
+    let view = scoped.authorize::<Shareholders, View>(pid)?;
+    Ok(Json(scoped.shareholders_for(&view).await?))
 }
 
 /// The observed subscription/redemption history, for comparison against the
 /// *configured* redemption shock used in the liquidity scenarios. This is a
 /// read: history must stay inspectable even on an archived portfolio.
 pub async fn flows(
-    State(st): State<AppState>, Path(pid): Path<i64>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure(&st.pool, pid, false).await?;
-    let settings = db::settings::get_settings(&st.pool, pid).await?;
-    let records = db::repo::flows_for(&st.pool, pid, settings.flow_lookback_days).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Shareholders, View>(pid)?;
+    ensure(&scoped, pid, false).await?;
+    let settings = scoped.get_settings(pid).await?;
+    let records = scoped.flows_for(&a, settings.flow_lookback_days).await?;
 
     // Aggregate the share classes into one fund-level series. Each class
     // contributes its own net amount and its own net assets, so no

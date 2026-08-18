@@ -5,8 +5,10 @@ use analytics::pnl::{
     Dimension, FxLookup, InstrumentPnl, NavPoint, Trade,
 };
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::NaiveDate;
+use db::auth::marker::{MarketData, Nav, Positions, Reference, Transactions, View};
+use db::auth::AuthCtx;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(serde::Deserialize)]
@@ -26,15 +28,19 @@ fn snap(dates: &[NaiveDate], want: NaiveDate) -> Option<NaiveDate> {
     dates.iter().copied().find(|d| *d <= want).or_else(|| dates.last().copied())
 }
 
-pub async fn get(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<PnlQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
+pub async fn get(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<PnlQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
     let dim = match q.dimension.as_deref() {
         None | Some("") => None,
         Some(s) => Some(Dimension::parse(s)
             .ok_or_else(|| AppError::BadRequest(format!("unknown dimension: {s}")))?),
     };
 
-    let dates = db::repo::position_dates(&st.pool, pid).await?;
+    let dates = scoped.position_dates(&a).await?;
     if dates.len() < 2 {
         return Ok(Json(serde_json::json!({
             "empty": true,
@@ -60,13 +66,30 @@ pub async fn get(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Que
     }
     let snapshots = dates.iter().filter(|d| **d >= t0 && **d <= t1).count();
 
-    let p0 = db::repo::positions_for(&st.pool, pid, t0).await?;
-    let p1 = db::repo::positions_for(&st.pool, pid, t1).await?;
-    let ops = db::repo::operations_all(&st.pool, pid).await?;
-    let divs = db::repo::dividends_all(&st.pool, pid).await?;
-    let refs = db::repo::refs_all(&st.pool).await?;
-    let fx_rows = db::repo::fx_all(&st.pool).await?;
-    let navs = db::repo::nav_rows(&st.pool, pid).await?;
+    let p0 = scoped.positions_for(&a, t0).await?;
+    let p1 = scoped.positions_for(&a, t1).await?;
+    // Transactions, Reference, MarketData and Nav are secondary domains here
+    // (this route is gated on Positions) — see routes.rs's comment on this
+    // route for `operations_all`; the same soft-degrade applies to the
+    // others, each falling back to an empty read rather than failing the
+    // whole request.
+    let ops = match scoped.authorize::<Transactions, View>(pid) {
+        Ok(tv) => scoped.operations_all(&tv).await?,
+        Err(_) => Vec::new(),
+    };
+    let divs = scoped.dividends_all(&a).await?;
+    let refs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.refs_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
+    let fx_rows = match scoped.authorize_global::<MarketData, View>() {
+        Ok(mv) => scoped.fx_all(&mv).await?,
+        Err(_) => Vec::new(),
+    };
+    let navs = match scoped.authorize::<Nav, View>(pid) {
+        Ok(nv) => scoped.nav_rows(&nv).await?,
+        Err(_) => Vec::new(),
+    };
 
     let by_ref: HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();

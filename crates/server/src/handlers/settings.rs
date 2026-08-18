@@ -1,19 +1,25 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
+use db::auth::marker::{Configure, Reference, View};
+use db::auth::AuthCtx;
 use db::settings::AppSettings;
 
-pub async fn get(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<AppSettings>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    Ok(Json(db::settings::get_settings(&st.pool, pid).await?))
+pub async fn get(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<AppSettings>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    scoped.authorize::<Reference, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    Ok(Json(scoped.get_settings(pid).await?))
 }
 
-pub async fn put(State(st): State<AppState>, Path(pid): Path<i64>, Json(s): Json<AppSettings>) -> Result<Json<AppSettings>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, true).await?;
+pub async fn put(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Json(s): Json<AppSettings>) -> Result<Json<AppSettings>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    scoped.authorize::<Reference, Configure>(pid)?;
+    super::portfolios::ensure(&scoped, pid, true).await?;
     validate(&s).map_err(AppError::BadRequest)?;
-    db::settings::put_settings(&st.pool, pid, &s).await?;
-    Ok(Json(db::settings::get_settings(&st.pool, pid).await?))
+    scoped.put_settings(pid, &s).await?;
+    Ok(Json(scoped.get_settings(pid).await?))
 }
 
 fn validate(s: &AppSettings) -> Result<(), String> {

@@ -1,16 +1,20 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::NaiveDate;
+use db::auth::marker::{Configure, Import, MarketData, Positions, Reference, View};
+use db::auth::AuthCtx;
 
 #[derive(serde::Deserialize)]
 pub struct DateQuery {
     date: Option<String>,
 }
 
-pub async fn contracts(State(st): State<AppState>) -> Result<Json<Vec<db::repo::FuturesContract>>, AppError> {
-    Ok(Json(db::repo::contracts_all(&st.pool).await?))
+pub async fn contracts(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>) -> Result<Json<Vec<db::repo::FuturesContract>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize_global::<Reference, View>()?;
+    Ok(Json(scoped.contracts_all(&a).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -27,9 +31,12 @@ pub struct ContractBody {
 
 pub async fn put_contract(
     State(st): State<AppState>,
+    Extension(ctx): Extension<AuthCtx>,
     Path(root): Path<String>,
     Json(b): Json<ContractBody>,
 ) -> Result<Json<db::repo::FuturesContract>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize_global::<Reference, Configure>()?;
     if analytics::Category::parse(&b.category).is_none() {
         return Err(AppError::Unprocessable(format!(
             "category must be one of equity, interest_rate, fx, credit, commodity, other (got {:?})",
@@ -58,7 +65,7 @@ pub async fn put_contract(
         confirmed: b.confirmed,
         otc: b.otc,
     };
-    db::repo::contracts_upsert(&st.pool, &c).await?;
+    scoped.contracts_upsert(&a, &c).await?;
     Ok(Json(c))
 }
 
@@ -71,10 +78,13 @@ pub struct CtdUploadOutcome {
 
 pub async fn upload_ctd(
     State(st): State<AppState>,
+    Extension(ctx): Extension<AuthCtx>,
     Path(pid): Path<i64>,
     mut multipart: Multipart,
 ) -> Result<Json<CtdUploadOutcome>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, true).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<MarketData, Import>(pid)?;
+    super::portfolios::ensure(&scoped, pid, true).await?;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -94,7 +104,15 @@ pub async fn upload_ctd(
         })?;
 
         let date = rows[0].nav_date;
-        let known = db::repo::positions_for(&st.pool, pid, date).await?;
+        // Positions is a secondary domain here (this route is gated on
+        // MarketData): the known-tickers cross-check degrades to "nothing
+        // known" — which surfaces as every row being unknown — for a
+        // principal without a separate Positions grant, rather than
+        // failing the whole upload outright.
+        let known = match scoped.authorize::<Positions, View>(pid) {
+            Ok(pv) => scoped.positions_for(&pv, date).await?,
+            Err(_) => Vec::new(),
+        };
         if known.is_empty() {
             return Err(AppError::Unprocessable(format!(
                 "no NAV snapshot for {date}; upload the NAV Recap first"
@@ -119,8 +137,11 @@ pub async fn upload_ctd(
             return Err(AppError::UnprocessableRows(unknown));
         }
 
-        let replaced = !db::repo::ctd_for(&st.pool, pid, date).await?.is_empty();
-        let n = db::repo::ctd_replace(&st.pool, pid, date, &filename, &rows).await?;
+        // `a` (Import) already implies View in the grant set, so this
+        // authorize cannot fail for a principal who reached this handler.
+        let view = scoped.authorize::<MarketData, View>(pid)?;
+        let replaced = !scoped.ctd_for(&view, date).await?.is_empty();
+        let n = scoped.ctd_replace(&a, date, &filename, &rows).await?;
         return Ok(Json(CtdUploadOutcome { nav_date: date, rows: n, replaced }));
     }
     Err(AppError::BadRequest("missing multipart field 'file'".into()))
@@ -128,16 +149,26 @@ pub async fn upload_ctd(
 
 pub async fn list_ctd(
     State(st): State<AppState>,
+    Extension(ctx): Extension<AuthCtx>,
     Path(pid): Path<i64>,
     Query(q): Query<DateQuery>,
 ) -> Result<Json<Vec<db::repo::CtdRecord>>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<MarketData, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
     let date = match &q.date {
         Some(s) => s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?,
-        None => match db::repo::position_dates(&st.pool, pid).await?.first().copied() {
-            Some(d) => d,
-            None => return Ok(Json(Vec::new())),
-        },
+        None => {
+            // Positions is a secondary domain here too — see `upload_ctd`.
+            let dates = match scoped.authorize::<Positions, View>(pid) {
+                Ok(pv) => scoped.position_dates(&pv).await?,
+                Err(_) => Vec::new(),
+            };
+            match dates.first().copied() {
+                Some(d) => d,
+                None => return Ok(Json(Vec::new())),
+            }
+        }
     };
-    Ok(Json(db::repo::ctd_for(&st.pool, pid, date).await?))
+    Ok(Json(scoped.ctd_for(&a, date).await?))
 }

@@ -1,4 +1,4 @@
-use crate::auth::middleware::{require, require_global};
+use crate::auth::middleware::{authenticate, require, require_global};
 use crate::state::AppState;
 use axum::routing::MethodRouter;
 use axum::Router;
@@ -19,6 +19,11 @@ pub trait ProtectExt {
     /// Instance-wide. Its gate never reads path params — the scope checked is
     /// always `None`, matching `Scoped::authorize_global`.
     fn protected_global(self, path: &str, mr: MethodRouter<AppState>, domain: Domain, action: Action) -> Self;
+    /// Any authenticated principal — 401 if no `AuthCtx` was resolved, no
+    /// grant check beyond that. For a route whose handler filters its own
+    /// response to what the principal may see (`GET /api/portfolios`) rather
+    /// than gating access to a single resource.
+    fn authenticated(self, path: &str, mr: MethodRouter<AppState>) -> Self;
     fn public(self, path: &str, mr: MethodRouter<AppState>) -> Self;
 }
 
@@ -38,6 +43,10 @@ impl ProtectExt for Router<AppState> {
     fn protected_global(self, path: &str, mr: MethodRouter<AppState>, domain: Domain, action: Action) -> Self {
         self.route(path, mr.layer(axum::middleware::from_fn(
             move |req, next| require_global(domain, action, req, next))))
+    }
+
+    fn authenticated(self, path: &str, mr: MethodRouter<AppState>) -> Self {
+        self.route(path, mr.layer(axum::middleware::from_fn(authenticate)))
     }
 
     fn public(self, path: &str, mr: MethodRouter<AppState>) -> Self {

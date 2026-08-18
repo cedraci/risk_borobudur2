@@ -1,8 +1,10 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::NaiveDate;
+use db::auth::marker::{Positions, Reference, View};
+use db::auth::AuthCtx;
 use std::collections::{HashMap, HashSet};
 
 #[derive(serde::Serialize)]
@@ -39,18 +41,24 @@ pub fn effective_days(defaults: &serde_json::Value, asset_type: &str, override_:
 /// portfolio walked (by id) wins for display context fields (name,
 /// asset_type, effective_days via that portfolio's own liquidity
 /// defaults).
-pub async fn list(State(st): State<AppState>) -> Result<Json<Vec<RefRow>>, AppError> {
-    let refs = db::repo::refs_all(&st.pool).await?;
+pub async fn list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>) -> Result<Json<Vec<RefRow>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize_global::<Reference, View>()?;
+    let refs = scoped.refs_all(&a).await?;
     let by_code: HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut rows = Vec::new();
-    for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
-        let dates = db::repo::position_dates(&st.pool, pf.id).await?;
+    for pf in scoped.portfolios_list().await?.iter().filter(|p| !p.archived) {
+        // Positions is a secondary domain here (this route is gated on
+        // Reference): a portfolio the principal cannot see under Positions
+        // simply contributes nothing to this fleet-wide listing.
+        let Ok(pv) = scoped.authorize::<Positions, View>(pf.id) else { continue };
+        let dates = scoped.position_dates(&pv).await?;
         let Some(latest) = dates.first().copied() else { continue };
-        let positions = db::repo::positions_for(&st.pool, pf.id, latest).await?;
-        let settings = db::settings::get_settings(&st.pool, pf.id).await?;
+        let positions = scoped.positions_for(&pv, latest).await?;
+        let settings = scoped.get_settings(pf.id).await?;
         for p in &positions {
             if !seen.insert(p.isin.clone()) { continue; }
             let name = p.name.clone().unwrap_or_default();
@@ -97,9 +105,12 @@ pub struct RefBody {
 
 pub async fn put(
     State(st): State<AppState>,
+    Extension(ctx): Extension<AuthCtx>,
     Path(code): Path<String>,
     Json(b): Json<RefBody>,
 ) -> Result<Json<db::repo::InstrumentRef>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize_global::<Reference, db::auth::marker::Configure>()?;
     if let Some(d) = b.liquidity_days {
         if !(0.0..=3650.0).contains(&d) || !d.is_finite() {
             return Err(AppError::Unprocessable("liquidity_days must be in [0, 3650]".into()));
@@ -140,6 +151,6 @@ pub async fn put(
         gics_industry: None,
         ticker: None,
     };
-    db::repo::refs_upsert(&st.pool, &r).await?;
+    scoped.refs_upsert(&a, &r).await?;
     Ok(Json(r))
 }

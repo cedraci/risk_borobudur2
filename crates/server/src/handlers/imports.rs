@@ -1,7 +1,10 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Multipart, Path, State};
-use axum::Json;
+use axum::{Extension, Json};
+use db::auth::marker::{Import, Nav, Positions, Reference, Transactions, View};
+use db::auth::AuthCtx;
+use db::scoped::Scoped;
 use sha2::Digest;
 
 #[derive(serde::Serialize)]
@@ -47,8 +50,16 @@ fn err_msg(e: AppError) -> String {
 /// existing single-file contract. Self-identifying files (CACEIS) route by
 /// `portfolio_codes` REGARDLESS of the URL portfolio; problems with an
 /// individual file are reported per file, not as a request failure.
-pub async fn upload(State(st): State<AppState>, Path(pid): Path<i64>, mut multipart: Multipart) -> Result<Json<Vec<FileImportResult>>, AppError> {
-    let selected = super::portfolios::ensure(&st.pool, pid, true).await?;
+///
+/// The route-level gate (`Domain::Positions, Action::Import` on the URL id)
+/// is a coarse pre-filter only. Per ruling 3, every file's batch write is
+/// authorized separately, against the portfolio it actually targets: the
+/// URL portfolio for a non-identifying file, or the code-resolved portfolio
+/// for a self-identifying one — never assumed from the URL alone.
+pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, mut multipart: Multipart) -> Result<Json<Vec<FileImportResult>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    scoped.authorize::<Positions, Import>(pid)?;
+    let selected = super::portfolios::ensure(&scoped, pid, true).await?;
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     while let Some(field) = multipart
@@ -68,12 +79,12 @@ pub async fn upload(State(st): State<AppState>, Path(pid): Path<i64>, mut multip
 
     let mut results = Vec::with_capacity(files.len());
     for (filename, bytes) in files {
-        results.push(import_one(&st, &selected, filename, &bytes).await);
+        results.push(import_one(&scoped, &selected, filename, &bytes).await);
     }
     Ok(Json(results))
 }
 
-async fn import_one(st: &AppState, selected: &db::repo::Portfolio, filename: String, bytes: &[u8]) -> FileImportResult {
+async fn import_one(scoped: &Scoped<'_>, selected: &db::repo::Portfolio, filename: String, bytes: &[u8]) -> FileImportResult {
     let mut r = FileImportResult {
         filename: filename.clone(), kind: None, portfolio_id: None,
         portfolio_name: None, outcome: None, error: None, error_rows: None,
@@ -89,14 +100,18 @@ async fn import_one(st: &AppState, selected: &db::repo::Portfolio, filename: Str
     let (target_id, target_name) = match &id.fund_code {
         None => (selected.id, selected.name.clone()),
         Some((source, code)) => {
-            match db::repo::portfolio_by_code(&st.pool, source, code).await {
+            let ref_view = match scoped.authorize_global::<Reference, View>() {
+                Ok(a) => a,
+                Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+            };
+            match scoped.portfolio_by_code(&ref_view, source, code).await {
                 Err(e) => { r.error = Some(e.to_string()); return r; }
                 Ok(None) => {
                     r.error = Some(format!(
                         "unknown {source} code {code:?} — map it to a portfolio in the Portfolios panel, then re-upload"));
                     return r;
                 }
-                Ok(Some(tid)) => match super::portfolios::ensure(&st.pool, tid, true).await {
+                Ok(Some(tid)) => match super::portfolios::ensure(scoped, tid, true).await {
                     Ok(p) => (p.id, p.name),
                     Err(e) => { r.error = Some(err_msg(e)); return r; }
                 },
@@ -105,6 +120,23 @@ async fn import_one(st: &AppState, selected: &db::repo::Portfolio, filename: Str
     };
     r.portfolio_id = Some(target_id);
     r.portfolio_name = Some(target_name);
+
+    // Authorize the domains this batch actually writes, against the portfolio
+    // it actually targets — not just the coarse URL-level gate checked above.
+    // A principal who may import into the URL portfolio but not this file's
+    // resolved target is refused for this file alone; siblings still run.
+    let positions_a = match scoped.authorize::<Positions, Import>(target_id) {
+        Ok(a) => a,
+        Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+    };
+    let nav_a = match scoped.authorize::<Nav, Import>(target_id) {
+        Ok(a) => a,
+        Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+    };
+    let transactions_a = match scoped.authorize::<Transactions, Import>(target_id) {
+        Ok(a) => a,
+        Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
+    };
 
     let batch = match ingest::adapter::parse(id.kind, &filename, bytes) {
         Ok(b) => b,
@@ -117,14 +149,16 @@ async fn import_one(st: &AppState, selected: &db::repo::Portfolio, filename: Str
     };
 
     let sha = hex::encode(sha2::Sha256::digest(bytes));
-    match db::repo::import_batch(&st.pool, target_id, &filename, &sha, &batch).await {
+    match scoped.import_batch(&positions_a, &nav_a, &transactions_a, &filename, &sha, &batch).await {
         Ok(outcome) => r.outcome = Some(outcome),
         Err(e) => r.error = Some(e.to_string()),
     }
     r
 }
 
-pub async fn list(State(st): State<AppState>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::ImportRecord>>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    Ok(Json(db::repo::imports_list(&st.pool, pid).await?))
+pub async fn list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::ImportRecord>>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Reference, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    Ok(Json(scoped.imports_list(&a).await?))
 }

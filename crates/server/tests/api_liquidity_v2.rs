@@ -286,8 +286,11 @@ async fn flows_exclude_a_date_missing_nav_for_any_class_instead_of_zero_filling(
     rows.push(flow_row(base + chrono::Duration::days(9), "C2", None, None, 0.0, 40_000_000.0));
 
     {
-        let mut conn = pool.acquire().await.unwrap();
-        db::repo::flows_upsert(&mut conn, 1, &rows).await.unwrap();
+        let dbh = db::Db::from_pool(pool.clone());
+        let ctx = db::auth::AuthCtx::desktop();
+        let scoped = dbh.scope(&ctx);
+        let a = scoped.authorize::<db::auth::marker::Shareholders, db::auth::marker::Import>(1).unwrap();
+        scoped.flows_upsert(&a, &rows).await.unwrap();
     }
 
     let (s, b) = get_json(&app, "/api/portfolios/1/flows").await;

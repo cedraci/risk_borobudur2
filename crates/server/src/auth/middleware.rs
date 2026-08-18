@@ -22,6 +22,17 @@ pub async fn resolve_principal(
     Ok(next.run(req).await)
 }
 
+/// Enforces only that a principal was resolved — no grant check. Attached by
+/// `.authenticated`, for a route any signed-in principal may call and whose
+/// handler itself narrows the response to what that principal's grants cover
+/// (see `handlers::portfolios::list`).
+pub async fn authenticate(req: Request, next: Next) -> Result<Response, AppError> {
+    if req.extensions().get::<AuthCtx>().is_none() {
+        return Err(AppError::Unauthenticated);
+    }
+    Ok(next.run(req).await)
+}
+
 /// Enforces one route's declared primary requirement on a portfolio-scoped
 /// route. Attached per route by `.protected`, which requires `{id}` in the
 /// route's path — scope is declared at the call site, never inferred here.

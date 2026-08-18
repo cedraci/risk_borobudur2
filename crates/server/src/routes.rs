@@ -32,7 +32,10 @@ pub fn router(state: AppState) -> Router {
         // gated here — Task 11's secondary-domain worklist.
         .protected_global("/api/bloomberg/adv-due", get(handlers::bloomberg::adv_due), Domain::MarketData, Action::View)
         .protected_global("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload), Domain::MarketData, Action::Import)
-        .protected_global("/api/portfolios", get(handlers::portfolios::list), Domain::Reference, Action::View)
+        // Filters, not authorizes: any authenticated principal may call it,
+        // and `Scoped::portfolios_list` narrows the result to what their
+        // grants actually cover (`PortfolioScope::All` vs `Only(ids)`).
+        .authenticated("/api/portfolios", get(handlers::portfolios::list))
         .protected_global("/api/portfolios", axum::routing::post(handlers::portfolios::create), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}", axum::routing::put(handlers::portfolios::update), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}/codes", get(handlers::portfolios::codes_list), Domain::Reference, Action::View)

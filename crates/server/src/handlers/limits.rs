@@ -2,8 +2,11 @@ use crate::error::AppError;
 use crate::state::AppState;
 use analytics::{concentration, default_issuer_group, ConPosition};
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::NaiveDate;
+use db::auth::marker::{MarketData, Nav, Positions, Reference, Shareholders, View};
+use db::auth::AuthCtx;
+use db::scoped::Scoped;
 use std::collections::HashMap;
 
 #[derive(serde::Deserialize)]
@@ -11,17 +14,27 @@ pub struct DateQuery { date: Option<String> }
 
 type Snapshot = (Vec<NaiveDate>, Option<NaiveDate>, Vec<db::repo::PositionRecord>, Vec<db::repo::InstrumentRef>);
 
-async fn snapshot(st: &AppState, pid: i64, q: &DateQuery) -> Result<Snapshot, AppError> {
-    let dates = db::repo::position_dates(&st.pool, pid).await?;
+/// Reference data (`refs_all`) is a secondary domain here: this handler's
+/// route is gated on `Positions`, not `Reference`, so a principal without a
+/// separate `Reference` grant still gets a full positions snapshot — just
+/// without the issuer-group/liquidity-override enrichment `refs_all`
+/// supplies. Soft-checked with `may_global` rather than hard-authorized, so
+/// the absence of that secondary grant degrades the enrichment rather than
+/// failing the whole request.
+async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q: &DateQuery) -> Result<Snapshot, AppError> {
+    let dates = scoped.position_dates(a).await?;
     let date = match &q.date {
         Some(s) => Some(s.parse::<NaiveDate>().map_err(|_| AppError::BadRequest(format!("bad date: {s}")))?),
         None => dates.first().copied(),
     };
     let rows = match date {
-        Some(d) => db::repo::positions_for(&st.pool, pid, d).await?,
+        Some(d) => scoped.positions_for(a, d).await?,
         None => Vec::new(),
     };
-    let refs = db::repo::refs_all(&st.pool).await?;
+    let refs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.refs_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
     Ok((dates, date, rows, refs))
 }
 
@@ -29,9 +42,13 @@ fn ref_map(refs: &[db::repo::InstrumentRef]) -> HashMap<&str, &db::repo::Instrum
     refs.iter().map(|r| (r.code.as_str(), r)).collect()
 }
 
-pub async fn concentration_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
+pub async fn concentration_h(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let (dates, date, rows, refs) = snapshot(&scoped, &a, &q).await?;
     let by = ref_map(&refs);
     let cons: Vec<ConPosition> = rows.iter().filter_map(|p| {
         let w = p.weight?;
@@ -90,11 +107,13 @@ fn build_positions(
 }
 
 pub async fn liquidity_h(
-    State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
-    let settings = db::settings::get_settings(&st.pool, pid).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let (dates, date, rows, refs) = snapshot(&scoped, &a, &q).await?;
+    let settings = scoped.get_settings(pid).await?;
     let by = ref_map(&refs);
     let horizon = settings.liquidity_horizon_days;
 
@@ -108,12 +127,20 @@ pub async fn liquidity_h(
         "day_unit": "business days (Mon-Fri, no holiday calendar)",
     });
 
+    // Nav is a secondary domain here (this route is gated on Positions): a
+    // principal without a separate Nav grant degrades to the same "no data
+    // yet" empty shape a portfolio with no NAV history at all would produce.
+    let nav_opt = match date {
+        Some(d) => match scoped.authorize::<Nav, View>(pid) {
+            Ok(nv) => scoped.aum_for(&nv, d).await?,
+            Err(_) => None,
+        },
+        None => None,
+    };
+
     // An absent snapshot or NAV returns the established empty shape rather
     // than an error, matching every other metrics endpoint.
-    let (Some(asof), Some(nav)) = (date, match date {
-        Some(d) => db::repo::aum_for(&st.pool, pid, d).await?,
-        None => None,
-    }) else {
+    let (Some(asof), Some(nav)) = (date, nav_opt) else {
         return Ok(Json(serde_json::json!({
             "dates": dates, "date": date, "nav": null, "params": params,
             "coverage": serde_json::Value::Null, "asset": serde_json::Value::Null,
@@ -162,7 +189,13 @@ pub async fn liquidity_h(
     let mut coupons = analytics::bond_inflows(&coupon_inputs, asof, horizon);
     coupons.gaps.extend(fx_gaps);
 
-    let register = db::repo::shareholders_for(&st.pool, pid).await?;
+    // Shareholders is a secondary domain here too — see the routes.rs
+    // comment on this route: it degrades the top-5 scenario to
+    // "unavailable" rather than gating the whole endpoint.
+    let register = match scoped.authorize::<Shareholders, View>(pid) {
+        Ok(sv) => scoped.shareholders_for(&sv).await?,
+        Err(_) => Vec::new(),
+    };
     let top5_pct: f64 = register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0;
 
     let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity]| -> serde_json::Value {
@@ -233,9 +266,13 @@ pub async fn liquidity_h(
     })))
 }
 
-pub async fn rates_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q): Query<DateQuery>) -> Result<Json<serde_json::Value>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    let (dates, date, rows, refs) = snapshot(&st, pid, &q).await?;
+pub async fn rates_h(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let (dates, date, rows, refs) = snapshot(&scoped, &a, &q).await?;
     let by = ref_map(&refs);
     let mut bonds = Vec::new();
     let mut total_dv01 = 0.0f64;
@@ -268,13 +305,22 @@ pub async fn rates_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q):
         }
     }
     // Bond futures: only contracts classified interest_rate, and only where
-    // CTD analytics exist for this exact NAV date. No carry-forward.
-    let specs = db::repo::contracts_all(&st.pool).await?;
+    // CTD analytics exist for this exact NAV date. No carry-forward. Both
+    // `contracts_all` (Reference) and `ctd_for` (MarketData) are secondary
+    // domains here — see `snapshot`'s comment on `refs_all` above; the same
+    // soft-degrade applies.
+    let specs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.contracts_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
     let snap = future_positions(&rows, &specs);
     let unconfirmed: std::collections::HashSet<&str> =
         snap.unconfirmed.iter().map(String::as_str).collect();
     let ctd = match date {
-        Some(d) => db::repo::ctd_for(&st.pool, pid, d).await?,
+        Some(d) => match scoped.authorize::<MarketData, View>(pid) {
+            Ok(mv) => scoped.ctd_for(&mv, d).await?,
+            Err(_) => Vec::new(),
+        },
         None => Vec::new(),
     };
     let mut futures = Vec::new();
@@ -337,9 +383,13 @@ pub async fn rates_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q):
             }
         }
     }
+    // Nav is a secondary domain here too — see `liquidity_h`.
     let aum = match date {
-        Some(d) => db::repo::aum_for(&st.pool, pid, d).await?,
-        None => None,
+        Some(d) => match scoped.authorize::<Nav, View>(pid) {
+            Ok(nv) => scoped.aum_for(&nv, d).await?.unwrap_or(0.0),
+            Err(_) => 0.0,
+        },
+        None => 0.0,
     };
     // Signed P&L, not a magnitude. `dv01 = modified x mv x 1e-4` is positive
     // for a long bond, and the price relation is `dP = -D_mod x P x dy`, so a
@@ -353,7 +403,7 @@ pub async fn rates_h(State(st): State<AppState>, Path(pid): Path<i64>, Query(q):
     // not 0.00% - a confident zero next to a large non-zero DV01 is a lie, and
     // the derivatives handler already routes the same missing input to null.
     let nav_sensitivity_100bp = match aum {
-        Some(a) if a > 0.0 => serde_json::json!(-100.0 * total_dv01 / a),
+        a if a > 0.0 => serde_json::json!(-100.0 * total_dv01 / a),
         _ => serde_json::Value::Null,
     };
     Ok(Json(serde_json::json!({
@@ -438,15 +488,23 @@ pub(crate) fn future_positions(
 }
 
 pub async fn derivatives_h(
-    State(st): State<AppState>,
-    Path(pid): Path<i64>,
-    Query(q): Query<DateQuery>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Query(q): Query<DateQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::portfolios::ensure(&st.pool, pid, false).await?;
-    let (dates, date, rows, _refs) = snapshot(&st, pid, &q).await?;
-    let specs = db::repo::contracts_all(&st.pool).await?;
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Positions, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let (dates, date, rows, _refs) = snapshot(&scoped, &a, &q).await?;
+    // Reference is a secondary domain here — see `snapshot`'s comment above.
+    let specs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.contracts_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
+    // Nav is a secondary domain here too — see `liquidity_h`.
     let aum = match date {
-        Some(d) => db::repo::aum_for(&st.pool, pid, d).await?.unwrap_or(0.0),
+        Some(d) => match scoped.authorize::<Nav, View>(pid) {
+            Ok(nv) => scoped.aum_for(&nv, d).await?.unwrap_or(0.0),
+            Err(_) => 0.0,
+        },
         None => 0.0,
     };
     let snap = future_positions(&rows, &specs);

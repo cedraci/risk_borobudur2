@@ -3,14 +3,24 @@ use crate::state::AppState;
 use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use analytics::pnl::asset_class_of;
+use db::auth::marker::{Configure, Export, Import, MarketData, Nav, Positions, Reference, View};
+use db::auth::AuthCtx;
+use db::scoped::Scoped;
 use ingest::bloomberg::{build_adv_request, build_request, market_sector_for, parse_response, region_for, RequestItem};
 use std::collections::BTreeSet;
 
 /// Export the request workbook for everything still unclassified.
-pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let refs = db::repo::refs_all(&st.pool).await?;
+pub async fn request(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>) -> Result<impl IntoResponse, AppError> {
+    let scoped = st.db.scope(&ctx);
+    scoped.authorize_global::<Positions, Export>()?;
+    // Reference is a secondary domain here (this route is gated on
+    // Positions) — see routes.rs's comment on this route.
+    let refs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.refs_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
     // (has country, has sector) per instrument code.
     let ref_state: std::collections::BTreeMap<&str, (bool, bool)> = refs.iter()
         .map(|r| (r.code.as_str(), (r.country_of_risk.is_some(), r.gics_sector.is_some())))
@@ -26,14 +36,21 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
     let mut currencies: BTreeSet<String> = BTreeSet::new();
     let mut latest_any: Option<chrono::NaiveDate> = None;
     let mut earliest_nav: Option<chrono::NaiveDate> = None;
-    for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
-        let dates = db::repo::position_dates(&st.pool, pf.id).await?;
+    for pf in scoped.portfolios_list().await?.iter().filter(|p| !p.archived) {
+        // The route requires a wildcard Positions/Export grant, which
+        // implies Positions/View for every portfolio id — this authorize
+        // cannot fail for a principal who reached this handler at all.
+        let pv = scoped.authorize::<Positions, View>(pf.id)?;
+        let dates = scoped.position_dates(&pv).await?;
         let Some(latest) = dates.first().copied() else { continue };
         latest_any = Some(latest_any.map_or(latest, |d| d.max(latest)));
-        if let Some(first_nav) = db::repo::nav_rows(&st.pool, pf.id).await?.first().map(|n| n.date) {
-            earliest_nav = Some(earliest_nav.map_or(first_nav, |d| d.min(first_nav)));
+        // Nav is a secondary domain here too.
+        if let Ok(nv) = scoped.authorize::<Nav, View>(pf.id) {
+            if let Some(first_nav) = scoped.nav_rows(&nv).await?.first().map(|n| n.date) {
+                earliest_nav = Some(earliest_nav.map_or(first_nav, |d| d.min(first_nav)));
+            }
         }
-        for p in db::repo::positions_for(&st.pool, pf.id, latest).await? {
+        for p in scoped.positions_for(&pv, latest).await? {
             if let Some(c) = &p.currency {
                 if c != "EUR" { currencies.insert(c.clone()); }
             }
@@ -82,8 +99,18 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
 /// Limits page would flag the position stale while nothing prompted a fetch
 /// to fix it. So an instrument is due if ANY portfolio holding it considers
 /// it stale — over-requesting one instrument costs one formula cell.
-async fn adv_scope(st: &AppState) -> Result<(Vec<RequestItem>, Vec<RequestItem>), AppError> {
-    let refs = db::repo::refs_all(&st.pool).await?;
+///
+/// Positions is a secondary domain for `adv_due` (gated on MarketData); for
+/// `adv_request` it is the route's own primary domain (gated on
+/// Positions/Export, which implies View for every portfolio id). Soft-checked
+/// either way so a portfolio outside the principal's Positions grants simply
+/// contributes nothing to the fleet-wide scope, rather than failing either
+/// caller outright.
+async fn adv_scope(scoped: &Scoped<'_>) -> Result<(Vec<RequestItem>, Vec<RequestItem>), AppError> {
+    let refs = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => scoped.refs_all(&rv).await?,
+        Err(_) => Vec::new(),
+    };
     let by: std::collections::HashMap<&str, &db::repo::InstrumentRef> =
         refs.iter().map(|r| (r.code.as_str(), r)).collect();
 
@@ -93,11 +120,12 @@ async fn adv_scope(st: &AppState) -> Result<(Vec<RequestItem>, Vec<RequestItem>)
     // portfolio's own verdict for that ISIN.
     let mut items: std::collections::BTreeMap<String, RequestItem> = std::collections::BTreeMap::new();
     let mut stale: BTreeSet<String> = BTreeSet::new();
-    for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
-        let dates = db::repo::position_dates(&st.pool, pf.id).await?;
+    for pf in scoped.portfolios_list().await?.iter().filter(|p| !p.archived) {
+        let Ok(pv) = scoped.authorize::<Positions, View>(pf.id) else { continue };
+        let dates = scoped.position_dates(&pv).await?;
         let Some(latest) = dates.first().copied() else { continue };
-        let settings = db::settings::get_settings(&st.pool, pf.id).await?;
-        for p in db::repo::positions_for(&st.pool, pf.id, latest).await? {
+        let settings = scoped.get_settings(pf.id).await?;
+        for p in scoped.positions_for(&pv, latest).await? {
             let r = by.get(p.isin.as_str());
             let probe = analytics::LiqPosition {
                 code: p.isin.clone(), asset_type: p.asset_type.clone(),
@@ -137,10 +165,11 @@ pub struct AdvQuery {
 /// held set instead. Both come from the same `adv_scope` call so the two
 /// endpoints (`adv_request`, `adv_due`) can never disagree.
 pub async fn adv_request(
-    State(st): State<AppState>,
-    Query(q): Query<AdvQuery>,
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Query(q): Query<AdvQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (due, held) = adv_scope(&st).await?;
+    let scoped = st.db.scope(&ctx);
+    scoped.authorize_global::<Positions, Export>()?;
+    let (due, held) = adv_scope(&scoped).await?;
     let items = if q.all { held } else { due };
     let asof = chrono::Utc::now().date_naive();
     let bytes = build_adv_request(&items, asof)?;
@@ -156,12 +185,16 @@ pub async fn adv_request(
 /// The cost of the ADV request before it is paid: due and held counts, read
 /// from the database alone. Never builds a workbook — a Bloomberg fetch is
 /// only ever triggered by the user clicking `adv_request`/`?all=true`.
-pub async fn adv_due(State(st): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
-    let (due, held) = adv_scope(&st).await?;
+pub async fn adv_due(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    scoped.authorize_global::<MarketData, View>()?;
+    let (due, held) = adv_scope(&scoped).await?;
     Ok(Json(serde_json::json!({ "due": due.len(), "held": held.len() })))
 }
 
-pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, mut mp: Multipart) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let import = scoped.authorize_global::<MarketData, Import>()?;
     let mut bytes: Option<Vec<u8>> = None;
     while let Some(f) = mp.next_field().await.map_err(|e| AppError::BadRequest(e.to_string()))? {
         if f.name() == Some("file") {
@@ -184,21 +217,30 @@ pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Jso
             c.sector.clone(),
             c.industry.clone(),
         )).collect();
-    let classified = db::repo::classify_upsert_many(&st.pool, &classifications).await?;
+    // Reference is a secondary domain here (this route is gated on
+    // MarketData): a principal without a separate Reference/Configure grant
+    // still stores the FX/ADV rows this upload owns, just not the
+    // classification columns.
+    let classified = match scoped.authorize_global::<Reference, Configure>() {
+        Ok(rc) => scoped.classify_upsert_many(&rc, &classifications).await?,
+        Err(_) => 0,
+    };
 
     let fx_rows: Vec<db::repo::FxRow> = parsed.fx.iter().map(|o| db::repo::FxRow {
         date: o.date, currency: o.currency.clone(), rate_to_eur: o.rate_to_eur,
     }).collect();
-    let fx_stored = db::repo::fx_upsert_many(&st.pool, &fx_rows).await?;
+    let fx_stored = scoped.fx_upsert_many(&import, &fx_rows).await?;
 
     // Cross-check the inversion against the workbook's own Change column at
     // every snapshot date, across every non-archived portfolio's positions —
     // a rate mismatch anywhere in the fleet is reported. Refs/FX storage
     // above stays untouched: that data is shared across portfolios.
+    // Positions is a secondary domain here too.
     let mut fx_check = Vec::new();
-    for pf in db::repo::portfolios_list(&st.pool).await?.iter().filter(|p| !p.archived) {
-        for d in db::repo::position_dates(&st.pool, pf.id).await? {
-            let positions = db::repo::positions_for(&st.pool, pf.id, d).await?;
+    for pf in scoped.portfolios_list().await?.iter().filter(|p| !p.archived) {
+        let Ok(pv) = scoped.authorize::<Positions, View>(pf.id) else { continue };
+        for d in scoped.position_dates(&pv).await? {
+            let positions = scoped.positions_for(&pv, d).await?;
             for o in parsed.fx.iter().filter(|o| o.date == d) {
                 let Some(book) = positions.iter()
                     .find(|p| p.currency.as_deref() == Some(o.currency.as_str()) && p.fx_rate.is_some_and(|f| f > 0.0))
@@ -222,8 +264,8 @@ pub async fn upload(State(st): State<AppState>, mut mp: Multipart) -> Result<Jso
     let adv_rows: Vec<(String, f64)> = parsed.adv.iter()
         .filter(|a| a.adv_30d.is_finite() && a.adv_30d >= 0.0)
         .map(|a| (a.isin.clone(), a.adv_30d)).collect();
-    let adv_stored = db::repo::adv_upsert_many(
-        &st.pool, &adv_rows, chrono::Utc::now().date_naive()).await?;
+    let adv_stored = scoped.adv_upsert_many(
+        &import, &adv_rows, chrono::Utc::now().date_naive()).await?;
 
     Ok(Json(serde_json::json!({
         "classified": classified,
