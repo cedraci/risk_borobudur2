@@ -26,7 +26,7 @@ async fn test_app() -> (axum::Router, db::embedded::EmbeddedDb, tempfile::TempDi
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    (server::routes::router(server::state::AppState { pool }), edb, dir)
+    (server::routes::router(server::state::AppState::desktop(pool)), edb, dir)
 }
 
 fn sample_bytes() -> Vec<u8> {

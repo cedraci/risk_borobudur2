@@ -6,6 +6,9 @@ use axum::Router;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }))
+        .route("/api/login", axum::routing::post(handlers::session::login))
+        .route("/api/logout", axum::routing::post(handlers::session::logout))
+        .route("/api/me", get(handlers::session::me))
         .route("/api/refs", get(handlers::refs::list))
         .route("/api/refs/{code}", axum::routing::put(handlers::refs::put))
         .route("/api/futures-contracts", get(handlers::futures::contracts))

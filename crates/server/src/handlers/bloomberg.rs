@@ -64,7 +64,7 @@ pub async fn request(State(st): State<AppState>) -> Result<impl IntoResponse, Ap
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
-        &format!("attachment; filename=\"bloomberg_request_{to}.xlsx\""))?);
+        &format!("attachment; filename=\"bloomberg_request_{to}.xlsx\"")).map_err(anyhow::Error::from)?);
     Ok((StatusCode::OK, h, bytes))
 }
 
@@ -149,7 +149,7 @@ pub async fn adv_request(
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
-        &format!("attachment; filename=\"bloomberg_adv_request_{asof}.xlsx\""))?);
+        &format!("attachment; filename=\"bloomberg_adv_request_{asof}.xlsx\"")).map_err(anyhow::Error::from)?);
     Ok((StatusCode::OK, h, bytes))
 }
 

@@ -83,7 +83,7 @@ async fn app_with_hisinv() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let res = app.clone().oneshot(
         Request::post("/api/portfolios")
@@ -226,7 +226,7 @@ async fn a_stricter_portfolios_threshold_is_not_overridden_by_a_looser_one_walke
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
     let bytes = std::fs::read(SAMPLE).unwrap();
 
     // Portfolio 1 (pre-existing, id 1) imports the sample workbook.

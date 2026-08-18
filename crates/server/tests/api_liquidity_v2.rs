@@ -45,7 +45,7 @@ async fn shareholder_register_crud_and_validation() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
     let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
@@ -97,7 +97,7 @@ async fn liquidity_response_shape_and_scenarios() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
     let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
@@ -151,7 +151,7 @@ async fn a_loaded_register_drives_the_top_five_scenarios() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
     let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
@@ -196,7 +196,7 @@ async fn shareholders_put_refused_but_read_allowed_on_archived_portfolio() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     // Archive portfolio 1 (seeded by migration as "Borobudur").
     let (st, _) = put_json(&app, "/api/portfolios/1",
@@ -223,7 +223,7 @@ async fn flows_are_unavailable_until_enough_history_is_loaded() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
     let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();
@@ -264,7 +264,7 @@ async fn flows_exclude_a_date_missing_nav_for_any_class_instead_of_zero_filling(
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx")).unwrap();
     let res = app.clone().oneshot(upload_req(&bytes)).await.unwrap();

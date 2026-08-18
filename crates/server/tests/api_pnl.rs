@@ -39,7 +39,7 @@ async fn upload_sample() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedD
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     assert_eq!(app.clone().oneshot(upload_req(&bytes)).await.unwrap().status(), StatusCode::OK);
@@ -232,7 +232,7 @@ async fn two_consistent_snapshots_reconcile_to_a_near_zero_residual() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let import_id: i64 = sqlx::query_scalar(
         "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts)
@@ -339,7 +339,7 @@ async fn duplicate_isin_receivable_rows_do_not_evict_the_instrument() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let import_id: i64 = sqlx::query_scalar(
         "INSERT INTO imports (portfolio_id, filename, sha256, nav_date, row_counts)

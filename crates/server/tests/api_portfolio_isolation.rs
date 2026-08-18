@@ -14,7 +14,7 @@ async fn app() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
     (app, pool, edb)
 }
 

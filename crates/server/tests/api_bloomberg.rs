@@ -50,7 +50,7 @@ async fn app_with_sample() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     assert_eq!(app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &bytes)).await.unwrap().status(), StatusCode::OK);
@@ -119,7 +119,7 @@ async fn request_unions_unclassified_across_portfolios() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
     let bytes = std::fs::read(SAMPLE).unwrap();
 
     async fn create_mandate(app: &axum::Router, name: &str) -> i64 {

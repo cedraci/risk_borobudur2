@@ -8,4 +8,5 @@ pub mod metrics;
 pub mod pnl;
 pub mod portfolios;
 pub mod refs;
+pub mod session;
 pub mod settings;

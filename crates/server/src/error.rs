@@ -9,11 +9,29 @@ pub enum AppError {
     Unprocessable(String),
     NotFound(String),
     Conflict(String),
+    Unauthenticated,
+    LockedOut(u64),
 }
 
-impl<E: Into<anyhow::Error>> From<E> for AppError {
-    fn from(e: E) -> Self {
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> Self {
+        AppError::Internal(e)
+    }
+}
+
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
         AppError::Internal(e.into())
+    }
+}
+
+impl From<crate::auth::AuthError> for AppError {
+    fn from(e: crate::auth::AuthError) -> Self {
+        match e {
+            crate::auth::AuthError::Unauthenticated => AppError::Unauthenticated,
+            crate::auth::AuthError::LockedOut { retry_after_secs } => AppError::LockedOut(retry_after_secs),
+            crate::auth::AuthError::Internal(e) => AppError::Internal(e),
+        }
     }
 }
 
@@ -51,6 +69,18 @@ impl IntoResponse for AppError {
             AppError::Conflict(msg) => (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({"title": "Conflict", "status": 409, "detail": msg})),
+            )
+                .into_response(),
+            AppError::Unauthenticated => (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"title": "Unauthorized", "status": 401, "detail": "authentication required"})),
+            )
+                .into_response(),
+            AppError::LockedOut(secs) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, secs.to_string())],
+                Json(serde_json::json!({"title": "Too Many Requests", "status": 429,
+                                        "detail": "too many failed sign-in attempts"})),
             )
                 .into_response(),
         }

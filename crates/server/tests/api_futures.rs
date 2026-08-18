@@ -40,7 +40,7 @@ async fn contracts_and_ctd_upload() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     // Uploading CTD before any NAV snapshot exists is rejected, with guidance.
     let ctd = std::fs::read(CTD).unwrap();
@@ -111,7 +111,7 @@ async fn otc_flag_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     // OTC flag round-trips through PUT and GET (EMIR threshold feed).
     let (status, body) = put_json(&app, "/api/futures-contracts/RX", serde_json::json!({

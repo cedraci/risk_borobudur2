@@ -54,7 +54,7 @@ async fn app_with_sample() -> (axum::Router, sqlx::PgPool, db::embedded::Embedde
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
     let bytes = std::fs::read(SAMPLE).unwrap();
     assert_eq!(
         app.clone().oneshot(upload_req("/api/portfolios/1/imports", "s.xlsx", &bytes)).await.unwrap().status(),
@@ -68,7 +68,7 @@ async fn emir_empty_before_any_import() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
     let (status, body) = get_json(&app, "/api/portfolios/1/emir").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["empty"], true, "{body}");
@@ -213,7 +213,7 @@ async fn evidence_export_refuses_empty_db() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
     let res = app.clone().oneshot(Request::get("/api/portfolios/1/emir/export").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
     pool.close().await;

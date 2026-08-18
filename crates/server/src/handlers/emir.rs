@@ -195,7 +195,8 @@ pub async fn export(
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
-        &format!("attachment; filename=\"EMIR - seuils - {} - {}.xlsx\"", portfolio.name, a.anchor))?);
+        &format!("attachment; filename=\"EMIR - seuils - {} - {}.xlsx\"", portfolio.name, a.anchor))
+        .map_err(anyhow::Error::from)?);
     Ok((StatusCode::OK, h, bytes))
 }
 

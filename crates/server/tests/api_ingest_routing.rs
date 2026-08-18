@@ -32,7 +32,7 @@ async fn caceis_files_route_by_code_regardless_of_url_portfolio() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let hisinv = std::fs::read(HISINV).unwrap();
     let histovl = std::fs::read(HISTOVL).unwrap();
@@ -132,7 +132,7 @@ async fn reglmtlux_is_recognized_and_declined_with_a_reason() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let two_lines = b"165878;20260807;line1\n165878;20260807;line2\n".as_slice();
     let res = app.clone().oneshot(multi_upload_req(
@@ -155,7 +155,7 @@ async fn joursrlux_routes_by_fund_code_like_hisinvlux() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
-    let app = server::routes::router(server::state::AppState { pool: pool.clone() });
+    let app = server::routes::router(server::state::AppState::desktop(pool.clone()));
 
     let joursr = std::fs::read(JOURSR).unwrap();
 

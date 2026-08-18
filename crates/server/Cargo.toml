@@ -8,9 +8,13 @@ analytics = { path = "../analytics" }
 ingest = { path = "../ingest" }
 db = { path = "../db" }
 anyhow = { workspace = true }
+argon2 = "0.5"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
 chrono = { workspace = true }
 dirs = "6"
+rand = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
