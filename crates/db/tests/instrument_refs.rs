@@ -1,3 +1,5 @@
+use db::auth::marker::{Configure, Import, Nav, Positions, Reference, Transactions, View};
+use db::auth::AuthCtx;
 use db::repo::InstrumentRef;
 
 fn fixture_bytes() -> Vec<u8> {
@@ -9,6 +11,11 @@ async fn refs_upsert_seed_and_no_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let ref_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
+    let ref_view = scoped.authorize_global::<Reference, View>().unwrap();
 
     // 1. plain upsert + read-back
     let r = InstrumentRef {
@@ -22,8 +29,8 @@ async fn refs_upsert_seed_and_no_overwrite() {
         adv_30d: None, adv_asof: None,
         country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None,
     };
-    db::repo::refs_upsert(&pool, &r).await.unwrap();
-    let all = db::repo::refs_all(&pool).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &r).await.unwrap();
+    let all = scoped.refs_all(&ref_view).await.unwrap();
     let got = all.iter().find(|x| x.code == "TEST1").unwrap();
     assert_eq!(got.issuer_group.as_deref(), Some("GROUP A"));
     assert_eq!(got.liquidity_days, Some(30.0));
@@ -36,8 +43,8 @@ async fn refs_upsert_seed_and_no_overwrite() {
         market_place: None, market_place_name: None,
         adv_30d: None, adv_asof: None,
         country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None };
-    db::repo::refs_upsert(&pool, &r2).await.unwrap();
-    let all = db::repo::refs_all(&pool).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &r2).await.unwrap();
+    let all = scoped.refs_all(&ref_view).await.unwrap();
     let got = all.iter().find(|x| x.code == "TEST1").unwrap();
     assert!(got.issuer_group.is_none() && got.liquidity_days.is_none());
 
@@ -50,12 +57,15 @@ async fn refs_upsert_seed_and_no_overwrite() {
         market_place: None, market_place_name: None,
         adv_30d: None, adv_asof: None,
         country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None };
-    db::repo::refs_upsert(&pool, &user).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &user).await.unwrap();
 
     let wb = ingest::parse_workbook(&fixture_bytes()).unwrap();
-    db::repo::import_workbook(&pool, 1, "sample.xlsx", "sha-refs-test", &wb).await.unwrap();
+    let p = scoped.authorize::<Positions, Import>(1).unwrap();
+    let n = scoped.authorize::<Nav, Import>(1).unwrap();
+    let t = scoped.authorize::<Transactions, Import>(1).unwrap();
+    scoped.import_workbook(&p, &n, &t, "sample.xlsx", "sha-refs-test", &wb).await.unwrap();
 
-    let all = db::repo::refs_all(&pool).await.unwrap();
+    let all = scoped.refs_all(&ref_view).await.unwrap();
     let bond = all.iter().find(|x| x.code == "US105756CL22").unwrap();
     assert_eq!(bond.bond_coupon_pct, Some(7.0)); // user value kept
     assert_eq!(bond.bond_maturity, Some(chrono::NaiveDate::from_ymd_opt(2035, 3, 15).unwrap()));
@@ -75,6 +85,11 @@ async fn bond_coupon_freq_accepts_quarterly_and_monthly() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let ref_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
+    let ref_view = scoped.authorize_global::<Reference, View>().unwrap();
 
     let quarterly = InstrumentRef { code: "TESTQ".into(), issuer_group: None, liquidity_days: None,
         adv_eligible: None,
@@ -83,7 +98,7 @@ async fn bond_coupon_freq_accepts_quarterly_and_monthly() {
         market_place: None, market_place_name: None,
         adv_30d: None, adv_asof: None,
         country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None };
-    db::repo::refs_upsert(&pool, &quarterly).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &quarterly).await.unwrap();
 
     let monthly = InstrumentRef { code: "TESTM".into(), issuer_group: None, liquidity_days: None,
         adv_eligible: None,
@@ -92,9 +107,9 @@ async fn bond_coupon_freq_accepts_quarterly_and_monthly() {
         market_place: None, market_place_name: None,
         adv_30d: None, adv_asof: None,
         country_of_risk: None, region: None, gics_sector: None, gics_industry: None, ticker: None };
-    db::repo::refs_upsert(&pool, &monthly).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &monthly).await.unwrap();
 
-    let all = db::repo::refs_all(&pool).await.unwrap();
+    let all = scoped.refs_all(&ref_view).await.unwrap();
     assert_eq!(all.iter().find(|x| x.code == "TESTQ").unwrap().bond_coupon_freq, Some(4));
     assert_eq!(all.iter().find(|x| x.code == "TESTM").unwrap().bond_coupon_freq, Some(12));
 
@@ -107,6 +122,11 @@ async fn liquidity_days_replaces_bucket_and_new_columns_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let ref_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
+    let ref_view = scoped.authorize_global::<Reference, View>().unwrap();
 
     let r = InstrumentRef {
         code: "FR0000121014".into(),
@@ -128,9 +148,9 @@ async fn liquidity_days_replaces_bucket_and_new_columns_round_trip() {
         gics_industry: None,
         ticker: None,
     };
-    db::repo::refs_upsert(&pool, &r).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &r).await.unwrap();
 
-    let back = db::repo::refs_all(&pool).await.unwrap();
+    let back = scoped.refs_all(&ref_view).await.unwrap();
     let got = back.iter().find(|x| x.code == "FR0000121014").unwrap();
     assert_eq!(got.liquidity_days, Some(3.5));
     assert_eq!(got.adv_eligible, Some(false));

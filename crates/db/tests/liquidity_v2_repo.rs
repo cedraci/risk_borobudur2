@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
-use db::repo;
+use db::auth::marker::{Import, Shareholders, View};
+use db::auth::AuthCtx;
 
 fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
 
@@ -23,6 +24,11 @@ async fn flows_upsert_is_idempotent_per_portfolio_date_and_share_class() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let import = scoped.authorize::<Shareholders, Import>(1).unwrap();
+    let view = scoped.authorize::<Shareholders, View>(1).unwrap();
 
     let day1 = vec![
         flow(d("2026-08-06"), "C1", 271_295.542, 104.04, 0.0, 100_000.0),
@@ -32,15 +38,12 @@ async fn flows_upsert_is_idempotent_per_portfolio_date_and_share_class() {
         flow(d("2026-08-07"), "C1", 269_373.392, 104.10, 0.0, 200_000.0),
     ];
 
-    {
-        let mut conn = pool.acquire().await.unwrap();
-        let n1 = repo::flows_upsert(&mut conn, 1, &day1).await.unwrap();
-        assert_eq!(n1, 2);
-        let n2 = repo::flows_upsert(&mut conn, 1, &day2).await.unwrap();
-        assert_eq!(n2, 1);
-    } // conn returns to the pool here, so pool.close() below does not hang
+    let n1 = scoped.flows_upsert(&import, &day1).await.unwrap();
+    assert_eq!(n1, 2);
+    let n2 = scoped.flows_upsert(&import, &day2).await.unwrap();
+    assert_eq!(n2, 1);
 
-    let rows = repo::flows_for(&pool, 1, 10).await.unwrap();
+    let rows = scoped.flows_for(&view, 10).await.unwrap();
     assert_eq!(rows.len(), 3);
     // Oldest first.
     assert_eq!(rows[0].flow_date, d("2026-08-06"));
@@ -48,13 +51,10 @@ async fn flows_upsert_is_idempotent_per_portfolio_date_and_share_class() {
 
     // Re-upsert 2026-08-06's C1 row with corrected amounts.
     let corrected = vec![flow(d("2026-08-06"), "C1", 271_295.542, 104.04, 0.0, 150_000.0)];
-    {
-        let mut conn = pool.acquire().await.unwrap();
-        let n3 = repo::flows_upsert(&mut conn, 1, &corrected).await.unwrap();
-        assert_eq!(n3, 1);
-    } // conn returns to the pool here, so pool.close() below does not hang
+    let n3 = scoped.flows_upsert(&import, &corrected).await.unwrap();
+    assert_eq!(n3, 1);
 
-    let rows_after = repo::flows_for(&pool, 1, 10).await.unwrap();
+    let rows_after = scoped.flows_for(&view, 10).await.unwrap();
     assert_eq!(rows_after.len(), 3, "correcting a day must overwrite, not add a fourth row");
     let c1_0806 = rows_after.iter()
         .find(|r| r.flow_date == d("2026-08-06") && r.share_class == "C1")
@@ -80,11 +80,19 @@ async fn flows_upsert_is_idempotent_per_portfolio_date_and_share_class() {
 // nav_history stay empty for its date.
 #[tokio::test]
 async fn import_batch_stores_flows_and_row_count() {
+    use db::auth::marker::{Nav, Positions, Transactions};
     use ingest::adapter::UniversalBatch;
 
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let p = scoped.authorize::<Positions, Import>(1).unwrap();
+    let n = scoped.authorize::<Nav, Import>(1).unwrap();
+    let t = scoped.authorize::<Transactions, Import>(1).unwrap();
+    let sh_view = scoped.authorize::<Shareholders, View>(1).unwrap();
 
     let b = UniversalBatch {
         primary_date: d("2026-08-07"),
@@ -100,7 +108,7 @@ async fn import_batch_stores_flows_and_row_count() {
         ref_facts: Vec::new(),
         warnings: Vec::new(),
     };
-    let out = repo::import_batch(&pool, 1, "joursr.csv", "sha-joursr-1", &b).await.unwrap();
+    let out = scoped.import_batch(&p, &n, &t, "joursr.csv", "sha-joursr-1", &b).await.unwrap();
     assert!(!out.duplicate);
     assert_eq!(out.nav_rows, 0);
     assert_eq!(out.positions, 0);
@@ -110,7 +118,7 @@ async fn import_batch_stores_flows_and_row_count() {
         .fetch_one(&pool).await.unwrap();
     assert_eq!(row_counts["flows"], serde_json::json!(2));
 
-    let rows = repo::flows_for(&pool, 1, 10).await.unwrap();
+    let rows = scoped.flows_for(&sh_view, 10).await.unwrap();
     assert_eq!(rows.len(), 2);
 
     // No positions or NAV history landed for this date.
@@ -135,6 +143,11 @@ async fn shareholders_replace_is_transactional_and_ordered_largest_first() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let import = scoped.authorize::<Shareholders, Import>(1).unwrap();
+    let view = scoped.authorize::<Shareholders, View>(1).unwrap();
 
     let first = vec![
         ("Founder family".to_string(), 18.0, d("2026-08-07")),
@@ -143,9 +156,9 @@ async fn shareholders_replace_is_transactional_and_ordered_largest_first() {
         ("Tied holder A".to_string(), 5.0, d("2026-08-07")),
         ("Tied holder B".to_string(), 5.0, d("2026-08-07")),
     ];
-    repo::shareholders_replace(&pool, 1, &first).await.unwrap();
+    scoped.shareholders_replace(&import, &first).await.unwrap();
 
-    let rows = repo::shareholders_for(&pool, 1).await.unwrap();
+    let rows = scoped.shareholders_for(&view).await.unwrap();
     assert_eq!(rows.len(), 4);
     // Largest first.
     assert_eq!(rows[0].label, "Founder family");
@@ -158,9 +171,9 @@ async fn shareholders_replace_is_transactional_and_ordered_largest_first() {
     // A second replace fully supersedes the first: no leftover rows, no
     // duplicate accumulation.
     let second = vec![("Founder family".to_string(), 20.0, d("2026-08-10"))];
-    repo::shareholders_replace(&pool, 1, &second).await.unwrap();
+    scoped.shareholders_replace(&import, &second).await.unwrap();
 
-    let rows_after = repo::shareholders_for(&pool, 1).await.unwrap();
+    let rows_after = scoped.shareholders_for(&view).await.unwrap();
     assert_eq!(rows_after.len(), 1, "replace must not append to the previous register");
     assert_eq!(rows_after[0].label, "Founder family");
     assert_eq!(rows_after[0].pct_of_nav, 20.0);

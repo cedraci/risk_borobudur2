@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use crate::scoped::Scoped;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
@@ -59,63 +59,75 @@ fn days_from_legacy_buckets(v: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
-pub async fn get_settings(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<AppSettings> {
-    let rows: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT key, value FROM settings WHERE portfolio_id = $1")
-            .bind(portfolio_id)
-            .fetch_all(pool).await?;
-    let get_f = |k: &str, d: f64| rows.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.as_f64()).unwrap_or(d);
-    let get_u = |k: &str, d: u32| rows.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.as_u64()).map(|v| v as u32).unwrap_or(d);
-    let liquidity_default_days = rows.iter().find(|(key, _)| key == "liquidity_default_days")
-        .map(|(_, v)| v.clone())
-        .or_else(|| rows.iter().find(|(key, _)| key == "liquidity_defaults")
-            .map(|(_, v)| days_from_legacy_buckets(v)))
-        .unwrap_or_else(default_liquidity_default_days);
-    Ok(AppSettings {
-        risk_free_rate: get_f("risk_free_rate", 0.02),
-        var_confidence: get_f("var_confidence", 0.99),
-        var_horizon_days: get_u("var_horizon_days", 20),
-        var_window_days: get_u("var_window_days", 252),
-        var_limit: get_f("var_limit", 0.20),
-        short_dd_max_days: get_u("short_dd_max_days", 50),
-        liquidity_default_days,
-        redemption_shock: get_f("redemption_shock", 0.30),
-        participation_rate: get_f("participation_rate", default_participation_rate()),
-        adv_stress_factor: get_f("adv_stress_factor", default_adv_stress_factor()),
-        liquidity_horizon_days: get_u("liquidity_horizon_days", default_liquidity_horizon_days()),
-        settlement_deadline_days: get_u("settlement_deadline_days", default_settlement_deadline_days()),
-        adv_max_age_days: get_u("adv_max_age_days", default_adv_max_age_days()),
-        flow_lookback_days: get_u("flow_lookback_days", default_flow_lookback_days()),
-    })
-}
-
-pub async fn put_settings(pool: &PgPool, portfolio_id: i64, s: &AppSettings) -> anyhow::Result<()> {
-    let pairs: Vec<(&str, serde_json::Value)> = vec![
-        ("risk_free_rate", s.risk_free_rate.into()),
-        ("var_confidence", s.var_confidence.into()),
-        ("var_horizon_days", s.var_horizon_days.into()),
-        ("var_window_days", s.var_window_days.into()),
-        ("var_limit", s.var_limit.into()),
-        ("short_dd_max_days", s.short_dd_max_days.into()),
-        ("liquidity_default_days", s.liquidity_default_days.clone()),
-        ("redemption_shock", s.redemption_shock.into()),
-        ("participation_rate", s.participation_rate.into()),
-        ("adv_stress_factor", s.adv_stress_factor.into()),
-        ("liquidity_horizon_days", s.liquidity_horizon_days.into()),
-        ("settlement_deadline_days", s.settlement_deadline_days.into()),
-        ("adv_max_age_days", s.adv_max_age_days.into()),
-        ("flow_lookback_days", s.flow_lookback_days.into()),
-    ];
-    for (k, v) in pairs {
-        sqlx::query(
-            "INSERT INTO settings (portfolio_id, key, value) VALUES ($1, $2, $3)
-             ON CONFLICT (portfolio_id, key) DO UPDATE SET value = EXCLUDED.value",
-        )
-        .bind(portfolio_id)
-        .bind(k)
-        .bind(v)
-        .execute(pool)
-        .await?;
+impl<'a> Scoped<'a> {
+    /// Settings are read as a computational input from almost every domain's
+    /// handlers (metrics uses `var_confidence`/`risk_free_rate`, limits uses
+    /// `liquidity_default_days`/`participation_rate`, shareholders' flows
+    /// uses `flow_lookback_days`, ...), so this is deliberately NOT gated by
+    /// an `Access`/`GlobalAccess` token the way a domain's own data is —
+    /// requiring one would mean, say, a Nav-only grant could not compute
+    /// `metrics/summary` at all. The `/settings` route itself is still
+    /// gated (`Domain::Reference`) at the router and re-authorized in
+    /// `handlers::settings`; this method is the shared, ungated query both
+    /// that handler and every other domain's handler read through.
+    pub async fn get_settings(&self, portfolio_id: i64) -> anyhow::Result<AppSettings> {
+        let rows: Vec<(String, serde_json::Value)> =
+            sqlx::query_as("SELECT key, value FROM settings WHERE portfolio_id = $1")
+                .bind(portfolio_id)
+                .fetch_all(self.pool).await?;
+        let get_f = |k: &str, d: f64| rows.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.as_f64()).unwrap_or(d);
+        let get_u = |k: &str, d: u32| rows.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.as_u64()).map(|v| v as u32).unwrap_or(d);
+        let liquidity_default_days = rows.iter().find(|(key, _)| key == "liquidity_default_days")
+            .map(|(_, v)| v.clone())
+            .or_else(|| rows.iter().find(|(key, _)| key == "liquidity_defaults")
+                .map(|(_, v)| days_from_legacy_buckets(v)))
+            .unwrap_or_else(default_liquidity_default_days);
+        Ok(AppSettings {
+            risk_free_rate: get_f("risk_free_rate", 0.02),
+            var_confidence: get_f("var_confidence", 0.99),
+            var_horizon_days: get_u("var_horizon_days", 20),
+            var_window_days: get_u("var_window_days", 252),
+            var_limit: get_f("var_limit", 0.20),
+            short_dd_max_days: get_u("short_dd_max_days", 50),
+            liquidity_default_days,
+            redemption_shock: get_f("redemption_shock", 0.30),
+            participation_rate: get_f("participation_rate", default_participation_rate()),
+            adv_stress_factor: get_f("adv_stress_factor", default_adv_stress_factor()),
+            liquidity_horizon_days: get_u("liquidity_horizon_days", default_liquidity_horizon_days()),
+            settlement_deadline_days: get_u("settlement_deadline_days", default_settlement_deadline_days()),
+            adv_max_age_days: get_u("adv_max_age_days", default_adv_max_age_days()),
+            flow_lookback_days: get_u("flow_lookback_days", default_flow_lookback_days()),
+        })
     }
-    Ok(())
+
+    pub async fn put_settings(&self, portfolio_id: i64, s: &AppSettings) -> anyhow::Result<()> {
+        let pairs: Vec<(&str, serde_json::Value)> = vec![
+            ("risk_free_rate", s.risk_free_rate.into()),
+            ("var_confidence", s.var_confidence.into()),
+            ("var_horizon_days", s.var_horizon_days.into()),
+            ("var_window_days", s.var_window_days.into()),
+            ("var_limit", s.var_limit.into()),
+            ("short_dd_max_days", s.short_dd_max_days.into()),
+            ("liquidity_default_days", s.liquidity_default_days.clone()),
+            ("redemption_shock", s.redemption_shock.into()),
+            ("participation_rate", s.participation_rate.into()),
+            ("adv_stress_factor", s.adv_stress_factor.into()),
+            ("liquidity_horizon_days", s.liquidity_horizon_days.into()),
+            ("settlement_deadline_days", s.settlement_deadline_days.into()),
+            ("adv_max_age_days", s.adv_max_age_days.into()),
+            ("flow_lookback_days", s.flow_lookback_days.into()),
+        ];
+        for (k, v) in pairs {
+            sqlx::query(
+                "INSERT INTO settings (portfolio_id, key, value) VALUES ($1, $2, $3)
+                 ON CONFLICT (portfolio_id, key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(portfolio_id)
+            .bind(k)
+            .bind(v)
+            .execute(self.pool)
+            .await?;
+        }
+        Ok(())
+    }
 }

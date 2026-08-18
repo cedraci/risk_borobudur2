@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
-use db::repo;
+use db::auth::marker::{Import, Positions};
+use db::auth::AuthCtx;
 
 fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
 
@@ -50,7 +51,12 @@ async fn cpon_deltas_become_derived_dividends() {
         ("Action", "FR0000000001", "EUR", 1000.0, 1000.0),
     ]).await;
 
-    let n = repo::derive_dividends(&pool, 1).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let a = scoped.authorize::<Positions, Import>(1).unwrap();
+
+    let n = scoped.derive_dividends(&a).await.unwrap();
     assert_eq!(n, 2, "one growth event + one appearance event");
     let rows = derived_rows(&pool).await;
     assert_eq!(rows.len(), 2);
@@ -58,7 +64,7 @@ async fn cpon_deltas_become_derived_dividends() {
     assert_eq!(rows[1], (d("2026-08-06"), "GB0000000001".into(), 300.0, "GBP".into()));
 
     // Convergence: re-running (as every import does) yields the same set.
-    let n2 = repo::derive_dividends(&pool, 1).await.unwrap();
+    let n2 = scoped.derive_dividends(&a).await.unwrap();
     assert_eq!(n2, 2);
     assert_eq!(derived_rows(&pool).await.len(), 2);
 
@@ -66,7 +72,7 @@ async fn cpon_deltas_become_derived_dividends() {
     // the derived events on that date.
     sqlx::query("INSERT INTO dividends (portfolio_id, provision_date, issuer, amount, currency, derived) VALUES (1, '2026-08-06', 'EXPLICIT', 99, 'EUR', false)")
         .execute(&pool).await.unwrap();
-    let n3 = repo::derive_dividends(&pool, 1).await.unwrap();
+    let n3 = scoped.derive_dividends(&a).await.unwrap();
     assert_eq!(n3, 0, "explicit journal covers the date");
     assert!(derived_rows(&pool).await.is_empty());
 

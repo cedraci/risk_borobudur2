@@ -1,3 +1,6 @@
+use db::auth::marker::{Import, Nav, Positions, Transactions};
+use db::auth::AuthCtx;
+
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx");
 
 /// `OPERATIONS` is meant to be a complete lifetime trade history, so a real
@@ -51,10 +54,16 @@ async fn pam_check_distinguishes_incomplete_history_from_genuine_drift() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let p = scoped.authorize::<Positions, Import>(1).unwrap();
+    let n = scoped.authorize::<Nav, Import>(1).unwrap();
+    let t = scoped.authorize::<Transactions, Import>(1).unwrap();
 
     let bytes = std::fs::read(SAMPLE).unwrap();
     let wb = ingest::parse_workbook(&bytes).unwrap();
-    let out = db::repo::import_workbook(&pool, 1, "sample.xlsx", "sha-pam-1", &wb).await.unwrap();
+    let out = scoped.import_workbook(&p, &n, &t, "sample.xlsx", "sha-pam-1", &wb).await.unwrap();
 
     let has = |isin: &str, needle: &str| {
         out.warnings.iter().any(|w| w.starts_with(isin) && w.contains(needle))

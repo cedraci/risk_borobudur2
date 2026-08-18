@@ -1,10 +1,11 @@
+use crate::auth::marker::{Import, Nav, Positions, Reference, Transactions, View};
+use crate::auth::Access;
+use crate::scoped::Scoped;
 use chrono::NaiveDate;
 use ingest::ParsedWorkbook;
-use sqlx::PgPool;
 
-use super::positions::derive_dividends;
 use super::reference::{FuturesContract, SELECT_CONTRACTS};
-use super::shareholders::flows_upsert;
+use super::shareholders::flows_upsert_conn;
 
 #[derive(Debug, serde::Serialize)]
 pub struct ImportOutcome {
@@ -29,25 +30,41 @@ pub struct ImportRecord {
     pub row_counts: serde_json::Value,
 }
 
-pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha256: &str, b: &ingest::adapter::UniversalBatch) -> anyhow::Result<ImportOutcome> {
-    let all_positions = || b.snapshots.iter().flat_map(|s| s.positions.iter());
+impl<'a> Scoped<'a> {
+    /// Writes positions, NAV and transactions in one transaction, so it
+    /// requires all three. The three tokens must all name the same
+    /// portfolio — asserted below rather than derived from just one, so a
+    /// caller cannot mint `positions` for one portfolio and `nav` for
+    /// another and have this silently import into the wrong one.
+    pub async fn import_batch(
+        &self,
+        positions_a: &Access<Positions, Import>,
+        nav: &Access<Nav, Import>,
+        transactions: &Access<Transactions, Import>,
+        filename: &str, sha256: &str, b: &ingest::adapter::UniversalBatch,
+    ) -> anyhow::Result<ImportOutcome> {
+        debug_assert_eq!(positions_a.portfolio_id(), nav.portfolio_id());
+        debug_assert_eq!(positions_a.portfolio_id(), transactions.portfolio_id());
+        let portfolio_id = positions_a.portfolio_id();
+        let pool = self.pool;
+        let all_positions = || b.snapshots.iter().flat_map(|s| s.positions.iter());
 
-    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM imports WHERE portfolio_id = $1 AND sha256 = $2")
-        .bind(portfolio_id).bind(sha256).fetch_optional(pool).await?
-    {
-        // Duplicate: nothing re-ingested, but futures spec seeding still runs
-        // (same rationale as before — repair path for pre-futures databases).
+        if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM imports WHERE portfolio_id = $1 AND sha256 = $2")
+            .bind(portfolio_id).bind(sha256).fetch_optional(pool).await?
+        {
+            // Duplicate: nothing re-ingested, but futures spec seeding still runs
+            // (same rationale as before — repair path for pre-futures databases).
+            let mut tx = pool.begin().await?;
+            let positions: Vec<ingest::PositionRow> = all_positions().cloned().collect();
+            let warnings = seed_futures_contracts(&mut tx, &positions).await?;
+            tx.commit().await?;
+            return Ok(ImportOutcome {
+                import_id: id, duplicate: true, nav_rows: 0, positions: 0,
+                dividends: 0, operations: 0, div_ops_replaced: false, warnings,
+            });
+        }
+
         let mut tx = pool.begin().await?;
-        let positions: Vec<ingest::PositionRow> = all_positions().cloned().collect();
-        let warnings = seed_futures_contracts(&mut tx, &positions).await?;
-        tx.commit().await?;
-        return Ok(ImportOutcome {
-            import_id: id, duplicate: true, nav_rows: 0, positions: 0,
-            dividends: 0, operations: 0, div_ops_replaced: false, warnings,
-        });
-    }
-
-    let mut tx = pool.begin().await?;
 
     // Only ever compare a journal-bearing batch's date against OTHER
     // journal-bearing imports — CACEIS CSV imports also create `imports`
@@ -72,7 +89,7 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
         row_counts["warnings"] = serde_json::json!(b.warnings);
     }
     if let Some(rows) = &b.flows {
-        flows_upsert(&mut tx, portfolio_id, rows).await?;
+        flows_upsert_conn(&mut tx, portfolio_id, rows).await?;
         row_counts["flows"] = serde_json::json!(rows.len());
     }
     let (import_id,): (i64,) = sqlx::query_as(
@@ -236,42 +253,49 @@ pub async fn import_batch(pool: &PgPool, portfolio_id: i64, filename: &str, sha2
         "SELECT EXISTS(SELECT 1 FROM dividends WHERE portfolio_id = $1 AND derived)")
         .bind(portfolio_id).fetch_one(pool).await?;
     if (b.dividends.is_none() && !b.snapshots.is_empty()) || has_derived_rows {
-        let n = derive_dividends(pool, portfolio_id).await?;
+        let n = self.derive_dividends(positions_a).await?;
         if n > 0 {
             warnings.push(format!("{n} dividend event(s) derived from receivable deltas"));
         }
     }
 
-    Ok(ImportOutcome {
-        import_id,
-        duplicate: false,
-        nav_rows,
-        positions: n_positions,
-        dividends: if replace_div_ops { n_div } else { 0 },
-        operations: if replace_div_ops { n_ops } else { 0 },
-        div_ops_replaced: replace_div_ops,
-        warnings,
-    })
-}
+        Ok(ImportOutcome {
+            import_id,
+            duplicate: false,
+            nav_rows,
+            positions: n_positions,
+            dividends: if replace_div_ops { n_div } else { 0 },
+            operations: if replace_div_ops { n_ops } else { 0 },
+            div_ops_replaced: replace_div_ops,
+            warnings,
+        })
+    }
 
-pub async fn import_workbook(pool: &PgPool, portfolio_id: i64, filename: &str, sha256: &str, wb: &ParsedWorkbook) -> anyhow::Result<ImportOutcome> {
-    // Clone-into-batch: ParsedWorkbook fields are all Clone.
-    let b = ingest::adapter::to_batch(ParsedWorkbook {
-        nav_date: wb.nav_date, aum: wb.aum, shares: wb.shares, nav: wb.nav,
-        positions: wb.positions.clone(), nav_history: wb.nav_history.clone(),
-        dividends: wb.dividends.clone(), operations: wb.operations.clone(),
-    });
-    import_batch(pool, portfolio_id, filename, sha256, &b).await
-}
+    pub async fn import_workbook(
+        &self,
+        positions_a: &Access<Positions, Import>,
+        nav: &Access<Nav, Import>,
+        transactions: &Access<Transactions, Import>,
+        filename: &str, sha256: &str, wb: &ParsedWorkbook,
+    ) -> anyhow::Result<ImportOutcome> {
+        // Clone-into-batch: ParsedWorkbook fields are all Clone.
+        let b = ingest::adapter::to_batch(ParsedWorkbook {
+            nav_date: wb.nav_date, aum: wb.aum, shares: wb.shares, nav: wb.nav,
+            positions: wb.positions.clone(), nav_history: wb.nav_history.clone(),
+            dividends: wb.dividends.clone(), operations: wb.operations.clone(),
+        });
+        self.import_batch(positions_a, nav, transactions, filename, sha256, &b).await
+    }
 
-pub async fn imports_list(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<ImportRecord>> {
-    Ok(sqlx::query_as(
-        "SELECT id, filename, nav_date, imported_at, row_counts FROM imports
-         WHERE portfolio_id = $1 ORDER BY imported_at DESC",
-    )
-    .bind(portfolio_id)
-    .fetch_all(pool)
-    .await?)
+    pub async fn imports_list(&self, a: &Access<Reference, View>) -> anyhow::Result<Vec<ImportRecord>> {
+        Ok(sqlx::query_as(
+            "SELECT id, filename, nav_date, imported_at, row_counts FROM imports
+             WHERE portfolio_id = $1 ORDER BY imported_at DESC",
+        )
+        .bind(a.portfolio_id())
+        .fetch_all(self.pool)
+        .await?)
+    }
 }
 
 /// Seed a contract spec for every futures root the database does not know yet,

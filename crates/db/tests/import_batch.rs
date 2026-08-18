@@ -1,5 +1,6 @@
 use chrono::NaiveDate;
-use db::repo;
+use db::auth::marker::{Import, Nav, Positions, Reference, Transactions};
+use db::auth::AuthCtx;
 use ingest::adapter::{Snapshot, UniversalBatch};
 use ingest::{DividendRow, NavHistoryRow, OperationRow, PositionRow};
 
@@ -14,11 +15,27 @@ fn pos(asset_type: &str, isin: &str, valuation_eur: f64) -> PositionRow {
     }
 }
 
+fn tokens(scoped: &db::scoped::Scoped<'_>, id: i64) -> (
+    db::auth::Access<Positions, Import>,
+    db::auth::Access<Nav, Import>,
+    db::auth::Access<Transactions, Import>,
+) {
+    (
+        scoped.authorize::<Positions, Import>(id).unwrap(),
+        scoped.authorize::<Nav, Import>(id).unwrap(),
+        scoped.authorize::<Transactions, Import>(id).unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let (p, n, t) = tokens(&scoped, 1);
 
     // Seed an explicit dividend so we can prove a journal-less batch leaves it alone.
     sqlx::query("INSERT INTO dividends (portfolio_id, provision_date, issuer, amount, currency) VALUES (1, '2026-08-01', 'SEED', 10, 'EUR')")
@@ -39,7 +56,7 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
         ref_facts: vec![],
         warnings: vec!["row 5: dropped".into()],
     };
-    let out = repo::import_batch(&pool, 1, "f.csv", "sha-batch-1", &b).await.unwrap();
+    let out = scoped.import_batch(&p, &n, &t, "f.csv", "sha-batch-1", &b).await.unwrap();
 
     assert!(!out.duplicate);
     assert_eq!(out.nav_rows, 1);
@@ -50,9 +67,9 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
     assert!(out.warnings.iter().any(|w| w.contains("dropped")), "{:?}", out.warnings);
 
     // Explicit dividend survived a journal-less import.
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM dividends WHERE portfolio_id = 1")
+    let n_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM dividends WHERE portfolio_id = 1")
         .fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 1);
+    assert_eq!(n_rows, 1);
 
     // Ref hint filled NULL columns.
     let (country, ticker): (Option<String>, Option<String>) = sqlx::query_as(
@@ -73,7 +90,7 @@ async fn batch_without_div_ops_leaves_journals_untouched_and_checks_tna() {
         ref_facts: vec![],
         warnings: vec![],
     };
-    repo::import_batch(&pool, 1, "f2.csv", "sha-batch-2", &b2).await.unwrap();
+    scoped.import_batch(&p, &n, &t, "f2.csv", "sha-batch-2", &b2).await.unwrap();
     let country2: Option<String> = sqlx::query_scalar("SELECT country_of_risk FROM instrument_refs WHERE code = 'FR0000000001'")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(country2.as_deref(), Some("France"), "hint must never overwrite");
@@ -92,6 +109,10 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let (p, n, t) = tokens(&scoped, 1);
 
     // A CACEIS-style CSV import lands first, dated LATER than the recap that
     // follows it — no dividends/operations, just NAV + positions.
@@ -106,7 +127,7 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
         ref_facts: vec![],
         warnings: vec![],
     };
-    repo::import_batch(&pool, 1, "csv.csv", "sha-csv-1", &csv_batch).await.unwrap();
+    scoped.import_batch(&p, &n, &t, "csv.csv", "sha-csv-1", &csv_batch).await.unwrap();
 
     // The recap, dated EARLIER than the CSV, is the first journal-bearing
     // batch this portfolio has ever seen — it must still replace.
@@ -125,15 +146,15 @@ async fn csv_import_does_not_poison_replace_gate_for_older_journal_batch() {
         ref_facts: vec![],
         warnings: vec![],
     };
-    let out = repo::import_batch(&pool, 1, "recap.xlsx", "sha-recap-1", &recap_batch).await.unwrap();
+    let out = scoped.import_batch(&p, &n, &t, "recap.xlsx", "sha-recap-1", &recap_batch).await.unwrap();
 
     assert!(out.div_ops_replaced,
         "an older-dated journal-bearing batch must still replace when no journal-bearing import has run yet");
     assert_eq!(out.operations, 1);
 
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM operations WHERE portfolio_id = 1")
+    let n_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM operations WHERE portfolio_id = 1")
         .fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 1, "operations must have landed despite an intervening later-dated CSV import");
+    assert_eq!(n_rows, 1, "operations must have landed despite an intervening later-dated CSV import");
 
     pool.close().await;
     edb.stop().await;
@@ -147,6 +168,10 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let (p, n, t) = tokens(&scoped, 1);
 
     // Day 1 (baseline): a CACEIS-style CSV import, no journal, a CPON
     // receivable at 580.
@@ -159,7 +184,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
         ] }],
         dividends: None, operations: None, flows: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
-    repo::import_batch(&pool, 1, "day1.csv", "sha-d1", &b1).await.unwrap();
+    scoped.import_batch(&p, &n, &t, "day1.csv", "sha-d1", &b1).await.unwrap();
 
     // Day 2: the receivable grows to 920 -> a +340 derive-time growth event.
     let b2 = UniversalBatch {
@@ -171,7 +196,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
         ] }],
         dividends: None, operations: None, flows: None, ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
-    let out2 = repo::import_batch(&pool, 1, "day2.csv", "sha-d2", &b2).await.unwrap();
+    let out2 = scoped.import_batch(&p, &n, &t, "day2.csv", "sha-d2", &b2).await.unwrap();
     assert!(out2.warnings.iter().any(|w| w.contains("derived")), "{:?}", out2.warnings);
 
     let derived_d2: (f64, bool) = sqlx::query_as(
@@ -198,7 +223,7 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
         flows: None,
         ref_hints: vec![], ref_facts: vec![], warnings: vec![],
     };
-    let out3 = repo::import_batch(&pool, 1, "day3.xlsx", "sha-d3", &b3).await.unwrap();
+    let out3 = scoped.import_batch(&p, &n, &t, "day3.xlsx", "sha-d3", &b3).await.unwrap();
     assert!(out3.div_ops_replaced);
     assert!(out3.warnings.iter().any(|w| w.contains("derived")), "{:?}", out3.warnings);
 
@@ -221,9 +246,9 @@ async fn nav_recap_replace_preserves_and_re_derives_dividends() {
     // Exactly two rows total: the explicit one on 08-06 and the re-derived
     // one on 08-07 — the old derived 08-06 row must be gone, superseded by
     // the explicit row, not lingering alongside it.
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM dividends WHERE portfolio_id = 1")
+    let n_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM dividends WHERE portfolio_id = 1")
         .fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 2);
+    assert_eq!(n_rows, 2);
 
     pool.close().await;
     edb.stop().await;
@@ -249,13 +274,19 @@ async fn hisinv_facts_overwrite_on_reimport_but_never_touch_user_owned_columns()
     let dir = tempfile::tempdir().unwrap();
     let edb = db::embedded::start(dir.path(), true).await.unwrap();
     let pool = db::connect(&edb.url).await.unwrap();
+    let dbh = db::Db::from_pool(pool.clone());
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let (p, n, t) = tokens(&scoped, 1);
+    let ref_view = scoped.authorize_global::<Reference, db::auth::marker::View>().unwrap();
+    let ref_configure = scoped.authorize_global::<Reference, db::auth::marker::Configure>().unwrap();
 
     // Import 1: the real HISINVLUX fixture sets the depositary facts.
     let bytes = std::fs::read(HISINV_FIXTURE).unwrap();
     let batch1 = ingest::caceis::parse_hisinv(HISINV_FNAME, &bytes).expect("fixture parses");
-    repo::import_batch(&pool, 1, "hisinv.csv", "sha-hisinv-1", &batch1).await.unwrap();
+    scoped.import_batch(&p, &n, &t, "hisinv.csv", "sha-hisinv-1", &batch1).await.unwrap();
 
-    let refs = repo::refs_all(&pool).await.unwrap();
+    let refs = scoped.refs_all(&ref_view).await.unwrap();
     let bond = refs.iter().find(|r| r.code == "US105756CL22").expect("bond ref stored");
     assert_eq!(bond.market_place.as_deref(), Some("186"));
     assert_eq!(bond.bond_next_coupon, Some(d("2026-09-15")));
@@ -265,9 +296,9 @@ async fn hisinv_facts_overwrite_on_reimport_but_never_touch_user_owned_columns()
     let mut edited = bond.clone();
     edited.liquidity_days = Some(3.0);
     edited.adv_eligible = Some(true);
-    repo::refs_upsert(&pool, &edited).await.unwrap();
+    scoped.refs_upsert(&ref_configure, &edited).await.unwrap();
 
-    let refs_mid = repo::refs_all(&pool).await.unwrap();
+    let refs_mid = scoped.refs_all(&ref_view).await.unwrap();
     let bond_mid = refs_mid.iter().find(|r| r.code == "US105756CL22").expect("bond ref still present");
     assert_eq!(bond_mid.liquidity_days, Some(3.0));
     assert_eq!(bond_mid.adv_eligible, Some(true));
@@ -298,9 +329,9 @@ async fn hisinv_facts_overwrite_on_reimport_but_never_touch_user_owned_columns()
         }],
         warnings: vec![],
     };
-    repo::import_batch(&pool, 1, "hisinv2.csv", "sha-hisinv-2", &batch2).await.unwrap();
+    scoped.import_batch(&p, &n, &t, "hisinv2.csv", "sha-hisinv-2", &batch2).await.unwrap();
 
-    let refs_after = repo::refs_all(&pool).await.unwrap();
+    let refs_after = scoped.refs_all(&ref_view).await.unwrap();
     let bond_after = refs_after.iter().find(|r| r.code == "US105756CL22").expect("bond ref still present");
 
     // The new fact values win — proves overwrite, not fill-only. A reversed

@@ -1,5 +1,7 @@
+use crate::auth::marker::{Transactions, View};
+use crate::auth::Access;
+use crate::scoped::Scoped;
 use chrono::NaiveDate;
-use sqlx::PgPool;
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct OperationRecord {
@@ -15,14 +17,16 @@ pub struct OperationRecord {
     pub fees: Option<f64>,
 }
 
-pub async fn operations_all(pool: &PgPool, portfolio_id: i64) -> anyhow::Result<Vec<OperationRecord>> {
-    Ok(sqlx::query_as(
-        "SELECT trade_date, side, isin, ticker, name, currency,
-                quantity::float8 AS quantity, net_price::float8 AS net_price,
-                net_amount::float8 AS net_amount, fees::float8 AS fees
-         FROM operations WHERE portfolio_id = $1 ORDER BY trade_date, id",
-    )
-    .bind(portfolio_id)
-    .fetch_all(pool)
-    .await?)
+impl<'a> Scoped<'a> {
+    pub async fn operations_all(&self, a: &Access<Transactions, View>) -> anyhow::Result<Vec<OperationRecord>> {
+        Ok(sqlx::query_as(
+            "SELECT trade_date, side, isin, ticker, name, currency,
+                    quantity::float8 AS quantity, net_price::float8 AS net_price,
+                    net_amount::float8 AS net_amount, fees::float8 AS fees
+             FROM operations WHERE portfolio_id = $1 ORDER BY trade_date, id",
+        )
+        .bind(a.portfolio_id())
+        .fetch_all(self.pool)
+        .await?)
+    }
 }
