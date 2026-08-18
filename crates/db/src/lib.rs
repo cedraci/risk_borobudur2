@@ -31,7 +31,7 @@ impl Db {
     }
 
     pub fn admin(&self) -> crate::admin::Admin<'_> {
-        crate::admin::Admin::new(&self.pool)
+        crate::admin::Admin::new(self.pool())
     }
 
     pub(crate) fn pool(&self) -> &PgPool {

@@ -74,10 +74,15 @@ impl LocalAccounts {
 
         let user = admin.user_by_email(email).await?;
         // An unknown account still pays the hashing cost, so response timing
-        // does not distinguish "no such user" from "wrong password".
+        // does not distinguish "no such user" from "wrong password". A
+        // disabled account pays the same cost too — verify unconditionally,
+        // then discard the result — so timing cannot distinguish "exists and
+        // disabled" from either of the other two cases either.
         let ok = match &user {
-            Some(u) if !u.disabled => verify_password(password, &u.password_hash),
-            Some(_) => false,
+            Some(u) => {
+                let verified = verify_password(password, &u.password_hash);
+                verified && !u.disabled
+            }
             None => {
                 let _ = verify_password(password, "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$\
                                                     5Zt7pKQKUwjHhBDUMTLDCcxT4rWmMoTPxSDLbGYwqPo");
