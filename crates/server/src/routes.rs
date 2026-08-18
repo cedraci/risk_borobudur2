@@ -31,6 +31,11 @@ pub fn router(state: AppState) -> Router {
         // counts only, not the holdings themselves); that extra domain isn't
         // gated here — Task 11's secondary-domain worklist.
         .protected_global("/api/bloomberg/adv-due", get(handlers::bloomberg::adv_due), Domain::MarketData, Action::View)
+        // `upload`'s fx-drift cross-check also walks every portfolio's
+        // positions (Positions, secondary here). A portfolio the caller
+        // cannot see is now named in `fx_check_skipped` rather than simply
+        // contributing nothing to `fx_check` — an empty result there used to
+        // read identically to "checked the fleet, no drift found" (Task 11).
         .protected_global("/api/bloomberg/upload", axum::routing::post(handlers::bloomberg::upload), Domain::MarketData, Action::Import)
         // Filters, not authorizes: any authenticated principal may call it,
         // and `Scoped::portfolios_list` narrows the result to what their
@@ -66,30 +71,43 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/metrics/drawdowns", get(handlers::metrics::drawdowns), Domain::Nav, Action::View)
         .protected("/api/portfolios/{id}/metrics/calendar", get(handlers::metrics::calendar), Domain::Nav, Action::View)
         .protected("/api/portfolios/{id}/metrics/var", get(handlers::metrics::var), Domain::Nav, Action::View)
+        // Concentration's route gate is Positions only, but the 5/10/40
+        // checks are enriched by Reference (issuer-group/liquidity
+        // overrides that can regroup exposures across issuers). A denied
+        // Reference grant is surfaced as `issuer_overrides: unavailable` in
+        // the response rather than silently computing the checks without
+        // the overrides — that would let a real breach hide behind a
+        // checks array that still reads "ok" (Task 9 review ruling 2 / Task
+        // 11's report).
         .protected("/api/portfolios/{id}/metrics/concentration", get(handlers::limits::concentration_h), Domain::Positions, Action::View)
         // Liquidity's route gate is Positions only, but the handler also
         // reads Reference (issuer-group/liquidity overrides, via the shared
         // `snapshot` helper), Nav (AUM at the snapshot date) and
         // Shareholders (the top-5 redemption register) — each a secondary
-        // domain here. All three are soft-checked today and degrade to an
-        // empty/no-data read (lost enrichment, the established "no data
-        // yet" response shape, or "no shareholder register") rather than
-        // hard-gating the whole endpoint on a grant this route doesn't
-        // declare. Task 11 owns turning that silent degrade into an
-        // explicit unavailable/degraded marker in the response — see the
-        // VERDICT-FALSIFICATION comment on `refs_all` in handlers/limits.rs.
+        // domain here, soft-checked rather than hard-gating the whole
+        // endpoint on a grant this route doesn't declare. Reference and Nav
+        // still degrade to lost enrichment / the established "no data yet"
+        // shape (neither one flips a verdict from breach to pass — see
+        // Task 11's report). Shareholders is the one that feeds a pass/fail
+        // scenario status: a denied grant now reports the top-5 scenario
+        // `unavailable` with "not permitted: shareholder register",
+        // distinguishable from the pre-existing "no shareholder register"
+        // (register granted but never loaded) — see `liquidity_h`.
         .protected("/api/portfolios/{id}/metrics/liquidity", get(handlers::limits::liquidity_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/rates", get(handlers::limits::rates_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/derivatives", get(handlers::limits::derivatives_h), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/metrics/backtest", get(handlers::metrics::backtest), Domain::Nav, Action::View)
-        // P&L also reads transaction-level trade history (`operations_all`)
-        // to decompose flows; that extra domain isn't gated here — Task 11's
-        // secondary-domain worklist.
+        // P&L also reads transaction-level trade history (`operations_all`);
+        // a denied Transactions grant is surfaced as
+        // `transaction_detail: unavailable` in the response (Task 11) rather
+        // than silently folded into the reconciliation residual.
         .protected("/api/portfolios/{id}/pnl", get(handlers::pnl::get), Domain::Positions, Action::View)
         // EMIR also reads futures contract specs and counterparty/OTC
-        // classification data (`contracts_all`, `emir_kpis_all` — reference);
-        // that extra domain isn't gated here — Task 11's secondary-domain
-        // worklist.
+        // classification data (`contracts_all`, `emir_kpis_all` — reference).
+        // A denied grant is surfaced as `clearing_obligation: unavailable`
+        // (every verdict built on it would otherwise default to "ok"), and
+        // the evidence export refuses outright rather than emit a document
+        // built on it (Task 11).
         .protected("/api/portfolios/{id}/emir", get(handlers::emir::get), Domain::Positions, Action::View)
         .protected("/api/portfolios/{id}/emir/kpis/{month}", axum::routing::put(handlers::emir::put_kpi), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}/emir/export", get(handlers::emir::export), Domain::Positions, Action::Export)

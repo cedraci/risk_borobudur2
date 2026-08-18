@@ -72,10 +72,14 @@ pub async fn get(
     // (this route is gated on Positions) — see routes.rs's comment on this
     // route for `operations_all`; the same soft-degrade applies to the
     // others, each falling back to an empty read rather than failing the
-    // whole request.
-    let ops = match scoped.authorize::<Transactions, View>(pid) {
-        Ok(tv) => scoped.operations_all(&tv).await?,
-        Err(_) => Vec::new(),
+    // whole request. Transactions is the one that feeds a computed
+    // per-instrument realized/unrealized split: without it every trade
+    // looks like a pure valuation change, and the gap lands invisibly inside
+    // the reconciliation's cash line rather than being named. A denied grant
+    // is therefore surfaced explicitly via `transaction_detail` below.
+    let (ops, transactions_denied) = match scoped.authorize::<Transactions, View>(pid) {
+        Ok(tv) => (scoped.operations_all(&tv).await?, None),
+        Err(denied) => (Vec::new(), Some(denied)),
     };
     let divs = scoped.dividends_all(&a).await?;
     let refs = match scoped.authorize_global::<Reference, View>() {
@@ -116,6 +120,12 @@ pub async fn get(
     // Trades, keyed by ISIN.
     let mut trades_by_isin: HashMap<String, Vec<Trade>> = HashMap::new();
     let mut warnings: Vec<String> = Vec::new();
+    if let Some(denied) = &transactions_denied {
+        warnings.push(format!(
+            "{}; trade-level P&L attribution is unavailable and the reconciliation residual may be distorted",
+            denied.reason()
+        ));
+    }
     for o in &ops {
         let (Some(isin), Some(qty), Some(px)) = (o.isin.as_deref(), o.quantity, o.net_price) else { continue };
         let Some(buy) = is_buy(&o.side) else {
@@ -346,6 +356,10 @@ pub async fn get(
         None => group_by(rows, Dimension::AssetClass),
     };
 
+    let transaction_detail = match &transactions_denied {
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+        None => serde_json::json!({"status": "ok"}),
+    };
     Ok(Json(serde_json::json!({
         "empty": false,
         "period": {
@@ -355,6 +369,7 @@ pub async fn get(
         "groups": groups,
         "reconciliation": recon,
         "unclassified": unclassified,
+        "transaction_detail": transaction_detail,
         "warnings": warnings,
     })))
 }

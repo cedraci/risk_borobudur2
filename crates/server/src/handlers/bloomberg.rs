@@ -235,10 +235,25 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
     // every snapshot date, across every non-archived portfolio's positions —
     // a rate mismatch anywhere in the fleet is reported. Refs/FX storage
     // above stays untouched: that data is shared across portfolios.
-    // Positions is a secondary domain here too.
+    // Positions is a secondary domain here too: a principal with the global
+    // MarketData/Import grant this route requires need not also hold
+    // Positions/View on every portfolio. A portfolio the caller cannot see
+    // simply contributes no rows to `fx_check` — an empty result that reads
+    // identically to "checked, no drift found". `fx_check_skipped` names
+    // every portfolio that was skipped for that reason, so an empty
+    // `fx_check` can be told apart from an unchecked fleet.
     let mut fx_check = Vec::new();
+    let mut fx_check_skipped = Vec::new();
     for pf in scoped.portfolios_list().await?.iter().filter(|p| !p.archived) {
-        let Ok(pv) = scoped.authorize::<Positions, View>(pf.id) else { continue };
+        let pv = match scoped.authorize::<Positions, View>(pf.id) {
+            Ok(pv) => pv,
+            Err(denied) => {
+                fx_check_skipped.push(serde_json::json!({
+                    "portfolio_id": pf.id, "portfolio_name": pf.name, "reason": denied.reason(),
+                }));
+                continue;
+            }
+        };
         for d in scoped.position_dates(&pv).await? {
             let positions = scoped.positions_for(&pv, d).await?;
             for o in parsed.fx.iter().filter(|o| o.date == d) {
@@ -273,5 +288,6 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
         "adv_rows": adv_stored,
         "skipped": parsed.skipped,
         "fx_check": fx_check,
+        "fx_check_skipped": fx_check_skipped,
     })))
 }

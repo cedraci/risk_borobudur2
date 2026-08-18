@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use chrono::{Datelike, NaiveDate};
 use db::auth::marker::{Configure, Export, Positions, Reference, View};
-use db::auth::{Access, AuthCtx};
+use db::auth::{Access, AuthCtx, Denied};
 use db::scoped::Scoped;
 use ingest::emir_file;
 
@@ -36,6 +36,18 @@ pub struct Assembly {
     pub futures_count: usize,
     pub kpis: Vec<db::repo::EmirKpi>,
     pub contracts: Vec<db::repo::FuturesContract>,
+    /// Set when the Reference read behind `contracts` (`contracts_all`) was
+    /// denied rather than genuinely empty. `report`/`monitors` above are
+    /// still computed from whatever positions data is available, but every
+    /// contract in that computation was treated as non-OTC by default (see
+    /// `emir_positions`) — every clearing-obligation verdict built on it
+    /// reads "ok" regardless of the fund's real OTC exposure. Callers must
+    /// not present that verdict as a pass; `get` surfaces it as
+    /// `clearing_obligation: unavailable` and `export` refuses outright.
+    pub contracts_denied: Option<Denied>,
+    /// Set when the Reference read behind `kpis` (`emir_kpis_all`) was
+    /// denied rather than genuinely having no recorded KPIs.
+    pub kpis_denied: Option<Denied>,
 }
 
 /// One month-end's positions as EMIR sees them: the exposure path computes
@@ -77,14 +89,15 @@ pub async fn assemble(
 
     // Reference is a secondary domain here (this route is gated on
     // Positions) — see routes.rs's comment on this route: `contracts_all`
-    // and `emir_kpis_all` degrade to empty rather than gating the endpoint.
-    // VERDICT-FALSIFICATION (Task 11): a denied Reference read degrades to
-    // empty contract specs, which renders every clearing-obligation verdict
-    // "ok" and flows into the EMIR export as a pass. Task 11 must replace
-    // this with an explicit unavailable status and refuse the export.
-    let specs = match scoped.authorize_global::<Reference, View>() {
-        Ok(rv) => scoped.contracts_all(&rv).await?,
-        Err(_) => Vec::new(),
+    // and `emir_kpis_all` still degrade to empty rather than gating the
+    // endpoint (Positions data alone is worth returning), but the denial is
+    // now carried through in `contracts_denied`/`kpis_denied` rather than
+    // discarded. Every contract-spec-dependent computation below (OTC
+    // flagging, hence every clearing-obligation verdict) is only trustworthy
+    // when `contracts_denied` is `None`; `get`/`export` below both check it.
+    let (specs, contracts_denied) = match scoped.authorize_global::<Reference, View>() {
+        Ok(rv) => (scoped.contracts_all(&rv).await?, None),
+        Err(denied) => (Vec::new(), Some(denied)),
     };
     let mut months = Vec::with_capacity(12);
     for (month, chosen) in emir::month_window(anchor, &dates) {
@@ -119,11 +132,14 @@ pub async fn assemble(
     };
 
     let report = emir::thresholds(&months);
-    let kpis = match scoped.authorize::<Reference, View>(pid) {
-        Ok(rv) => scoped.emir_kpis_all(&rv).await?,
-        Err(_) => Vec::new(),
+    let (kpis, kpis_denied) = match scoped.authorize::<Reference, View>(pid) {
+        Ok(rv) => (scoped.emir_kpis_all(&rv).await?, None),
+        Err(denied) => (Vec::new(), Some(denied)),
     };
-    Ok(Some(Assembly { dates, anchor, report, monitors, margin, futures_count, kpis, contracts: specs }))
+    Ok(Some(Assembly {
+        dates, anchor, report, monitors, margin, futures_count, kpis, contracts: specs,
+        contracts_denied, kpis_denied,
+    }))
 }
 
 pub async fn get(
@@ -135,18 +151,34 @@ pub async fn get(
     let Some(a) = assemble(&scoped, &a, pid, &q.date).await? else {
         return Ok(Json(serde_json::json!({"empty": true, "warnings": ["No snapshots imported yet."]})));
     };
+    // Ruling 1 (Task 9 review, Task 11): a denied Reference read must not
+    // silently render every clearing-obligation verdict "ok". `classes` is
+    // still returned (it may be useful alongside the marker, e.g. to show
+    // which classes have zero OTC exposure from data that IS visible), but a
+    // reader must be told the verdicts were computed without any OTC
+    // classification at all when the read was denied.
+    let clearing_obligation = match &a.contracts_denied {
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+        None => serde_json::json!({"status": "ok"}),
+    };
+    let kpis_status = match &a.kpis_denied {
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+        None => serde_json::json!({"status": "ok"}),
+    };
     Ok(Json(serde_json::json!({
         "dates": a.dates,
         "date": a.anchor,
         "months_present": a.report.months_present,
         "months_total": a.report.months_total,
         "classes": a.report.classes,
+        "clearing_obligation": clearing_obligation,
         "warnings": a.report.warnings,
         "monitors": a.monitors,
         "monitors_note": "Counterparty breakdown unavailable: the reconciliation tier and compression trigger assume all OTC contracts face a single counterparty (the strictest reading).",
         "margin": a.margin,
         "futures_count": a.futures_count,
         "kpis": a.kpis,
+        "kpis_status": kpis_status,
         "otc_note": "Only OTC positions count toward the clearing thresholds. Contracts on an EU regulated market or an equivalent third-country market are not OTC; flag any contract on a non-equivalent venue as OTC on the Data page.",
     })))
 }
@@ -167,6 +199,17 @@ pub async fn export(
             "no snapshots imported yet; there is nothing to evidence".into(),
         ));
     };
+    // Ruling 1 (Task 9 review, Task 11): the export is an evidence document
+    // whose whole purpose is the clearing-obligation verdict and the
+    // contract/KPI listings behind it. Refuse outright rather than produce a
+    // file that would read as a clean pass while the read it was built on
+    // was denied — an explicit error, never a silently degraded document.
+    if let Some(denied) = a.contracts_denied {
+        return Err(AppError::from(denied));
+    }
+    if let Some(denied) = a.kpis_denied {
+        return Err(AppError::from(denied));
+    }
     let summary = a.report.classes.iter().map(|c| emir_file::SummaryRow {
         label: c.label.to_string(),
         threshold_eur: c.threshold_eur,

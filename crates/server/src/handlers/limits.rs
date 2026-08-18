@@ -18,9 +18,12 @@ type Snapshot = (Vec<NaiveDate>, Option<NaiveDate>, Vec<db::repo::PositionRecord
 /// route is gated on `Positions`, not `Reference`, so a principal without a
 /// separate `Reference` grant still gets a full positions snapshot — just
 /// without the issuer-group/liquidity-override enrichment `refs_all`
-/// supplies. Soft-checked with `may_global` rather than hard-authorized, so
-/// the absence of that secondary grant degrades the enrichment rather than
-/// failing the whole request.
+/// supplies. Soft-checked (the query is skipped, not the whole request
+/// failed) so the absence of that secondary grant degrades the enrichment
+/// rather than failing the whole request. Callers that build a compliance
+/// verdict out of the enrichment (`concentration_h`) must not stop here:
+/// they re-check the same grant themselves and surface an explicit
+/// `unavailable` marker — see `concentration_h`'s `issuer_overrides` field.
 async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q: &DateQuery) -> Result<Snapshot, AppError> {
     let dates = scoped.position_dates(a).await?;
     let date = match &q.date {
@@ -31,10 +34,6 @@ async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q:
         Some(d) => scoped.positions_for(a, d).await?,
         None => Vec::new(),
     };
-    // VERDICT-FALSIFICATION (Task 11): a denied Reference read drops
-    // issuer-group overrides, silently hiding 5/10/40 breaches with no
-    // marker in the output. Task 11 must surface an explicit
-    // unavailable/degraded status here.
     let refs = match scoped.authorize_global::<Reference, View>() {
         Ok(rv) => scoped.refs_all(&rv).await?,
         Err(_) => Vec::new(),
@@ -67,10 +66,21 @@ pub async fn concentration_h(
         };
         Some(ConPosition { asset_type: p.asset_type.clone(), group, weight: w })
     }).collect();
+    // Ruling 2 (Task 9 review, Task 11): a denied Reference read must not
+    // silently drop the issuer-group/liquidity overrides that feed the
+    // group/fund/deposit checks above — that would hide a real 5/10/40
+    // breach behind a checks array that still reads "ok". Re-checked here
+    // (not derived from `snapshot`'s soft-degrade) so a reader can always
+    // tell "no breach" from "could not check the overrides".
+    let issuer_overrides = match scoped.authorize_global::<Reference, View>() {
+        Ok(_) => serde_json::json!({"status": "ok"}),
+        Err(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+    };
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
         "checks": concentration(&cons),
+        "issuer_overrides": issuer_overrides,
         "excluded_note": "Futures are excluded from issuer limits (not issuer exposure under 5/10/40); fee and order provisions are excluded.",
     })))
 }
@@ -195,17 +205,26 @@ pub async fn liquidity_h(
 
     // Shareholders is a secondary domain here too — see the routes.rs
     // comment on this route: it degrades the top-5 scenario to
-    // "unavailable" rather than gating the whole endpoint.
-    let register = match scoped.authorize::<Shareholders, View>(pid) {
-        Ok(sv) => scoped.shareholders_for(&sv).await?,
-        Err(_) => Vec::new(),
-    };
+    // "unavailable" rather than gating the whole endpoint. A denied grant
+    // and a granted-but-empty register both leave `register` empty, but they
+    // are not the same fact and must not share a reason string: a denial
+    // says the principal cannot see the register at all, an empty register
+    // says nobody has loaded one yet. `shareholders_denied_reason` carries
+    // the distinction through to the scenario below.
+    let (register, shareholders_denied_reason): (Vec<db::repo::Shareholder>, Option<String>) =
+        match scoped.authorize::<Shareholders, View>(pid) {
+            Ok(sv) => (scoped.shareholders_for(&sv).await?, None),
+            Err(denied) => (Vec::new(), Some(denied.reason())),
+        };
     let top5_pct: f64 = register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0;
+    let top5_unavailable_reason = shareholders_denied_reason
+        .clone()
+        .unwrap_or_else(|| "no shareholder register".to_string());
 
-    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity]| -> serde_json::Value {
+    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity], unavailable_reason: &str| -> serde_json::Value {
         let Some(pct) = required_pct else {
             return serde_json::json!({
-                "key": key, "status": "unavailable", "reason": "no shareholder register",
+                "key": key, "status": "unavailable", "reason": unavailable_reason,
             });
         };
         let required = pct * nav;
@@ -234,10 +253,10 @@ pub async fn liquidity_h(
     let top5 = (!register.is_empty()).then_some(top5_pct);
     let fixed = Some(settings.redemption_shock);
     let scenarios = vec![
-        scenario("top5", top5, &normal),
-        scenario("fixed", fixed, &normal),
-        scenario("hybrid_top5", top5, &stressed),
-        scenario("hybrid_fixed", fixed, &stressed),
+        scenario("top5", top5, &normal, &top5_unavailable_reason),
+        scenario("fixed", fixed, &normal, ""),
+        scenario("hybrid_top5", top5, &stressed, &top5_unavailable_reason),
+        scenario("hybrid_fixed", fixed, &stressed, ""),
     ];
 
     let measured_eur: f64 = normal.iter().filter(|c| c.measured).map(|c| c.valuation_eur).sum();
@@ -258,6 +277,8 @@ pub async fn liquidity_h(
                 "count": register.len(),
                 "as_of": register.iter().map(|s| s.as_of).min(),
                 "stale": register.iter().any(|s| (asof - s.as_of).num_days() > REGISTER_MAX_AGE_DAYS),
+                "status": if shareholders_denied_reason.is_some() { "unavailable" } else { "ok" },
+                "reason": shareholders_denied_reason,
             },
         },
         "asset": {
