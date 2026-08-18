@@ -6,6 +6,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use db::auth::{Action, Domain, Grant};
+use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
 async fn app() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
@@ -45,6 +46,16 @@ async fn get(app: &axum::Router, uri: &str, cookie: Option<&str>) -> StatusCode 
     let mut b = Request::get(uri);
     if let Some(c) = cookie { b = b.header("cookie", c); }
     app.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap().status()
+}
+
+async fn get_json(app: &axum::Router, uri: &str, cookie: Option<&str>) -> (StatusCode, serde_json::Value) {
+    let mut b = Request::get(uri);
+    if let Some(c) = cookie { b = b.header("cookie", c); }
+    let res = app.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let v = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+    (status, v)
 }
 
 struct Case { uri: &'static str, domain: Domain, action: Action }
@@ -138,5 +149,44 @@ async fn a_grant_on_a_different_domain_is_403() {
             "expected 403 for {uri} with only a {other:?} grant"
         );
     }
+    edb.stop().await;
+}
+
+/// `GET /api/portfolios` is not in `CASES` — it is `.authenticated`, not
+/// `.protected`/`.protected_global`: `Scoped::portfolios_list` filters to
+/// the visible set rather than requiring a single (domain, action) grant, so
+/// it does not fit the matrix's authorize-or-deny shape. Ruling 4 (Task 9)
+/// still requires coverage of its contract: unauthenticated is 401, a
+/// portfolio-scoped grant sees only the portfolios it covers, and a
+/// wildcard grant sees everything.
+#[tokio::test]
+async fn portfolios_list_is_authenticated_and_filters_to_the_visible_scope() {
+    let (app, pool, edb) = app().await;
+    let a = portfolio(&pool, "A").await;
+    let b = portfolio(&pool, "B").await;
+
+    // 1. No cookie -> 401, same as every other route.
+    assert_eq!(get(&app, "/api/portfolios", None).await, StatusCode::UNAUTHORIZED);
+
+    // 2. A single portfolio-scoped grant (on A only) sees exactly A, not B —
+    // the domain/action of the grant is irrelevant to visibility here, only
+    // which portfolio it names.
+    let scoped_cookie = user_with(&pool, &[Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(a) }]).await;
+    let (status, body) = get_json(&app, "/api/portfolios", Some(&scoped_cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<i64> = body.as_array().unwrap().iter().map(|p| p["id"].as_i64().unwrap()).collect();
+    assert_eq!(ids, vec![a], "expected exactly the granted portfolio, got {ids:?}");
+
+    // 3. A wildcard grant (portfolio: None) sees the whole fleet — at least
+    // A and B (an exact-set check would also have to know about portfolio 1,
+    // which 0008_seed.sql seeds into every fresh database regardless of this
+    // test, so this deliberately checks superset rather than equality).
+    let wildcard_cookie = user_with(&pool, &[Grant { domain: Domain::Reference, action: Action::View, portfolio: None }]).await;
+    let (status, body) = get_json(&app, "/api/portfolios", Some(&wildcard_cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<i64> = body.as_array().unwrap().iter().map(|p| p["id"].as_i64().unwrap()).collect();
+    assert!(ids.contains(&a) && ids.contains(&b),
+        "expected the wildcard principal to see every portfolio including A and B, got {ids:?}");
+
     edb.stop().await;
 }
