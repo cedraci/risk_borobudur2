@@ -11,13 +11,14 @@ use db::auth::{AuthCtx, GrantSet};
 
 /// A login attempt has no `AuthCtx` yet — that's what a successful login
 /// produces. This builds just enough of one for `audit::record` to log the
-/// attempt against: the email as the actor label (a failed/locked attempt
-/// may not resolve to a real user id at all), and the real principal id once
-/// login has actually succeeded.
-fn login_actor(principal_id: i64, email: &str) -> AuthCtx {
+/// attempt against: the real principal id and display name once login has
+/// actually succeeded, or (a failed/locked attempt may not resolve to a real
+/// user id at all) principal id `0` and the attempted email as the actor
+/// label instead.
+fn login_actor(principal_id: i64, label: &str) -> AuthCtx {
     AuthCtx {
         principal_id,
-        display_name: email.to_string(),
+        display_name: label.to_string(),
         is_administrator: false,
         grants: GrantSet::default(),
     }

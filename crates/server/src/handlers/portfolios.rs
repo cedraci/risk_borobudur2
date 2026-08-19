@@ -121,6 +121,12 @@ pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<Aut
         }
         codes.push((source, code));
     }
+    // `a` (Configure) already implies View in the grant set, so this
+    // authorize cannot fail for a principal who reached this handler. Taken
+    // before the write (not just after) so the same token can also read the
+    // pre-replace set, for the audit trail below.
+    let view = scoped.authorize::<Reference, View>(pid)?;
+    let before = scoped.portfolio_codes_for(&view).await?;
     scoped.portfolio_codes_replace(&a, &codes).await.map_err(|e| {
         let is_unique = e.downcast_ref::<sqlx::Error>()
             .and_then(|se| se.as_database_error())
@@ -131,12 +137,13 @@ pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<Aut
             AppError::Internal(e)
         }
     })?;
+    let after = scoped.portfolio_codes_for(&view).await?;
+    // Fired only once the whole request — write and both reads — has
+    // succeeded, so a DB failure downstream never leaves an audit row for a
+    // request that ultimately failed.
     crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
-        serde_json::json!({"kind": "portfolio_codes", "count": codes.len()})).await;
-    // `a` (Configure) already implies View in the grant set, so this
-    // authorize cannot fail for a principal who reached this handler.
-    let view = scoped.authorize::<Reference, View>(pid)?;
-    Ok(Json(scoped.portfolio_codes_for(&view).await?))
+        serde_json::json!({"kind": "portfolio_codes", "before": before, "after": after})).await;
+    Ok(Json(after))
 }
 
 #[derive(serde::Deserialize)]
@@ -182,13 +189,20 @@ pub async fn shareholders_put(
         return Err(AppError::Unprocessable(format!(
             "register totals {total:.2}% of NAV, which exceeds 100%")));
     }
-    scoped.shareholders_replace(&a, &rows).await?;
-    crate::audit::record(&st, &ctx, "import", Some(Domain::Shareholders), Some(pid),
-        serde_json::json!({"kind": "shareholders_register", "count": rows.len()})).await;
     // `a` (Import) already implies View in the grant set, so this authorize
-    // cannot fail for a principal who reached this handler.
+    // cannot fail for a principal who reached this handler. Taken before the
+    // write (not just after) so the same token can also read the
+    // pre-replace register, for the audit trail below.
     let view = scoped.authorize::<Shareholders, View>(pid)?;
-    Ok(Json(scoped.shareholders_for(&view).await?))
+    let before = scoped.shareholders_for(&view).await?;
+    scoped.shareholders_replace(&a, &rows).await?;
+    let after = scoped.shareholders_for(&view).await?;
+    // Fired only once the whole request — write and both reads — has
+    // succeeded, so a DB failure downstream never leaves an audit row for a
+    // request that ultimately failed.
+    crate::audit::record(&st, &ctx, "import", Some(Domain::Shareholders), Some(pid),
+        serde_json::json!({"kind": "shareholders_register", "before": before, "after": after})).await;
+    Ok(Json(after))
 }
 
 /// The observed subscription/redemption history, for comparison against the
