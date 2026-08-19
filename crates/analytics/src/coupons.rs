@@ -113,8 +113,7 @@ fn coupon_schedule(b: &CouponInput, snapshot: NaiveDate, horizon: u32, out: &mut
     // date down, even though the clamp was a property of April, not of the
     // schedule.
     let mut n: u32 = 0;
-    loop {
-        let Some(date) = add_months(first, n * step) else { break; };
+    while let Some(date) = add_months(first, n * step) {
         // A past or same-day coupon yields offset 0 and is already in the
         // position; a coupon past the horizon ends the walk.
         let day = business_days_between(snapshot, date);

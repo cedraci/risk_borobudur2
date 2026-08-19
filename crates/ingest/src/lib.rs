@@ -130,10 +130,10 @@ pub fn parse_workbook(bytes: &[u8]) -> Result<ParsedWorkbook, ParseFailure> {
     let dividends = parse_div(&div, &mut ctx);
     let operations = parse_ops(&ops, &mut ctx);
 
-    if let (Some(nd), false) = (nav_date, nav_history.is_empty()) {
-        if let Some(bad) = nav_history.iter().find(|r| r.date > nd) {
-            ctx.err("HISTO_NAV", 0, format!("date {} is after the file's NAV date {}", bad.date, nd));
-        }
+    if let Some(nd) = nav_date
+        && let Some(bad) = nav_history.iter().find(|r| r.date > nd)
+    {
+        ctx.err("HISTO_NAV", 0, format!("date {} is after the file's NAV date {}", bad.date, nd));
     }
 
     if !ctx.errors.is_empty() {
@@ -158,7 +158,7 @@ fn sheet(wb: &mut Xlsx<Cursor<Vec<u8>>>, name: &str) -> Result<Range<Data>, Pars
 
 // ---- cell helpers (absolute 0-based coordinates) ----
 
-fn get<'a>(r: &'a Range<Data>, row: u32, col: u32) -> Option<&'a Data> {
+fn get(r: &Range<Data>, row: u32, col: u32) -> Option<&Data> {
     r.get_value((row, col)).filter(|d| !matches!(d, Data::Empty))
 }
 

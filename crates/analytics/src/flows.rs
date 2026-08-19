@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn a_run_of_outflows_shows_up_in_the_longer_window() {
         let mut s = series(40);
-        for i in 10..15 { s[i].net_eur = -2_000_000.0; }
+        for d in &mut s[10..15] { d.net_eur = -2_000_000.0; }
         let st = flow_stats(&s).unwrap();
         let w1 = st.worst.iter().find(|w| w.window == 1).unwrap();
         let w5 = st.worst.iter().find(|w| w.window == 5).unwrap();
