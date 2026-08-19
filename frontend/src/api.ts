@@ -426,3 +426,72 @@ export const putEmirKpi = (pid: number, month: string, body: Omit<EmirKpi, "mont
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
 export const emirExportUrl = (pid: number) => `/api/portfolios/${pid}/emir/export`;
+
+// ---- Administration (crates/server/src/handlers/admin.rs, `/api/admin/*`, administrator-only) ----
+
+export interface AdminUser {
+  id: number; email: string; display_name: string; is_administrator: boolean; disabled: boolean;
+}
+export const getUsers = () => req<AdminUser[]>("/api/admin/users");
+export const createUser = (body: { email: string; display_name: string; password: string; is_administrator: boolean }) =>
+  req<AdminUser>("/api/admin/users", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+export const adminSetPassword = (id: number, password: string) =>
+  req<void>(`/api/admin/users/${id}/password`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }),
+  });
+export const adminSetDisabled = (id: number, disabled: boolean) =>
+  req<void>(`/api/admin/users/${id}/disabled`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ disabled }),
+  });
+
+/** Mirrors `db::auth::Grant` (`crates/db/src/auth/model.rs`) exactly — the wire
+ * field is `portfolio`, not `portfolio_id` (that spelling belongs to `Capability`
+ * in `auth.ts`, a different struct on a different endpoint). `portfolio: null`
+ * means "every portfolio", same as elsewhere in this app. */
+export interface AdminGrant { domain: string; action: string; portfolio: number | null }
+export const getGrants = (id: number) => req<AdminGrant[]>(`/api/admin/users/${id}/grants`);
+export const addGrant = (id: number, g: AdminGrant) =>
+  req<void>(`/api/admin/users/${id}/grants`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(g),
+  });
+export const removeGrant = (id: number, g: AdminGrant) =>
+  req<void>(`/api/admin/users/${id}/grants`, {
+    method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify(g),
+  });
+
+export const assignRole = (id: number, role: string, scope: number | null) =>
+  req<void>(`/api/admin/users/${id}/roles`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ role, scope }),
+  });
+
+/** The six domains and four actions, in the exact serde spellings from
+ * `crates/db/src/auth/model.rs::{Domain,Action}::as_str`. */
+export const ADMIN_DOMAINS = ["positions", "nav", "transactions", "shareholders", "market_data", "reference"] as const;
+export const ADMIN_ACTIONS = ["view", "export", "import", "configure"] as const;
+export function domainLabel(d: string): string {
+  switch (d) {
+    case "positions": return "Positions";
+    case "nav": return "NAV history";
+    case "transactions": return "Transactions";
+    case "shareholders": return "Shareholder register";
+    case "market_data": return "Market data";
+    case "reference": return "Reference data";
+    default: return d;
+  }
+}
+
+/** The four roles, in the exact serde spellings from `crates/db/src/auth/roles.rs::Role::as_str`. */
+export const ADMIN_ROLES: { value: string; label: string }[] = [
+  { value: "risk_analyst", label: "Risk Analyst" },
+  { value: "head_of_risk", label: "Head of Risk" },
+  { value: "operations", label: "Operations" },
+  { value: "auditor", label: "Auditor" },
+];
+
+export interface AuditRow {
+  id: number; at: string; actor_label: string; action: string;
+  domain: string | null; portfolio_id: number | null; detail: unknown; source_addr: string | null;
+}
+export const getAudit = (limit = 200) => req<AuditRow[]>(`/api/admin/audit?limit=${limit}`);

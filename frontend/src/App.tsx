@@ -15,6 +15,7 @@ import VarPage from "./pages/VarPage";
 import LimitsPage from "./pages/LimitsPage";
 import DerivativesPage from "./pages/DerivativesPage";
 import DataPage from "./pages/DataPage";
+import AdminPage from "./pages/AdminPage";
 
 /** The signed-in principal plus a way to end the session, provided once by
  * `AuthGate` below. Never null inside the routed app — `AuthGate` only renders
@@ -116,6 +117,9 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
           {visibleLinks.map((l) => (
             <NavLink key={l.to} to={`${prefix}${l.to}`} end={l.to === ""}>{l.label}</NavLink>
           ))}
+          {/* Gated on is_administrator, not a capability — administration is
+              a separate axis from the six-domain grant model entirely. */}
+          {me.is_administrator && <NavLink to="/admin">Administration</NavLink>}
           {/* Desktop mode's principal has no real session to end (/api/me always
               resolves regardless of any cookie) — nothing to sign out of. */}
           {!isDesktopPrincipal(me) && (
@@ -142,7 +146,33 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
   );
 }
 
+/** Instance-wide, not portfolio-scoped — administration lives outside the
+ * `/p/:pid/*` tree entirely, so this mirrors `PortfolioLayout`'s shell
+ * without a portfolio switcher or the per-portfolio nav links. */
+function AdminShell() {
+  const { me, signOut } = useAuth();
+  return (
+    <div className="layout">
+      <nav className="sidebar">
+        <h1>Borobudur<br />Risk</h1>
+        <Link to="/">&larr; Back to portfolios</Link>
+        <NavLink to="/admin">Administration</NavLink>
+        {!isDesktopPrincipal(me) && (
+          <div className="sidebar-user">
+            <span title={me.display_name}>{me.display_name}</span>
+            <button type="button" onClick={signOut}>Sign out</button>
+          </div>
+        )}
+      </nav>
+      <main className="content">
+        <AdminPage />
+      </main>
+    </div>
+  );
+}
+
 function AuthedApp() {
+  const { me } = useAuth();
   const portfolios = useFetch(() => getPortfolios(), []);
 
   if (portfolios.error) {
@@ -165,6 +195,11 @@ function AuthedApp() {
       <Routes>
         <Route path="/" element={<RootRedirect portfolios={portfolios.data} />} />
         <Route path="/p/:pid/*" element={<PortfolioLayout portfolios={portfolios.data} />} />
+        {/* Re-checked here (not just hidden from the nav link) so typing the
+            URL directly can't reach it — the handlers behind it 403 anyway,
+            but this avoids rendering a page that's just going to be
+            <Unavailable/> end to end for a non-administrator. */}
+        <Route path="/admin" element={me.is_administrator ? <AdminShell /> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </PortfoliosReloadContext.Provider>
