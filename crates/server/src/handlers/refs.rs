@@ -111,25 +111,17 @@ pub async fn put(
 ) -> Result<Json<db::repo::InstrumentRef>, AppError> {
     let scoped = st.db.scope(&ctx);
     let a = scoped.authorize_global::<Reference, db::auth::marker::Configure>()?;
-    if let Some(d) = b.liquidity_days {
-        if !(0.0..=3650.0).contains(&d) || !d.is_finite() {
-            return Err(AppError::Unprocessable("liquidity_days must be in [0, 3650]".into()));
-        }
+    if b.liquidity_days.is_some_and(|d| !(0.0..=3650.0).contains(&d) || !d.is_finite()) {
+        return Err(AppError::Unprocessable("liquidity_days must be in [0, 3650]".into()));
     }
-    if let Some(c) = b.bond_coupon_pct {
-        if !(0.0..=100.0).contains(&c) {
-            return Err(AppError::Unprocessable("bond_coupon_pct must be in [0, 100]".into()));
-        }
+    if b.bond_coupon_pct.is_some_and(|c| !(0.0..=100.0).contains(&c)) {
+        return Err(AppError::Unprocessable("bond_coupon_pct must be in [0, 100]".into()));
     }
-    if let Some(f) = b.bond_coupon_freq {
-        if ![1, 2, 4, 12].contains(&f) {
-            return Err(AppError::Unprocessable("bond_coupon_freq must be 1, 2, 4 or 12".into()));
-        }
+    if b.bond_coupon_freq.is_some_and(|f| ![1, 2, 4, 12].contains(&f)) {
+        return Err(AppError::Unprocessable("bond_coupon_freq must be 1, 2, 4 or 12".into()));
     }
-    if let Some(g) = &b.issuer_group {
-        if g.trim().is_empty() {
-            return Err(AppError::Unprocessable("issuer_group must not be blank (send null to revert)".into()));
-        }
+    if b.issuer_group.as_ref().is_some_and(|g| g.trim().is_empty()) {
+        return Err(AppError::Unprocessable("issuer_group must not be blank (send null to revert)".into()));
     }
     let r = db::repo::InstrumentRef {
         code,

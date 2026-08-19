@@ -12,11 +12,13 @@ pub struct EmbeddedDb {
 /// `temporary = true` uses throwaway dirs + random port (tests);
 /// `false` persists under `data_root` for the real app.
 pub async fn start(data_root: &Path, temporary: bool) -> anyhow::Result<EmbeddedDb> {
-    let mut settings = Settings::default();
-    settings.version = VersionReq::parse("=17")?;
-    settings.temporary = temporary;
-    settings.username = "postgres".to_string();
-    settings.password = "borobudur-local".to_string();
+    let mut settings = Settings {
+        version: VersionReq::parse("=17")?,
+        temporary,
+        username: "postgres".to_string(),
+        password: "borobudur-local".to_string(),
+        ..Default::default()
+    };
     if !temporary {
         settings.installation_dir = data_root.join("pg-install");
         settings.data_dir = data_root.join("pg-data");

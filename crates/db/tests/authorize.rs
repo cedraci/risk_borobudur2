@@ -39,7 +39,7 @@ async fn authorize_covers_every_domain_action_and_scope_combination() {
 
             // no grant at all
             let n = ctx(vec![]);
-            assert_eq!(n.grants.allows(domain, action, Some(7)), false);
+            assert!(!n.grants.allows(domain, action, Some(7)));
         }
     }
     edb.stop().await;

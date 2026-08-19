@@ -276,13 +276,18 @@ export default function LimitsPage() {
       {rates.forbidden ? <Unavailable reason={rates.forbidden} /> : rates.error && <p className="neg">{rates.error}</p>}
       {rates.data && (
         <div className="card">
-          {rates.data.missing_any && (
+          {rates.data.reference_status.status === "unavailable" && (
+            <Unavailable reason={rates.data.reference_status.reason} />
+          )}
+          {rates.data.missing_any && rates.data.reference_status.status === "ok" && (
             <p className="warn-badge">Some bonds lack reference data — fill coupon/maturity/frequency on the Data page.</p>
           )}
           <table className="tbl">
             <thead><tr><th>Bond</th><th>Coupon</th><th>Maturity</th><th>Price</th><th>YTM</th><th>Mod. duration</th><th>DV01 €</th><th>Weight</th></tr></thead>
             <tbody>
-              {rates.data.bonds.map((b, i) => b.missing ? (
+              {rates.data.bonds.map((b, i) => b.status === "unavailable" ? (
+                <tr key={i}><td>{b.name ?? b.code}</td><td colSpan={7}><Unavailable reason={b.reason} /></td></tr>
+              ) : b.missing ? (
                 <tr key={i}><td>{b.name ?? b.code}</td><td colSpan={7} className="neg">missing reference data</td></tr>
               ) : (
                 <tr key={i}>
@@ -305,7 +310,7 @@ export default function LimitsPage() {
           <p className="kpi-sub">
             Signed as profit and loss: a negative sensitivity means net assets fall if yields rise 100bp
             (the book is long rates); a positive one means they rise. Shown as “–” when the snapshot’s AUM
-            is unknown.
+            is unknown{rates.data.reference_status.status === "unavailable" ? ", or when reference data could not be checked (see above)" : ""}.
           </p>
 
           <h4>Bond futures</h4>

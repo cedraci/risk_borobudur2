@@ -392,10 +392,28 @@ pub async fn rates_h(
     super::portfolios::ensure(&scoped, pid, false).await?;
     let (dates, date, rows, refs) = snapshot(&scoped, &a, &q).await?;
     let by = ref_map(&refs);
+    // Ruling 2 pattern (concentration_h/liquidity_h): a denied Reference read
+    // must not silently collapse every bond to `missing: true` — that reads
+    // identically to "these bonds genuinely lack coupon/maturity data" when
+    // it actually means "could not check at all". Re-checked directly (not
+    // derived from `snapshot`'s soft-degrade) so the two stay distinguishable.
+    let reference_denied = scoped.authorize_global::<Reference, View>().err();
+    let reference_status = match &reference_denied {
+        None => serde_json::json!({"status": "ok"}),
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+    };
     let mut bonds = Vec::new();
     let mut total_dv01 = 0.0f64;
     let mut missing_any = false;
     for p in rows.iter().filter(|p| p.asset_type == "Obligation") {
+        if let Some(denied) = &reference_denied {
+            missing_any = true;
+            bonds.push(serde_json::json!({
+                "code": p.isin, "name": p.name, "missing": true,
+                "status": "unavailable", "reason": denied.reason(),
+            }));
+            continue;
+        }
         let r = by.get(p.isin.as_str());
         let complete = r.map(|r| r.bond_coupon_pct.is_some() && r.bond_maturity.is_some() && r.bond_coupon_freq.is_some()).unwrap_or(false);
         let metrics = match (complete, p.price, p.valuation_eur, p.weight, date) {
@@ -520,16 +538,30 @@ pub async fn rates_h(
     // The denominator is AUM at the same NAV date. An unknown AUM yields null,
     // not 0.00% - a confident zero next to a large non-zero DV01 is a lie, and
     // the derivatives handler already routes the same missing input to null.
-    let nav_sensitivity_100bp = match aum {
-        a if a > 0.0 => serde_json::json!(-100.0 * total_dv01 / a),
-        _ => serde_json::Value::Null,
+    //
+    // CRITICAL (mirrors liquidity_h's scenario suppression): with Reference
+    // denied, every bond above skipped its own DV01 (no coupon/maturity/freq
+    // to compute from) and every future below fails the same candidate
+    // filter for want of a spec — `total_dv01` therefore lands on exactly
+    // 0.0, and `nav_sensitivity_100bp` on a confident `-0.0`/`0.0`. That
+    // reads as "verified flat", not "could not check" — the same
+    // breach-reads-as-ok risk `issuer_overrides` exists to flag elsewhere.
+    // Both are nulled here rather than left to report a computed pass.
+    let nav_sensitivity_100bp = match (&reference_denied, aum) {
+        (Some(_), _) => serde_json::Value::Null,
+        (None, a) if a > 0.0 => serde_json::json!(-100.0 * total_dv01 / a),
+        (None, _) => serde_json::Value::Null,
+    };
+    let total_dv01_eur = match &reference_denied {
+        Some(_) => serde_json::Value::Null,
+        None => serde_json::json!(total_dv01),
     };
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
         "bonds": bonds,
         "futures": futures,
-        "total_dv01_eur": total_dv01,
+        "total_dv01_eur": total_dv01_eur,
         // 100bp in EUR as a fraction of net assets, i.e. total DV01 scaled
         // from 1bp to 100bp and divided by AUM. This replaces the old
         // sum(modified x weight) x 0.01, which inherited a unit mismatch
@@ -545,6 +577,7 @@ pub async fn rates_h(
         // missing CTD row, and the fix is a different one, so they are named
         // separately rather than folded into the CTD prompt.
         "futures_no_spec": snap.no_spec,
+        "reference_status": reference_status,
     })))
 }
 
@@ -613,29 +646,52 @@ pub async fn derivatives_h(
     super::portfolios::ensure(&scoped, pid, false).await?;
     let (dates, date, rows, _refs) = snapshot(&scoped, &a, &q).await?;
     // Reference is a secondary domain here — see `snapshot`'s comment above.
+    // Re-checked directly (mirrors concentration_h/liquidity_h/rates_h): with
+    // it denied, `specs` below is empty and every future's `category`
+    // silently falls back to `Other` (see `future_positions`) — the
+    // `categories` breakdown would then read as a real "all other" verdict
+    // instead of "could not classify". The marker names the reason;
+    // `categories` itself is nulled below rather than left to report the
+    // misclassified aggregate as a normal result.
+    let reference_denied = scoped.authorize_global::<Reference, View>().err();
+    let reference_status = match &reference_denied {
+        None => serde_json::json!({"status": "ok"}),
+        Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
+    };
     let specs = match scoped.authorize_global::<Reference, View>() {
         Ok(rv) => scoped.contracts_all(&rv).await?,
         Err(_) => Vec::new(),
     };
-    // Nav is a secondary domain here too — see `liquidity_h`.
-    let aum = match date {
+    // Nav is a secondary domain here too — see `liquidity_h`. A denied grant
+    // must not silently read as `aum: 0` (indistinguishable from a fund that
+    // genuinely has no NAV row yet): `aum` stays `null` and `nav_status`
+    // names the reason, while `0.0` is still passed into `exposure` so its
+    // own `aum > 0.0` guard safely excludes every row from `pct_nav` rather
+    // than dividing by an unknown denominator.
+    let (aum, nav_status): (Option<f64>, serde_json::Value) = match date {
         Some(d) => match scoped.authorize::<Nav, View>(pid) {
-            Ok(nv) => scoped.aum_for(&nv, d).await?.unwrap_or(0.0),
-            Err(_) => 0.0,
+            Ok(nv) => (Some(scoped.aum_for(&nv, d).await?.unwrap_or(0.0)), serde_json::json!({"status": "ok"})),
+            Err(denied) => (None, serde_json::json!({"status": "unavailable", "reason": denied.reason()})),
         },
-        None => 0.0,
+        None => (Some(0.0), serde_json::json!({"status": "ok"})),
     };
     let snap = future_positions(&rows, &specs);
-    let rep = analytics::exposure(&snap.positions, aum);
+    let rep = analytics::exposure(&snap.positions, aum.unwrap_or(0.0));
+    let categories = match &reference_denied {
+        Some(_) => serde_json::Value::Null,
+        None => serde_json::to_value(&rep.categories).expect("CategoryTotals always serializes"),
+    };
     Ok(Json(serde_json::json!({
         "dates": dates,
         "date": date,
         "aum": aum,
-        "categories": rep.categories,
+        "categories": categories,
         "total": rep.total,
         "rows": rep.rows,
         "excluded": rep.excluded,
         "unconfirmed": snap.unconfirmed,
+        "reference_status": reference_status,
+        "nav_status": nav_status,
         "note": "Notional by reference to the underlying; long and short each in absolute value as a percentage of net assets. No netting.",
     })))
 }

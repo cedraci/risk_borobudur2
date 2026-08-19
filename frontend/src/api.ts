@@ -214,6 +214,10 @@ export interface FlowStats {
 }
 export interface BondRow {
   code: string; name: string | null; missing: boolean;
+  // Reference denied -> this bond's own `missing: true` carries a reason,
+  // distinguishing "could not check" from "genuinely lacks coupon/maturity
+  // data" (which sets `missing` alone, with no `status`/`reason`).
+  status?: "unavailable"; reason?: string;
   coupon_pct?: number; maturity?: string; freq?: number; price?: number;
   ytm?: number; mod_duration?: number; dv01_eur?: number; weight?: number;
 }
@@ -225,11 +229,14 @@ export interface FutureRow {
 export interface Rates {
   dates: string[]; date: string | null; bonds: BondRow[]; futures: FutureRow[];
   // Signed: negative means a +100bp move costs NAV (a book long rates),
-  // positive means it gains. Null when the snapshot's AUM is unknown.
-  total_dv01_eur: number; nav_sensitivity_100bp: number | null;
+  // positive means it gains. Null when the snapshot's AUM is unknown, OR
+  // (see `reference_status`) when Reference is denied — a denial must never
+  // read as a confident "flat" zero.
+  total_dv01_eur: number | null; nav_sensitivity_100bp: number | null;
   missing_any: boolean; futures_missing_any: boolean;
   // Tickers of futures held with no contract spec at all, so excluded from the DV01.
   futures_no_spec: string[];
+  reference_status: AuthzMarker;
 }
 export interface MethodSummary {
   exceptions: number; n: number; zone: "green" | "yellow" | "red";
@@ -272,9 +279,19 @@ export interface ExposureRow {
   unconfirmed: boolean;
 }
 export interface Derivatives {
-  dates: string[]; date: string | null; aum: number;
-  categories: CategoryTotals[]; total: CategoryTotals;
+  dates: string[]; date: string | null;
+  // Null when Nav is denied (see `nav_status`) — distinct from a fund that
+  // genuinely has no NAV row yet, which reports a real `0`.
+  aum: number | null;
+  // Null when Reference is denied (see `reference_status`): every future's
+  // `category` falls back to "other" in that case, so the breakdown would
+  // otherwise read as a real "all other" result rather than "could not
+  // classify".
+  categories: CategoryTotals[] | null;
+  total: CategoryTotals;
   rows: ExposureRow[]; excluded: string[]; unconfirmed: string[]; note: string;
+  reference_status: AuthzMarker;
+  nav_status: AuthzMarker;
 }
 export interface FuturesContract {
   contract_root: string; label: string; category: Category; point_value: number | null;
@@ -350,6 +367,10 @@ export interface BloombergUpload {
   // Portfolios the fx-drift cross-check could not walk because the uploader
   // lacks Positions/View there — distinct from "checked, no drift found".
   fx_check_skipped: { portfolio_id: number; portfolio_name: string; reason: string }[];
+  // Reference/Configure denied -> `classified` is stuck at 0 for a reason
+  // that has nothing to do with the workbook; this marker says why, so 0
+  // classified never silently reads as "nothing to classify".
+  classification_status: AuthzMarker;
 }
 export const uploadBloomberg = (f: File) => {
   const fd = new FormData();

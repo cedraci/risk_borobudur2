@@ -108,6 +108,14 @@ impl LocalAccounts {
 
         let user = user.expect("verified above");
         admin.login_reset(email).await?;
+        // Opportunistic hygiene (session hygiene worklist item): sweep
+        // expired rows out of `sessions` here rather than adding a
+        // background scheduler that does not otherwise exist in this
+        // process. Best-effort — a sweep failure must never block a
+        // successful login.
+        if let Err(e) = admin.sessions_delete_expired().await {
+            tracing::warn!("expired-session sweep failed: {e:#}");
+        }
         let token = new_token();
         admin.session_create(&token_hash(&token), user.id, SESSION_TTL_HOURS).await?;
         Ok(LoginSuccess { token, user_id: user.id, display_name: user.display_name })

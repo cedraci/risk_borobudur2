@@ -19,6 +19,14 @@ async fn app() -> (axum::Router, sqlx::PgPool, db::embedded::EmbeddedDb) {
     (app, pool, edb)
 }
 
+/// A desktop-mode router alongside the server-mode one: `DesktopSingleUser`
+/// (`auth/desktop.rs`) resolves every request as principal id 0 with
+/// `is_administrator: true` and no cookie required, so `/api/admin/*` is
+/// reachable there too — this is exactly the path that used to FK-violate.
+async fn desktop_app(dbh: &db::Db) -> axum::Router {
+    server::routes::router(server::state::AppState::desktop(dbh.clone()))
+}
+
 static NEXT_USER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 async fn user_with(pool: &sqlx::PgPool, is_administrator: bool, grants: &[Grant]) -> (String, i64) {
@@ -207,6 +215,71 @@ async fn the_audit_route_returns_newest_first() {
     let mut sorted = ids.clone();
     sorted.sort_by(|a, b| b.cmp(a));
     assert_eq!(ids, sorted, "expected newest-first ordering: {rows:?}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Worklist item 3: desktop mode's principal id is 0 — `DesktopSingleUser`
+/// (`auth/desktop.rs`), not a real `users` row — so a bare
+/// `Some(ctx.principal_id)` bound to `grants.granted_by` (which carries a
+/// `REFERENCES users(id)` constraint) used to FK-violate (500) the moment an
+/// administrator granted anything while running the desktop app.
+#[tokio::test]
+async fn grant_add_in_desktop_mode_does_not_fk_violate_on_granted_by() {
+    let (_app, pool, edb) = app().await;
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let desktop = desktop_app(&dbh).await;
+    let pid = portfolio(&pool, "F").await;
+    let (_, target_id) = user_with(&pool, false, &[]).await;
+
+    let (status, body) = send_json(&desktop, "POST", &format!("/api/admin/users/{target_id}/grants"), None,
+        serde_json::json!({"domain": "nav", "action": "view", "portfolio": pid})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM grants WHERE user_id = $1 AND domain = 'nav' AND portfolio_id = $2")
+        .bind(target_id).bind(pid).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, 1, "the grant itself must still be written, not merely non-500");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Same trap, `role_assign`'s own `granted_by` bind.
+#[tokio::test]
+async fn role_assign_in_desktop_mode_does_not_fk_violate_on_granted_by() {
+    let (_app, pool, edb) = app().await;
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let desktop = desktop_app(&dbh).await;
+    let (_, target_id) = user_with(&pool, false, &[]).await;
+
+    let (status, body) = send_json(&desktop, "POST", &format!("/api/admin/users/{target_id}/roles"), None,
+        serde_json::json!({"role": "auditor"})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM user_roles WHERE user_id = $1")
+        .bind(target_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, 1, "the role row itself must still be written, not merely non-500");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Worklist item 7: `grants.portfolio_id` carries a
+/// `REFERENCES portfolios(id)` constraint — granting against a portfolio id
+/// that does not exist used to FK-violate (500) instead of reporting a clear
+/// 422.
+#[tokio::test]
+async fn grant_add_with_a_nonexistent_portfolio_returns_422_not_500() {
+    let (app, pool, edb) = app().await;
+    let (admin_cookie, _) = user_with(&pool, true, &[]).await;
+    let (_, target_id) = user_with(&pool, false, &[]).await;
+
+    let (status, body) = send_json(&app, "POST", &format!("/api/admin/users/{target_id}/grants"), Some(&admin_cookie),
+        serde_json::json!({"domain": "nav", "action": "view", "portfolio": 999_999})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:?}");
+    assert!(body["detail"].as_str().is_some_and(|d| !d.is_empty()), "{body:?}");
 
     pool.close().await;
     edb.stop().await;

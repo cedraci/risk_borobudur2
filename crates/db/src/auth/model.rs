@@ -31,6 +31,11 @@ impl Domain {
         }
     }
 
+    // Named `from_str` (not `FromStr::from_str`) throughout this module:
+    // there is no `Err` to report for an unrecognized wire value, only
+    // `None`, so implementing the trait would mean inventing an error type
+    // with nothing to say. Every call site already matches on `Option`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Domain> {
         Domain::ALL.into_iter().find(|d| d.as_str() == s)
     }
@@ -69,6 +74,8 @@ impl Action {
         }
     }
 
+    /// See `Domain::from_str` above for why this is not `FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Action> {
         Action::ALL.into_iter().find(|a| a.as_str() == s)
     }

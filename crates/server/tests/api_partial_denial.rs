@@ -551,3 +551,128 @@ async fn bloomberg_upload_names_a_positions_denied_portfolio_in_fx_check_skipped
     pool.close().await;
     edb.stop().await;
 }
+
+/// Worklist item 1: a denied Reference/Configure grant must not silently
+/// read as "nothing to classify" (`classified: 0` is indistinguishable from
+/// a response workbook that genuinely resolved zero cells). Mirrors
+/// `fx_check_skipped`'s approach with a `classification_status` marker.
+#[tokio::test]
+async fn bloomberg_upload_marks_classification_unavailable_when_reference_configure_is_denied() {
+    let (_desktop, server, pool, edb) = app().await;
+
+    // Global MarketData/Import (the route's own gate), but no Reference
+    // grant at all.
+    let cookie = user_with(&pool, &[
+        Grant { domain: Domain::MarketData, action: Action::Import, portfolio: None },
+    ]).await;
+
+    // A response workbook that WOULD classify a real instrument if Reference
+    // were granted — proves the zero below is suppression, not coincidence.
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let s = wb.add_worksheet().set_name("REFS").unwrap();
+    for (c, h) in ["isin", "ticker", "country_of_risk", "gics_sector", "gics_industry"].iter().enumerate() {
+        s.write_string(0, c as u16, *h).unwrap();
+    }
+    s.write_string(1, 0, "FR0000121014").unwrap();
+    s.write_string(1, 1, "MC FP Equity").unwrap();
+    s.write_string(1, 2, "France").unwrap();
+    s.write_string(1, 3, "Consumer Discretionary").unwrap();
+    s.write_string(1, 4, "Textiles, Apparel & Luxury Goods").unwrap();
+    let bytes = wb.save_to_buffer().unwrap();
+
+    let mut body = Vec::new();
+    body.extend_from_slice(format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"resp.xlsx\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    ).as_bytes());
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let req = Request::post("/api/bloomberg/upload")
+        .header("cookie", &cookie)
+        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
+        .body(Body::from(body)).unwrap();
+    let res = server.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp_body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(resp_body["classified"], 0, "{resp_body}");
+    assert_eq!(resp_body["classification_status"]["status"], "unavailable", "{resp_body}");
+    assert_eq!(
+        resp_body["classification_status"]["reason"], "not permitted: reference data",
+        "{resp_body}"
+    );
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Worklist item 2 (rates_h): a denied Reference read must not silently
+/// collapse every bond to `missing: true` with no marker — that reads
+/// identically to "these bonds genuinely lack coupon/maturity data" — nor
+/// leave `total_dv01_eur`/`nav_sensitivity_100bp` reporting a confident zero
+/// (computed on the remainder, which is empty precisely because Reference is
+/// denied). Denied must stay distinguishable from genuinely-missing refs.
+#[tokio::test]
+async fn rates_marks_bonds_and_dv01_unavailable_when_reference_is_denied() {
+    let (desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    seed(&desktop, pid).await;
+
+    // Positions + Nav granted, but NOT Reference.
+    let cookie = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
+        Grant { domain: Domain::Nav, action: Action::View, portfolio: Some(pid) },
+    ]).await;
+
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/rates"), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reference_status"]["status"], "unavailable", "{body}");
+    assert_eq!(body["reference_status"]["reason"], "not permitted: reference data", "{body}");
+
+    let bonds = body["bonds"].as_array().unwrap();
+    assert!(!bonds.is_empty(), "{body}");
+    for b in bonds {
+        assert_eq!(b["missing"], true, "{b}");
+        assert_eq!(b["status"], "unavailable", "bond {b} carries no denial marker");
+        assert_eq!(b["reason"], "not permitted: reference data", "bond {b} carries no denial marker");
+    }
+
+    // The pass-adjacent computed values must not report a confident zero —
+    // they must read `unavailable`/null, not "verified flat".
+    assert!(body["total_dv01_eur"].is_null(), "{body}");
+    assert!(body["nav_sensitivity_100bp"].is_null(), "{body}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Worklist item 2 (derivatives_h): a denied Reference read must not
+/// silently misclassify every future as "Other" with no marker (`categories`
+/// would otherwise read as a real "all other" breakdown), and a denied Nav
+/// grant must not silently read as `aum: 0` — indistinguishable from a fund
+/// that genuinely has no NAV row yet.
+#[tokio::test]
+async fn derivatives_marks_categories_and_aum_unavailable_when_reference_and_nav_are_denied() {
+    let (desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+    seed(&desktop, pid).await;
+
+    // Positions only — neither Reference nor Nav.
+    let cookie = user_with(&pool, &[
+        Grant { domain: Domain::Positions, action: Action::View, portfolio: Some(pid) },
+    ]).await;
+
+    let (status, body) = get_json(&server, &format!("/api/portfolios/{pid}/metrics/derivatives"), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert_eq!(body["reference_status"]["status"], "unavailable", "{body}");
+    assert_eq!(body["reference_status"]["reason"], "not permitted: reference data", "{body}");
+    assert!(body["categories"].is_null(), "{body}");
+
+    assert_eq!(body["nav_status"]["status"], "unavailable", "{body}");
+    assert_eq!(body["nav_status"]["reason"], "not permitted: NAV history", "{body}");
+    assert!(body["aum"].is_null(), "{body}");
+
+    pool.close().await;
+    edb.stop().await;
+}

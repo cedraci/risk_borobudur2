@@ -3,6 +3,13 @@ use crate::auth::Access;
 use crate::scoped::Scoped;
 use chrono::NaiveDate;
 
+/// One `Dividendes` snapshot row, as fetched from `position_snapshots` before
+/// `derive_dividends` groups it by `(isin, currency)`.
+type DividendSnapshotRow = (NaiveDate, String, Option<String>, Option<String>, Option<f64>);
+/// `derive_dividends`'s working accumulator: instrument -> date -> (summed
+/// local value, instrument name).
+type DividendsByKey = std::collections::BTreeMap<(String, String), std::collections::BTreeMap<NaiveDate, (f64, Option<String>)>>;
+
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
 pub struct PositionRecord {
     pub nav_date: NaiveDate,
@@ -77,7 +84,7 @@ impl<'a> Scoped<'a> {
         use std::collections::BTreeMap;
         let portfolio_id = a.portfolio_id();
 
-        let rows: Vec<(NaiveDate, String, Option<String>, Option<String>, Option<f64>)> = sqlx::query_as(
+        let rows: Vec<DividendSnapshotRow> = sqlx::query_as(
             "SELECT nav_date, isin, name, currency, valuation_ccy::float8 FROM position_snapshots
              WHERE portfolio_id = $1 AND asset_type = 'Dividendes' ORDER BY nav_date")
             .bind(portfolio_id).fetch_all(self.pool).await?;
@@ -89,7 +96,7 @@ impl<'a> Scoped<'a> {
             .bind(portfolio_id).fetch_all(self.pool).await?;
 
         // (isin, currency) -> date -> summed local value (a code may appear twice).
-        let mut by_key: BTreeMap<(String, String), BTreeMap<NaiveDate, (f64, Option<String>)>> = BTreeMap::new();
+        let mut by_key: DividendsByKey = BTreeMap::new();
         for (date, isin, name, currency, local) in rows {
             let Some(local) = local else { continue };
             let key = (isin, currency.unwrap_or_else(|| "EUR".into()));

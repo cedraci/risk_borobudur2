@@ -139,7 +139,7 @@ async fn a_session_token_is_never_stored_in_the_clear() {
     seed_user(&pool, "r@f.lu", "correct horse battery").await;
     let res = app.clone().oneshot(login_req("r@f.lu", "correct horse battery")).await.unwrap();
     let cookie = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
-    let token = cookie.split(';').next().unwrap().splitn(2, '=').nth(1).unwrap().to_string();
+    let token = cookie.split(';').next().unwrap().split_once('=').unwrap().1.to_string();
     let stored: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM sessions")
         .fetch_all(&pool).await.unwrap();
     assert_eq!(stored.len(), 1);

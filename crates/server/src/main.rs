@@ -48,6 +48,16 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            // Server mode always sets `Secure` on the session cookie
+            // (`handlers/session.rs::login`), which a browser only ever
+            // sends back over HTTPS — TLS termination is assumed to sit in
+            // front of this process (a reverse proxy, load balancer, etc.).
+            // If it doesn't, the cookie is silently dropped and every login
+            // looks like it never happened.
+            tracing::warn!(
+                "server mode sets the Secure cookie flag — plain HTTP access will silently drop the \
+                 session cookie unless TLS terminates in front of this process"
+            );
             AppState::server(dbh)
         }
         Mode::Desktop => AppState::desktop(dbh),

@@ -46,10 +46,8 @@ pub async fn put_contract(
     if analytics::PriceConvention::parse(&b.price_convention).is_none() {
         return Err(AppError::Unprocessable("price_convention must be 'decimal' or 'th32'".into()));
     }
-    if let Some(pv) = b.point_value {
-        if !(pv.is_finite() && pv > 0.0) {
-            return Err(AppError::Unprocessable("point_value must be a positive number".into()));
-        }
+    if b.point_value.is_some_and(|pv| !(pv.is_finite() && pv > 0.0)) {
+        return Err(AppError::Unprocessable("point_value must be a positive number".into()));
     }
     if b.label.trim().is_empty() || b.currency.trim().is_empty() {
         return Err(AppError::Unprocessable("label and currency must not be blank".into()));

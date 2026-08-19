@@ -26,6 +26,8 @@ impl Role {
         }
     }
 
+    /// See `Domain::from_str` (`auth/model.rs`) for why this is not `FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Role> {
         Role::ALL.into_iter().find(|r| r.as_str() == s)
     }

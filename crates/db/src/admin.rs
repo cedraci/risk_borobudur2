@@ -219,6 +219,19 @@ impl<'a> Admin<'a> {
         Ok(())
     }
 
+    /// Opportunistic hygiene: `session_user`'s own `expires_at > now()` check
+    /// already keeps an expired row from ever authenticating anything, so
+    /// this is not a security fix — it just keeps the table from growing a
+    /// dead row for every session that ever expired instead of being logged
+    /// out. Called from the login path (`LocalAccounts::login`) rather than
+    /// on a timer: there is no background scheduler in this process, and a
+    /// sweep on every login is cheap and frequent enough not to matter.
+    pub async fn sessions_delete_expired(&self) -> anyhow::Result<u64> {
+        let res = sqlx::query("DELETE FROM sessions WHERE expires_at <= now()")
+            .execute(self.pool).await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn audit_append(&self, e: AuditEvent) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO audit_events (user_id, actor_label, action, domain, portfolio_id, detail, source_addr)

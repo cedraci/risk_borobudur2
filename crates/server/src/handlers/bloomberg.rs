@@ -11,6 +11,10 @@ use db::scoped::Scoped;
 use ingest::bloomberg::{build_adv_request, build_request, market_sector_for, parse_response, region_for, RequestItem};
 use std::collections::BTreeSet;
 
+/// One resolved `REFS` sheet classification row: (isin, ticker, country,
+/// region, sector, industry).
+type ClassificationRow = (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+
 /// Export the request workbook for everything still unclassified.
 pub async fn request(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>) -> Result<impl IntoResponse, AppError> {
     let scoped = st.db.scope(&ctx);
@@ -45,15 +49,13 @@ pub async fn request(State(st): State<AppState>, Extension(ctx): Extension<AuthC
         let Some(latest) = dates.first().copied() else { continue };
         latest_any = Some(latest_any.map_or(latest, |d| d.max(latest)));
         // Nav is a secondary domain here too.
-        if let Ok(nv) = scoped.authorize::<Nav, View>(pf.id) {
-            if let Some(first_nav) = scoped.nav_rows(&nv).await?.first().map(|n| n.date) {
-                earliest_nav = Some(earliest_nav.map_or(first_nav, |d| d.min(first_nav)));
-            }
+        if let Ok(nv) = scoped.authorize::<Nav, View>(pf.id)
+            && let Some(first_nav) = scoped.nav_rows(&nv).await?.first().map(|n| n.date) {
+            earliest_nav = Some(earliest_nav.map_or(first_nav, |d| d.min(first_nav)));
         }
         for p in scoped.positions_for(&pv, latest).await? {
-            if let Some(c) = &p.currency {
-                if c != "EUR" { currencies.insert(c.clone()); }
-            }
+            if let Some(c) = &p.currency
+                && c != "EUR" { currencies.insert(c.clone()); }
             // Only instrument types classification applies to. Every one
             // still unclassified is exported — the workbook resolves its
             // own ticker from the ISIN, so nothing is skipped for lack of
@@ -212,7 +214,7 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
         ingest::ParseFailure::Rows(rows) => AppError::UnprocessableRows(rows),
     })?;
 
-    let classifications: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
+    let classifications: Vec<ClassificationRow> =
         parsed.classifications.iter().map(|c| (
             c.isin.clone(),
             c.ticker.clone(),
@@ -224,10 +226,14 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
     // Reference is a secondary domain here (this route is gated on
     // MarketData): a principal without a separate Reference/Configure grant
     // still stores the FX/ADV rows this upload owns, just not the
-    // classification columns.
-    let classified = match scoped.authorize_global::<Reference, Configure>() {
-        Ok(rc) => scoped.classify_upsert_many(&rc, &classifications).await?,
-        Err(_) => 0,
+    // classification columns. A denied grant must not silently read as
+    // "nothing to classify" — `classified: 0` is indistinguishable from a
+    // response workbook that genuinely resolved zero cells. Mirrors
+    // `fx_check_skipped`'s approach: an explicit marker names the denial so
+    // a reader can tell "checked, nothing to do" from "could not check".
+    let (classified, classification_status) = match scoped.authorize_global::<Reference, Configure>() {
+        Ok(rc) => (scoped.classify_upsert_many(&rc, &classifications).await?, serde_json::json!({"status": "ok"})),
+        Err(denied) => (0, serde_json::json!({"status": "unavailable", "reason": denied.reason()})),
     };
 
     let fx_rows: Vec<db::repo::FxRow> = parsed.fx.iter().map(|o| db::repo::FxRow {
@@ -290,9 +296,11 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
         serde_json::json!({
             "kind": "bloomberg_response", "classified": classified,
             "fx_rows": fx_stored, "adv_rows": adv_stored,
+            "classification_status": classification_status,
         })).await;
     Ok(Json(serde_json::json!({
         "classified": classified,
+        "classification_status": classification_status,
         "fx_rows": fx_stored,
         "adv_rows": adv_stored,
         "skipped": parsed.skipped,

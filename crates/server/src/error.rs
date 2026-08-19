@@ -51,10 +51,17 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::Internal(e) => {
+                // The real error (and its full `anyhow` chain, via `{:#}`) is
+                // logged, never handed to the client: `e.to_string()` in the
+                // response body can leak internals (a query fragment, a file
+                // path, a dependency's error phrasing) to anyone who can
+                // trigger a 500, and gives an attacker a diagnostic they
+                // should not get for free. The body says only that something
+                // failed; the operator reads why from the logs.
                 tracing::error!("internal error: {e:#}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"title": "Internal Server Error", "status": 500, "detail": e.to_string()})),
+                    Json(serde_json::json!({"title": "Internal Server Error", "status": 500, "detail": "internal error"})),
                 )
                     .into_response()
             }

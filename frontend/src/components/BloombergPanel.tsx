@@ -58,9 +58,17 @@ export default function BloombergPanel() {
 
       {result && (
         <div>
+          {result.classification_status.status === "unavailable" ? (
+            // Distinct from the "N instrument(s) classified" line below: a
+            // denied Reference/Configure grant means classification was
+            // never attempted, not that it resolved to zero. Never rendered
+            // "pos" — that reads as a real, checked zero.
+            <Unavailable reason={`classification not stored — ${result.classification_status.reason}`} />
+          ) : (
+            <p className="pos">{result.classified} instrument(s) classified.</p>
+          )}
           <p className="pos">
-            {result.classified} instrument(s) classified, {result.fx_rows} FX rate(s) stored,{" "}
-            {result.adv_rows} ADV volume(s) stored.
+            {result.fx_rows} FX rate(s) stored, {result.adv_rows} ADV volume(s) stored.
           </p>
           {result.skipped.length === 0 && result.fx_check.length === 0 && result.fx_check_skipped.length === 0 && (
             <p className="kpi-sub">No skipped cells and no FX cross-check drift.</p>

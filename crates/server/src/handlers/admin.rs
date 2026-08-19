@@ -50,6 +50,22 @@ fn map_email_conflict(e: anyhow::Error) -> AppError {
     }
 }
 
+/// `grants.portfolio_id` carries a `REFERENCES portfolios(id)` constraint; a
+/// grant for a portfolio id that does not exist would otherwise 500 instead
+/// of reporting the actual problem — turn the FK violation into a friendly
+/// 422, matching `map_email_conflict`.
+fn map_portfolio_fk(e: anyhow::Error) -> AppError {
+    let is_fk = e.downcast_ref::<sqlx::Error>()
+        .and_then(|se| se.as_database_error())
+        .map(|de| de.is_foreign_key_violation())
+        .unwrap_or(false);
+    if is_fk {
+        AppError::Unprocessable("no such portfolio".into())
+    } else {
+        AppError::Internal(e)
+    }
+}
+
 async fn require_user(admin: &db::admin::Admin<'_>, id: i64) -> Result<UserRow, AppError> {
     admin.user_by_id(id).await?.ok_or_else(|| AppError::NotFound(format!("no user {id}")))
 }
@@ -153,7 +169,13 @@ pub async fn grant_add(
 ) -> Result<StatusCode, AppError> {
     let admin = st.db.admin();
     require_user(&admin, id).await?;
-    admin.grant_add(id, g, Some(ctx.principal_id)).await?;
+    // Desktop mode's principal id is 0 (`auth/desktop.rs`'s `DesktopSingleUser`
+    // — not a real `users` row), and `granted_by` carries a
+    // `REFERENCES users(id)` constraint: a bare `Some(ctx.principal_id)`
+    // there FK-violates (500) the moment an administrator grants anything in
+    // desktop mode. Same pattern as `audit::record`'s `user_id`.
+    let granted_by = (ctx.principal_id != 0).then_some(ctx.principal_id);
+    admin.grant_add(id, g, granted_by).await.map_err(map_portfolio_fk)?;
     audit::record(&st, &ctx, "grant_added", Some(g.domain), g.portfolio, serde_json::json!({
         "target_user_id": id, "domain": g.domain.as_str(), "action": g.action.as_str(), "portfolio_id": g.portfolio,
     })).await;
@@ -186,7 +208,10 @@ pub async fn role_assign(
         .ok_or_else(|| AppError::Unprocessable(format!("unknown role '{}'", b.role)))?;
     let admin = st.db.admin();
     require_user(&admin, id).await?;
-    admin.role_assign(id, role, b.scope, Some(ctx.principal_id)).await?;
+    // Same desktop-mode FK trap as `grant_add` above: principal id 0 has no
+    // matching `users` row for `granted_by` to reference.
+    let granted_by = (ctx.principal_id != 0).then_some(ctx.principal_id);
+    admin.role_assign(id, role, b.scope, granted_by).await?;
     audit::record(&st, &ctx, "role_assigned", None, b.scope, serde_json::json!({
         "target_user_id": id, "role": role.as_str(), "scope": b.scope,
     })).await;

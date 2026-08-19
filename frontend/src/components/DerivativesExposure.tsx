@@ -22,6 +22,13 @@ export default function DerivativesExposure({ date }: { date?: string }) {
         <>
           <p className="kpi-sub">{data.note}</p>
 
+          {data.reference_status.status === "unavailable" && (
+            <Unavailable reason={`category breakdown not computed — ${data.reference_status.reason}`} />
+          )}
+          {data.nav_status.status === "unavailable" && (
+            <Unavailable reason={`% NAV not computed — ${data.nav_status.reason}`} />
+          )}
+
           {data.unconfirmed.length > 0 && (
             <p className="warn-badge">
               Unconfirmed contract specs: {data.unconfirmed.join(", ")}. Confirm them on the Data page.
@@ -43,7 +50,7 @@ export default function DerivativesExposure({ date }: { date?: string }) {
                   <tr><th>Category</th><th>Long</th><th>Short</th><th>Gross</th></tr>
                 </thead>
                 <tbody>
-                  {data.categories.filter((c) => c.gross_pct > 0).map((c) => (
+                  {(data.categories ?? []).filter((c) => c.gross_pct > 0).map((c) => (
                     <tr key={c.category}>
                       <td>{LABELS[c.category]}</td>
                       <td>{c.long_pct > 0 ? pct(c.long_pct) : "—"}</td>
