@@ -1,4 +1,4 @@
-use crate::auth::local::{LocalAccounts, COOKIE_NAME, SESSION_TTL_HOURS};
+use crate::auth::local::{COOKIE_NAME, SESSION_TTL_HOURS};
 use crate::auth::{AuthError, Principal};
 use crate::config::Mode;
 use crate::error::AppError;
@@ -7,6 +7,21 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use db::auth::{AuthCtx, GrantSet};
+
+/// A login attempt has no `AuthCtx` yet — that's what a successful login
+/// produces. This builds just enough of one for `audit::record` to log the
+/// attempt against: the email as the actor label (a failed/locked attempt
+/// may not resolve to a real user id at all), and the real principal id once
+/// login has actually succeeded.
+fn login_actor(principal_id: i64, email: &str) -> AuthCtx {
+    AuthCtx {
+        principal_id,
+        display_name: email.to_string(),
+        is_administrator: false,
+        grants: GrantSet::default(),
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub struct LoginBody {
@@ -22,15 +37,28 @@ pub async fn login(
         return Err(AppError::NotFound("login is not available in desktop mode".into()));
     };
     match local.login(&body.email, &body.password).await {
-        Ok(token) => {
+        Ok(success) => {
+            let ctx = login_actor(success.user_id, &success.display_name);
+            crate::audit::record(&st, &ctx, "login", None, None,
+                serde_json::json!({"email": body.email})).await;
             let secure = if st.mode == Mode::Server { "; Secure" } else { "" };
             let cookie = format!(
-                "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age={}",
-                SESSION_TTL_HOURS * 3600);
+                "{COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age={}",
+                success.token, SESSION_TTL_HOURS * 3600);
             Ok(([(header::SET_COOKIE, cookie)], Json(serde_json::json!({"ok": true}))).into_response())
         }
-        Err(AuthError::LockedOut { retry_after_secs }) => Err(AppError::LockedOut(retry_after_secs)),
-        Err(AuthError::Unauthenticated) => Err(AppError::Unauthenticated),
+        Err(AuthError::LockedOut { retry_after_secs }) => {
+            let ctx = login_actor(0, &body.email);
+            crate::audit::record(&st, &ctx, "login_locked", None, None,
+                serde_json::json!({"email": body.email, "retry_after_secs": retry_after_secs})).await;
+            Err(AppError::LockedOut(retry_after_secs))
+        }
+        Err(AuthError::Unauthenticated) => {
+            let ctx = login_actor(0, &body.email);
+            crate::audit::record(&st, &ctx, "login_failed", None, None,
+                serde_json::json!({"email": body.email})).await;
+            Err(AppError::Unauthenticated)
+        }
         Err(AuthError::Internal(e)) => Err(AppError::Internal(e)),
     }
 }

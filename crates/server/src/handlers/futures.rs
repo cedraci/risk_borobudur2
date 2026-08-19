@@ -4,7 +4,7 @@ use axum::extract::{Multipart, Path, Query, State};
 use axum::{Extension, Json};
 use chrono::NaiveDate;
 use db::auth::marker::{Configure, Import, MarketData, Positions, Reference, View};
-use db::auth::AuthCtx;
+use db::auth::{AuthCtx, Domain};
 
 #[derive(serde::Deserialize)]
 pub struct DateQuery {
@@ -66,6 +66,8 @@ pub async fn put_contract(
         otc: b.otc,
     };
     scoped.contracts_upsert(&a, &c).await?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), None,
+        serde_json::json!({"kind": "futures_contract", "after": c})).await;
     Ok(Json(c))
 }
 
@@ -149,6 +151,8 @@ pub async fn upload_ctd(
         let view = scoped.authorize::<MarketData, View>(pid)?;
         let replaced = !scoped.ctd_for(&view, date).await?.is_empty();
         let n = scoped.ctd_replace(&a, date, &filename, &rows).await?;
+        crate::audit::record(&st, &ctx, "import", Some(Domain::MarketData), Some(pid),
+            serde_json::json!({"kind": "ctd", "filename": filename, "nav_date": date, "rows": n, "replaced": replaced})).await;
         return Ok(Json(CtdUploadOutcome { nav_date: date, rows: n, replaced }));
     }
     Err(AppError::BadRequest("missing multipart field 'file'".into()))

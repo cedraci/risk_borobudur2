@@ -3,7 +3,7 @@ use crate::state::AppState;
 use axum::extract::{Multipart, Path, State};
 use axum::{Extension, Json};
 use db::auth::marker::{Import, Nav, Positions, Reference, Transactions, View};
-use db::auth::AuthCtx;
+use db::auth::{AuthCtx, Domain};
 use db::scoped::Scoped;
 use sha2::Digest;
 
@@ -91,12 +91,14 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
 
     let mut results = Vec::with_capacity(files.len());
     for (filename, bytes) in files {
-        results.push(import_one(&scoped, &selected, filename, &bytes).await);
+        results.push(import_one(&st, &ctx, &scoped, &selected, filename, &bytes).await);
     }
     Ok(Json(results))
 }
 
-async fn import_one(scoped: &Scoped<'_>, selected: &db::repo::Portfolio, filename: String, bytes: &[u8]) -> FileImportResult {
+async fn import_one(
+    st: &AppState, ctx: &AuthCtx, scoped: &Scoped<'_>, selected: &db::repo::Portfolio, filename: String, bytes: &[u8],
+) -> FileImportResult {
     let mut r = FileImportResult {
         filename: filename.clone(), kind: None, portfolio_id: None,
         portfolio_name: None, outcome: None, error: None, error_rows: None,
@@ -179,7 +181,14 @@ async fn import_one(scoped: &Scoped<'_>, selected: &db::repo::Portfolio, filenam
 
     let sha = hex::encode(sha2::Sha256::digest(bytes));
     match scoped.import_batch(&positions_a, &nav_a, &transactions_a, &filename, &sha, &batch).await {
-        Ok(outcome) => r.outcome = Some(outcome),
+        Ok(outcome) => {
+            crate::audit::record(st, ctx, "import", Some(Domain::Positions), Some(target.id),
+                serde_json::json!({
+                    "import_id": outcome.import_id, "filename": filename,
+                    "kind": kind_label(id.kind), "duplicate": outcome.duplicate,
+                })).await;
+            r.outcome = Some(outcome);
+        }
         Err(e) => r.error = Some(e.to_string()),
     }
     r

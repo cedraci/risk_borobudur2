@@ -3,7 +3,7 @@ use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
 use db::auth::marker::{Configure, Reference, View};
-use db::auth::AuthCtx;
+use db::auth::{AuthCtx, Domain};
 use db::settings::AppSettings;
 
 pub async fn get(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<AppSettings>, AppError> {
@@ -18,8 +18,12 @@ pub async fn put(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
     scoped.authorize::<Reference, Configure>(pid)?;
     super::portfolios::ensure(&scoped, pid, true).await?;
     validate(&s).map_err(AppError::BadRequest)?;
+    let before = scoped.get_settings(pid).await?;
     scoped.put_settings(pid, &s).await?;
-    Ok(Json(scoped.get_settings(pid).await?))
+    let after = scoped.get_settings(pid).await?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
+        serde_json::json!({"before": before, "after": after})).await;
+    Ok(Json(after))
 }
 
 fn validate(s: &AppSettings) -> Result<(), String> {

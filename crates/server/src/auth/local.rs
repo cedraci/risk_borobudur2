@@ -59,13 +59,21 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
+/// A successful login: the raw session token (the caller sets the cookie)
+/// plus enough of the resolved user to let the caller audit the event
+/// against a real principal id.
+pub struct LoginSuccess {
+    pub token: String,
+    pub user_id: i64,
+    pub display_name: String,
+}
+
 impl LocalAccounts {
     pub fn new(db: Arc<db::Db>) -> Self {
         LocalAccounts { db }
     }
 
-    /// Returns the raw session token on success. The caller sets the cookie.
-    pub async fn login(&self, email: &str, password: &str) -> Result<String, AuthError> {
+    pub async fn login(&self, email: &str, password: &str) -> Result<LoginSuccess, AuthError> {
         let admin = self.db.admin();
         let state = admin.login_state(email).await?;
         if state.locked {
@@ -102,7 +110,7 @@ impl LocalAccounts {
         admin.login_reset(email).await?;
         let token = new_token();
         admin.session_create(&token_hash(&token), user.id, SESSION_TTL_HOURS).await?;
-        Ok(token)
+        Ok(LoginSuccess { token, user_id: user.id, display_name: user.display_name })
     }
 
     pub async fn logout(&self, headers: &HeaderMap) -> anyhow::Result<()> {

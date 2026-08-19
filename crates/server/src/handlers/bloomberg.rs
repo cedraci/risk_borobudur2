@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use analytics::pnl::asset_class_of;
 use db::auth::marker::{Configure, Export, Import, MarketData, Nav, Positions, Reference, View};
-use db::auth::AuthCtx;
+use db::auth::{AuthCtx, Domain};
 use db::scoped::Scoped;
 use ingest::bloomberg::{build_adv_request, build_request, market_sector_for, parse_response, region_for, RequestItem};
 use std::collections::BTreeSet;
@@ -82,6 +82,8 @@ pub async fn request(State(st): State<AppState>, Extension(ctx): Extension<AuthC
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
         &format!("attachment; filename=\"bloomberg_request_{to}.xlsx\"")).map_err(anyhow::Error::from)?);
+    crate::audit::record(&st, &ctx, "export", Some(Domain::Positions), None,
+        serde_json::json!({"kind": "bloomberg_request", "items": items.len()})).await;
     Ok((StatusCode::OK, h, bytes))
 }
 
@@ -179,6 +181,8 @@ pub async fn adv_request(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
         &format!("attachment; filename=\"bloomberg_adv_request_{asof}.xlsx\"")).map_err(anyhow::Error::from)?);
+    crate::audit::record(&st, &ctx, "export", Some(Domain::Positions), None,
+        serde_json::json!({"kind": "bloomberg_adv_request", "items": items.len(), "all": q.all})).await;
     Ok((StatusCode::OK, h, bytes))
 }
 
@@ -282,6 +286,11 @@ pub async fn upload(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
     let adv_stored = scoped.adv_upsert_many(
         &import, &adv_rows, chrono::Utc::now().date_naive()).await?;
 
+    crate::audit::record(&st, &ctx, "import", Some(Domain::MarketData), None,
+        serde_json::json!({
+            "kind": "bloomberg_response", "classified": classified,
+            "fx_rows": fx_stored, "adv_rows": adv_stored,
+        })).await;
     Ok(Json(serde_json::json!({
         "classified": classified,
         "fx_rows": fx_stored,

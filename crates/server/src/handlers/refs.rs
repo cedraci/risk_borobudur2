@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::{Extension, Json};
 use chrono::NaiveDate;
 use db::auth::marker::{Positions, Reference, View};
-use db::auth::AuthCtx;
+use db::auth::{AuthCtx, Domain};
 use std::collections::{HashMap, HashSet};
 
 #[derive(serde::Serialize)]
@@ -152,5 +152,7 @@ pub async fn put(
         ticker: None,
     };
     scoped.refs_upsert(&a, &r).await?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), None,
+        serde_json::json!({"kind": "instrument_ref", "after": r})).await;
     Ok(Json(r))
 }

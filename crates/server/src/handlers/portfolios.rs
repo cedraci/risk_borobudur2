@@ -3,7 +3,7 @@ use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
 use db::auth::marker::{Configure, Import, Reference, Shareholders, View};
-use db::auth::AuthCtx;
+use db::auth::{AuthCtx, Domain};
 
 #[derive(serde::Deserialize)]
 pub struct CreateBody { pub name: String, pub kind: String }
@@ -57,6 +57,8 @@ pub async fn create(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
     valid_kind(&b.kind)?;
     let p = scoped.portfolio_create(&a, &name, &b.kind).await
         .map_err(map_name_conflict)?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(p.id),
+        serde_json::json!({"kind": "portfolio_create", "after": {"name": p.name, "kind": p.kind}})).await;
     Ok(Json(p))
 }
 
@@ -69,6 +71,8 @@ pub async fn update(State(st): State<AppState>, Extension(ctx): Extension<AuthCt
     let p = scoped.portfolio_update(&a, &name, b.archived).await
         .map_err(map_name_conflict)?
         .ok_or_else(|| AppError::NotFound(format!("no portfolio {id}")))?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(id),
+        serde_json::json!({"kind": "portfolio_update", "after": {"name": p.name, "archived": p.archived}})).await;
     Ok(Json(p))
 }
 
@@ -127,6 +131,8 @@ pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<Aut
             AppError::Internal(e)
         }
     })?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
+        serde_json::json!({"kind": "portfolio_codes", "count": codes.len()})).await;
     // `a` (Configure) already implies View in the grant set, so this
     // authorize cannot fail for a principal who reached this handler.
     let view = scoped.authorize::<Reference, View>(pid)?;
@@ -177,6 +183,8 @@ pub async fn shareholders_put(
             "register totals {total:.2}% of NAV, which exceeds 100%")));
     }
     scoped.shareholders_replace(&a, &rows).await?;
+    crate::audit::record(&st, &ctx, "import", Some(Domain::Shareholders), Some(pid),
+        serde_json::json!({"kind": "shareholders_register", "count": rows.len()})).await;
     // `a` (Import) already implies View in the grant set, so this authorize
     // cannot fail for a principal who reached this handler.
     let view = scoped.authorize::<Shareholders, View>(pid)?;

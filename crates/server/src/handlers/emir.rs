@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use chrono::{Datelike, NaiveDate};
 use db::auth::marker::{Configure, Export, Positions, Reference, View};
-use db::auth::{Access, AuthCtx, Denied};
+use db::auth::{Access, AuthCtx, Denied, Domain};
 use db::scoped::Scoped;
 use ingest::emir_file;
 
@@ -282,6 +282,8 @@ pub async fn export(
     h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
         &format!("attachment; filename=\"EMIR - seuils - {} - {}.xlsx\"", portfolio.name, a.anchor))
         .map_err(anyhow::Error::from)?);
+    crate::audit::record(&st, &ctx, "export", Some(Domain::Positions), Some(pid),
+        serde_json::json!({"kind": "emir_evidence", "anchor": a.anchor, "portfolio": portfolio.name})).await;
     Ok((StatusCode::OK, h, bytes))
 }
 
@@ -322,5 +324,7 @@ pub async fn put_kpi(
         note: b.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     };
     scoped.emir_kpi_upsert(&a, &k).await?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
+        serde_json::json!({"kind": "emir_kpi", "after": k})).await;
     Ok(Json(k))
 }
