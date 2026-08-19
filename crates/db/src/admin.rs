@@ -10,6 +10,23 @@ use crate::auth::{Action, Domain, Grant, GrantSet, Role};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
+/// Never a real Argon2 hash: `PasswordHash::new` fails to parse it, so
+/// password verification against it always returns `false`, for any
+/// password, forever, until `set_password` replaces it with a real one. A
+/// freshly created account (first-administrator enrolment, or any account an
+/// administrator creates before setting a password) is stamped with this and
+/// starts out unable to log in at all — there is no default password to
+/// forget to change.
+///
+/// It also marks an account as "not yet enrolled" wherever that matters:
+/// `POST /api/enrol` will only ever act on a user still carrying this exact
+/// hash (`crates/server/src/handlers/admin.rs::enrol`), and cookie session
+/// authentication refuses a session row belonging to a user who still
+/// carries it (`crates/server/src/auth/local.rs::authenticate`) — otherwise
+/// an enrolment token, which is stored as an ordinary `sessions` row, would
+/// double as a live administrator cookie for its whole lifetime.
+pub const UNUSABLE_PASSWORD_HASH: &str = "!unusable!";
+
 pub struct Admin<'a> {
     pool: &'a PgPool,
 }
@@ -156,10 +173,15 @@ impl<'a> Admin<'a> {
         Ok(())
     }
 
+    /// Re-assigning the same role at the same scope is idempotent, not a
+    /// constraint violation — `idx_user_roles_unique` (NULLS NOT DISTINCT, so
+    /// two instance-wide rows collide) gives `ON CONFLICT` a real target.
     pub async fn role_assign(
         &self, user_id: i64, role: Role, scope: Option<i64>, granted_by: Option<i64>,
     ) -> anyhow::Result<()> {
-        sqlx::query("INSERT INTO user_roles (user_id, role, portfolio_id) VALUES ($1, $2, $3)")
+        sqlx::query(
+            "INSERT INTO user_roles (user_id, role, portfolio_id) VALUES ($1, $2, $3)
+             ON CONFLICT (user_id, role, portfolio_id) DO NOTHING")
             .bind(user_id).bind(role.as_str()).bind(scope)
             .execute(self.pool).await?;
         for g in role.expand(scope) {

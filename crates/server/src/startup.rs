@@ -4,13 +4,8 @@
 //! `handlers/admin.rs`, because ensuring the very first account exists is the
 //! same chicken-and-egg problem as resolving identity in the first place.
 
+use db::admin::UNUSABLE_PASSWORD_HASH;
 use rand::RngCore;
-
-/// Never a real Argon2 hash: `PasswordHash::new` fails to parse it, so
-/// `auth::local::LocalAccounts::login`'s `verify_password` returns `false`
-/// unconditionally, for any password, forever, until `set_password` replaces
-/// it. Nothing has to remember to change a default — there isn't one.
-const UNUSABLE_PASSWORD_HASH: &str = "!unusable!";
 
 const ENROLMENT_TOKEN_TTL_HOURS: i64 = 1;
 
@@ -38,4 +33,11 @@ pub async fn ensure_first_administrator(
     admin.session_create(&crate::auth::local::token_hash(&token), user_id, ENROLMENT_TOKEN_TTL_HOURS).await?;
 
     Ok(Some(token))
+}
+
+/// Whether the `users` table is currently empty. `main` uses this to warn
+/// when server mode starts with no way to sign in at all — no users exist
+/// and no `BOROBUDUR_ADMIN_EMAIL` was set to enrol one.
+pub async fn no_users_exist(db: &db::Db) -> anyhow::Result<bool> {
+    Ok(db.admin().user_count().await? == 0)
 }

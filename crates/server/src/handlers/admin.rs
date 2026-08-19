@@ -108,6 +108,10 @@ pub async fn password_set(
     require_user(&admin, id).await?;
     let hash = crate::auth::local::hash_password(&b.password)?;
     admin.set_password(id, &hash).await?;
+    // An administrator-forced reset must kill any session the old password
+    // opened — otherwise a stolen cookie survives its owner's password being
+    // changed out from under it.
+    admin.sessions_delete_for(id).await?;
     audit::record(&st, &ctx, "password_reset", None, None,
         serde_json::json!({"target_user_id": id})).await;
     Ok(StatusCode::NO_CONTENT)
@@ -212,6 +216,14 @@ pub struct EnrolBody {
 /// gated by `.admin` — there is no administrator to authenticate as yet;
 /// the token itself is the credential, exactly as a session cookie is for
 /// `session_user`.
+///
+/// The token being a valid, live `sessions` row is necessary but never
+/// sufficient: it is also how an ordinary login cookie resolves. Without the
+/// sentinel check below, a stolen/leaked login cookie would let its holder
+/// set that account's password without ever knowing the old one — a public,
+/// unauthenticated privilege escalation. Enrolment may only ever act on a
+/// user still carrying `UNUSABLE_PASSWORD_HASH`, i.e. one that has never
+/// completed enrolment.
 pub async fn enrol(
     State(st): State<AppState>, Json(b): Json<EnrolBody>,
 ) -> Result<StatusCode, AppError> {
@@ -221,11 +233,22 @@ pub async fn enrol(
     let admin = st.db.admin();
     let token_hash = crate::auth::local::token_hash(&b.token);
     let user = admin.session_user(&token_hash).await?.ok_or(AppError::Unauthenticated)?;
+    if user.password_hash != db::admin::UNUSABLE_PASSWORD_HASH {
+        // An ordinary, already-enrolled account's session token — reject it
+        // exactly like an unresolved one, so a stolen cookie learns nothing
+        // beyond "this didn't work".
+        return Err(AppError::Unauthenticated);
+    }
     let hash = crate::auth::local::hash_password(&b.password)?;
-    admin.set_password(user.id, &hash).await?;
-    // Single use: the token row is gone whether this call succeeds or is
-    // replayed afterward, exactly like a logout consumes a session cookie.
+    // Consume the token BEFORE writing the new password: fail-closed. If
+    // `set_password` were first and failed partway (a rare DB error), the
+    // token row would survive as a live `sessions` entry for an account
+    // whose hash may already have changed — exactly the "usable admin
+    // cookie" this whole check exists to prevent. Burning the token first
+    // means the worst case of a failure here is a wasted enrolment attempt,
+    // never a leftover credential.
     admin.session_delete(&token_hash).await?;
+    admin.set_password(user.id, &hash).await?;
 
     let ctx = AuthCtx {
         principal_id: user.id,

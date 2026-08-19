@@ -174,6 +174,14 @@ async fn disabling_a_user_revokes_their_live_session_immediately() {
     assert_eq!(get(&app, "/api/me", Some(&user_cookie)).await, StatusCode::UNAUTHORIZED,
         "a disabled user's live session must stop working on the very next request");
 
+    // `session_user`'s own `NOT u.disabled` filter would make the request
+    // above pass even if `sessions_delete_for` were never called — assert
+    // the row is actually gone so this falsifies the deletion itself, not
+    // just that filter.
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE user_id = $1")
+        .bind(user_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(remaining, 0, "disabling a user must delete their session rows, not just deny them");
+
     pool.close().await;
     edb.stop().await;
 }

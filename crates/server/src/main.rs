@@ -28,13 +28,24 @@ async fn main() -> anyhow::Result<()> {
     let dbh = db::Db::connect(&url).await?;
     let state = match cfg.mode {
         Mode::Server => {
-            if let Some(email) = &cfg.admin_email {
-                if let Some(token) = server::startup::ensure_first_administrator(&dbh, email).await? {
-                    tracing::info!("no users exist yet — issued a single-use enrolment token for {email}");
-                    tracing::info!("{token}");
-                    tracing::info!(
-                        "complete enrolment within 1 hour: POST /api/enrol with {{\"token\": \"<above>\", \"password\": \"<new password>\"}}"
-                    );
+            match &cfg.admin_email {
+                Some(email) => {
+                    if let Some(token) = server::startup::ensure_first_administrator(&dbh, email).await? {
+                        tracing::info!("no users exist yet — issued a single-use enrolment token for {email}");
+                        tracing::info!("{token}");
+                        tracing::info!(
+                            "complete enrolment within 1 hour: POST /api/enrol with {{\"token\": \"<above>\", \"password\": \"<new password>\"}}"
+                        );
+                    }
+                }
+                None => {
+                    if server::startup::no_users_exist(&dbh).await? {
+                        tracing::warn!(
+                            "server mode is starting with zero users and no BOROBUDUR_ADMIN_EMAIL set — \
+                             there is no way to sign in; set BOROBUDUR_ADMIN_EMAIL and restart to enrol \
+                             the first administrator"
+                        );
+                    }
                 }
             }
             AppState::server(dbh)

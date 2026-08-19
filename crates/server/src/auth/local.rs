@@ -128,6 +128,15 @@ impl IdentityProvider for LocalAccounts {
         let admin = self.db.admin();
         let user = admin.session_user(&token_hash(&token)).await?
             .ok_or(AuthError::Unauthenticated)?;
+        // An enrolment token is stored as an ordinary `sessions` row (see
+        // `startup::ensure_first_administrator`), so without this check it
+        // would double as a live cookie for the account it enrols — for the
+        // whole hour of its TTL, and for anyone who reads it off a startup
+        // log. Only `POST /api/enrol` may act on a session belonging to a
+        // user still carrying the unusable sentinel hash; a cookie never may.
+        if user.password_hash == db::admin::UNUSABLE_PASSWORD_HASH {
+            return Err(AuthError::Unauthenticated);
+        }
         let grants = admin.grants_for(user.id).await?;
         Ok(Principal {
             id: user.id,
