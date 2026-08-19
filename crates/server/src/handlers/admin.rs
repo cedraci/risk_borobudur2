@@ -142,7 +142,12 @@ pub async fn disabled_set(
     State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(b): Json<DisabledBody>,
 ) -> Result<StatusCode, AppError> {
     let admin = st.db.admin();
-    require_user(&admin, id).await?;
+    let target = require_user(&admin, id).await?;
+    // Refuse to disable the last administrator who can still sign in —
+    // otherwise one click leaves the instance with no way to administer it.
+    if b.disabled && target.is_administrator && admin.other_usable_admin_count(id).await? == 0 {
+        return Err(AppError::Unprocessable("cannot disable the last administrator".into()));
+    }
     admin.set_disabled(id, b.disabled).await?;
     if b.disabled {
         // `session_user` already filters out a disabled account's cookie, but

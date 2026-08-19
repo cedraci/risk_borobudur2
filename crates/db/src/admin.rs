@@ -120,7 +120,7 @@ impl<'a> Admin<'a> {
     }
 
     pub async fn set_password(&self, user_id: i64, password_hash: &str) -> anyhow::Result<()> {
-        sqlx::query("UPDATE users SET password_hash = $2, must_change_password = false WHERE id = $1")
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
             .bind(user_id).bind(password_hash).execute(self.pool).await?;
         Ok(())
     }
@@ -129,6 +129,18 @@ impl<'a> Admin<'a> {
         sqlx::query("UPDATE users SET disabled = $2 WHERE id = $1")
             .bind(user_id).bind(disabled).execute(self.pool).await?;
         Ok(())
+    }
+
+    /// Administrators other than `excluding` who could actually sign in:
+    /// enabled and past enrolment (an account still on the unusable sentinel
+    /// hash cannot authenticate, so it must not count as a fallback admin).
+    pub async fn other_usable_admin_count(&self, excluding: i64) -> anyhow::Result<i64> {
+        let row = sqlx::query(
+            "SELECT count(*) FROM users
+             WHERE is_administrator AND NOT disabled AND id <> $1 AND password_hash <> $2")
+            .bind(excluding).bind(UNUSABLE_PASSWORD_HASH)
+            .fetch_one(self.pool).await?;
+        Ok(row.get::<i64, _>(0))
     }
 
     pub async fn grant_rows_for(&self, user_id: i64) -> anyhow::Result<Vec<Grant>> {

@@ -284,3 +284,49 @@ async fn grant_add_with_a_nonexistent_portfolio_returns_422_not_500() {
     pool.close().await;
     edb.stop().await;
 }
+
+/// The last administrator who can still sign in must not be disableable —
+/// neither by themselves nor by anything else — or the instance is left with
+/// no way to administer it. A second *usable* administrator (enabled, past
+/// enrolment) unlocks the action; an unenrolled admin (unusable sentinel
+/// hash) must not count as that fallback.
+#[tokio::test]
+async fn the_last_usable_administrator_cannot_be_disabled() {
+    let (app, pool, edb) = app().await;
+    let (admin_cookie, admin_id) = user_with(&pool, true, &[]).await;
+
+    let (status, body) = send_json(&app, "PUT", &format!("/api/admin/users/{admin_id}/disabled"), Some(&admin_cookie),
+        serde_json::json!({"disabled": true})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:?}");
+    let still_enabled: bool = sqlx::query_scalar("SELECT NOT disabled FROM users WHERE id = $1")
+        .bind(admin_id).fetch_one(&pool).await.unwrap();
+    assert!(still_enabled, "the refusal must leave the row untouched");
+
+    // An unenrolled administrator is not a usable fallback: still refused.
+    let unenrolled = db::admin::Admin::new(&pool)
+        .create_user("pending@f.lu", "Pending", db::admin::UNUSABLE_PASSWORD_HASH, true).await.unwrap();
+    let (status, _) = send_json(&app, "PUT", &format!("/api/admin/users/{admin_id}/disabled"), Some(&admin_cookie),
+        serde_json::json!({"disabled": true})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A second usable administrator unlocks it.
+    let (_, second_id) = user_with(&pool, true, &[]).await;
+    let (status, body) = send_json(&app, "PUT", &format!("/api/admin/users/{admin_id}/disabled"), Some(&admin_cookie),
+        serde_json::json!({"disabled": true})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+
+    // And now the second one is the last usable administrator in turn.
+    let (second_cookie, _) = {
+        // fresh session for the second admin
+        let token = "second-admin-token";
+        db::admin::Admin::new(&pool).session_create(&server::auth::local::token_hash(token), second_id, 1).await.unwrap();
+        (format!("borobudur_session={token}"), second_id)
+    };
+    let (status, _) = send_json(&app, "PUT", &format!("/api/admin/users/{second_id}/disabled"), Some(&second_cookie),
+        serde_json::json!({"disabled": true})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let _ = unenrolled;
+    pool.close().await;
+    edb.stop().await;
+}
