@@ -174,6 +174,20 @@ of the Bloomberg request workbook as soon as its country is known.
   from `OPERATIONS`, so it reports as zero and any resulting error surfaces in the
   residual instead of being absorbed.
 
+## Server mode (multi-user)
+
+Set `BOROBUDUR_DATABASE_URL` (external PostgreSQL) to run as a multi-user
+server instead of the single-user desktop app; `BOROBUDUR_BIND` picks the
+address, and on an empty database `BOROBUDUR_ADMIN_EMAIL` creates the first
+administrator and prints a one-hour single-use enrolment token to the log.
+Users, grants, roles and the audit log are managed on the Administration
+page.
+
+**TLS is assumed to terminate in front of the server**: the session cookie
+is marked `Secure`, so over plain HTTP browsers drop it and login silently
+fails. Put the server behind an HTTPS reverse proxy (or an SSH tunnel to
+127.0.0.1) — never expose the plain-HTTP port directly.
+
 ## Development
 
     cargo run -p server          # API on :8787

@@ -216,7 +216,10 @@ pub async fn role_assign(
     // Same desktop-mode FK trap as `grant_add` above: principal id 0 has no
     // matching `users` row for `granted_by` to reference.
     let granted_by = (ctx.principal_id != 0).then_some(ctx.principal_id);
-    admin.role_assign(id, role, b.scope, granted_by).await?;
+    // Same FK mapping as `grant_add`: a scope naming a portfolio that no
+    // longer exists (stale form, deleted mid-session) is the caller's error,
+    // not a server fault.
+    admin.role_assign(id, role, b.scope, granted_by).await.map_err(map_portfolio_fk)?;
     audit::record(&st, &ctx, "role_assigned", None, b.scope, serde_json::json!({
         "target_user_id": id, "role": role.as_str(), "scope": b.scope,
     })).await;

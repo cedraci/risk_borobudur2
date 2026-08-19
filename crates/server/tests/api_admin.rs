@@ -330,3 +330,29 @@ async fn the_last_usable_administrator_cannot_be_disabled() {
     pool.close().await;
     edb.stop().await;
 }
+
+/// Same contract as the `grant_add` pin above: assigning a role scoped to a
+/// portfolio id that does not exist (stale form, portfolio deleted
+/// mid-session) is the caller's error — 422 with a clear detail, not a 500.
+/// The FK on `user_roles.portfolio_id` fires on the very first insert, so
+/// nothing is written.
+#[tokio::test]
+async fn role_assign_with_a_nonexistent_portfolio_returns_422_not_500() {
+    let (app, pool, edb) = app().await;
+    let (admin_cookie, _) = user_with(&pool, true, &[]).await;
+    let (_, target_id) = user_with(&pool, false, &[]).await;
+
+    let (status, body) = send_json(&app, "POST", &format!("/api/admin/users/{target_id}/roles"), Some(&admin_cookie),
+        serde_json::json!({"role": "auditor", "scope": 999_999})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:?}");
+    assert!(body["detail"].as_str().is_some_and(|d| !d.is_empty()), "{body:?}");
+
+    let roles: i64 = sqlx::query_scalar("SELECT count(*) FROM user_roles WHERE user_id = $1")
+        .bind(target_id).fetch_one(&pool).await.unwrap();
+    let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM grants WHERE user_id = $1")
+        .bind(target_id).fetch_one(&pool).await.unwrap();
+    assert_eq!((roles, grants), (0, 0), "the refused assignment must write nothing");
+
+    pool.close().await;
+    edb.stop().await;
+}
