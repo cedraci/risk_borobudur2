@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { getBacktest, getSettings, getVar, type VarBlock } from "../api";
 import EChart from "../components/EChart";
+import Unavailable from "../components/Unavailable";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
@@ -29,9 +30,19 @@ export default function VarPage() {
   const m: VarBlock | null = v.data?.methods ?? null;
   const bt = useFetch(() => getBacktest(portfolio.id), [portfolio.id]);
 
+  if (v.forbidden) {
+    return (
+      <div>
+        <h2>VaR / Expected Shortfall</h2>
+        <Unavailable reason={v.forbidden} />
+      </div>
+    );
+  }
+
   return (
     <div>
       <h2>VaR / Expected Shortfall</h2>
+      {settings.forbidden && <Unavailable reason={settings.forbidden} />}
       {v.data?.warnings.map((wn, i) => <span key={i} className="warn-badge">{wn}</span>)}
       <div className="controls">
         <label>Confidence:{" "}

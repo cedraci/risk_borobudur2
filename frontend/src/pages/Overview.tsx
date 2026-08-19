@@ -1,6 +1,7 @@
 import { getDrawdowns, getNav, getSummary } from "../api";
 import EChart from "../components/EChart";
 import KpiCard from "../components/KpiCard";
+import Unavailable from "../components/Unavailable";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
@@ -12,6 +13,15 @@ export default function Overview() {
   const nav = useFetch(() => getNav(portfolio.id), [portfolio.id]);
   const dd = useFetch(() => getDrawdowns(portfolio.id), [portfolio.id]);
   const s = summary.data;
+
+  if (summary.forbidden) {
+    return (
+      <div>
+        <h2>Overview</h2>
+        <Unavailable reason={summary.forbidden} />
+      </div>
+    );
+  }
 
   if (s?.empty) {
     return (

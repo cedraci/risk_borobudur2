@@ -3,6 +3,7 @@ import {
   getFuturesContracts, putFuturesContract, getCtd, uploadCtd,
   ApiError, type FuturesContract, type CtdRecord, type Category,
 } from "../api";
+import Unavailable from "./Unavailable";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
 import { CATEGORY_LABELS as LABELS, num } from "../fmt";
@@ -128,7 +129,7 @@ export default function FuturesContracts() {
     <div className="card">
       <h3>Futures contracts</h3>
       <p className="kpi-sub">Shared across all portfolios.</p>
-      {contracts.error && <p className="neg">{contracts.error}</p>}
+      {contracts.forbidden ? <Unavailable reason={contracts.forbidden} /> : contracts.error && <p className="neg">{contracts.error}</p>}
       {unconfirmedCount > 0 && (
         <p className="warn-badge">
           {unconfirmedCount} contract spec(s) seeded from the workbook still need confirming. The category
@@ -346,7 +347,7 @@ export default function FuturesContracts() {
           )}
         </div>
       )}
-      {ctd.error && <p className="neg">{ctd.error}</p>}
+      {ctd.forbidden ? <Unavailable reason={ctd.forbidden} /> : ctd.error && <p className="neg">{ctd.error}</p>}
       {(ctd.data ?? []).length > 0 && (
         <table className="tbl">
           <thead>

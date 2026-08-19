@@ -7,6 +7,7 @@ import BloombergPanel from "../components/BloombergPanel";
 import FuturesContracts from "../components/FuturesContracts";
 import PortfoliosAdmin from "../components/PortfoliosAdmin";
 import ShareholderRegister from "../components/ShareholderRegister";
+import Unavailable from "../components/Unavailable";
 import { useFetch } from "../hooks";
 import { usePortfolio, useReloadPortfolios } from "../PortfolioContext";
 import { eur, num, pct } from "../fmt";
@@ -67,6 +68,7 @@ export default function DataPage() {
           disabled={busy}
           onChange={(e) => void doUpload(Array.from(e.target.files ?? []))}
         />
+        {positions.forbidden && <Unavailable reason={positions.forbidden} />}
         {uploadErr && <p className="neg">Upload failed: {uploadErr}</p>}
         {results && (
           <table className="tbl">
@@ -118,7 +120,7 @@ export default function DataPage() {
 
       <div className="card">
         <h3>Import history</h3>
-        {imports.error && <p className="neg">{imports.error}</p>}
+        {imports.forbidden ? <Unavailable reason={imports.forbidden} /> : imports.error && <p className="neg">{imports.error}</p>}
         <table className="tbl">
           <thead><tr><th>File</th><th>NAV date</th><th>Imported at</th><th>Rows</th></tr></thead>
           <tbody>
@@ -134,9 +136,9 @@ export default function DataPage() {
         </table>
       </div>
 
-      <SettingsCard settings={settings.data} onSaved={settings.reload} />
+      <SettingsCard settings={settings.data} forbidden={settings.forbidden} onSaved={settings.reload} />
 
-      <RefsCard rows={refs.data} advMaxAgeDays={settings.data?.adv_max_age_days ?? 7} onSaved={refs.reload} />
+      <RefsCard rows={refs.data} forbidden={refs.forbidden} advMaxAgeDays={settings.data?.adv_max_age_days ?? 7} onSaved={refs.reload} />
 
       <ShareholderRegister />
 
@@ -170,12 +172,13 @@ export default function DataPage() {
   );
 }
 
-function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSaved: () => void }) {
+function SettingsCard({ settings, forbidden, onSaved }: { settings: Settings | null; forbidden?: string; onSaved: () => void }) {
   const portfolio = usePortfolio();
   const [draft, setDraft] = useState<Settings | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const flows = useFetch(() => getFlows(portfolio.id), [portfolio.id]);
   const s = draft ?? settings;
+  if (forbidden) return <div className="card"><h3>Settings</h3><Unavailable reason={forbidden} /></div>;
   if (!s) return <div className="card"><h3>Settings</h3><p>Loading…</p></div>;
   const set = (patch: Partial<Settings>) => setDraft({ ...s, ...patch });
   const worst20 = flows.data && flows.data.status !== "unavailable"
@@ -239,9 +242,10 @@ function SettingsCard({ settings, onSaved }: { settings: Settings | null; onSave
   );
 }
 
-function RefsCard({ rows, advMaxAgeDays, onSaved }: { rows: import("../api").RefRow[] | null; advMaxAgeDays: number; onSaved: () => void }) {
+function RefsCard({ rows, forbidden, advMaxAgeDays, onSaved }: { rows: import("../api").RefRow[] | null; forbidden?: string; advMaxAgeDays: number; onSaved: () => void }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Partial<import("../api").RefBody>>>({});
+  if (forbidden) return <div className="card"><h3>Reference data</h3><Unavailable reason={forbidden} /></div>;
   if (!rows) return <div className="card"><h3>Reference data</h3><p>Loading…</p></div>;
 
   const draftFor = (code: string) => drafts[code] ?? {};

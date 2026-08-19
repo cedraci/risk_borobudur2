@@ -43,25 +43,40 @@ export interface Settings {
 export interface RowError { sheet: string; row: number; message: string }
 
 export class ApiError extends Error {
+  status: number;
   detail?: string;
   rows?: RowError[];
-  constructor(message: string, detail?: string, rows?: RowError[]) {
+  constructor(status: number, message: string, detail?: string, rows?: RowError[]) {
     super(message);
+    this.status = status;
     this.detail = detail;
     this.rows = rows;
   }
 }
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
+/** Exported so `auth.ts` (login/logout/me) shares the same fetch, error-body-mapping and
+ * 401 handling as every other endpoint here, instead of duplicating it. */
+export async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     let detail: string | undefined, rows: RowError[] | undefined;
     try {
+      // A 403 body is `{title, status, detail, domain, action, portfolio_id}` (see
+      // crates/server/src/error.rs) — `detail` is the human-readable denial reason,
+      // which callers render via the same <Unavailable/> treatment as a component-level
+      // `status: "unavailable"` marker.
       const body = await res.json();
       detail = body.detail; rows = body.rows;
     } catch { /* non-JSON error body */ }
-    throw new ApiError(`${res.status} ${res.statusText}`, detail, rows);
+    if (res.status === 401) {
+      // Global signal: the session is gone (never logged in, expired, or logged out
+      // elsewhere). App.tsx listens for this to drop back to the login screen without
+      // losing the current URL.
+      window.dispatchEvent(new Event("borobudur:unauthenticated"));
+    }
+    throw new ApiError(res.status, `${res.status} ${res.statusText}`, detail, rows);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 

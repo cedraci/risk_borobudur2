@@ -1,26 +1,29 @@
 import { useState } from "react";
 import { getConcentration, getFlows, getLiquidity, getRates, type Check, type CheckStatus, type Scenario } from "../api";
 import EChart from "../components/EChart";
+import Unavailable, { UNAVAILABLE_BAR_COLOR, UNAVAILABLE_LABEL } from "../components/Unavailable";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
 
 const STATUS_LABEL: Record<CheckStatus, string> = {
-  ok: "OK", watch: "WATCH", breach: "BREACH", unavailable: "N/A",
+  ok: "OK", watch: "WATCH", breach: "BREACH", unavailable: UNAVAILABLE_LABEL,
 };
 
-function StatusChip({ s }: { s: CheckStatus }) {
-  // "unavailable" (Reference denied, so this status is not computed from
-  // real overrides) must never render as a pass — its own neutral class,
-  // never "pos".
-  const cls = s === "unavailable" ? "kpi-sub" : s === "ok" ? "pos" : s === "watch" ? "warn-badge" : "neg";
-  return <span className={cls}>{STATUS_LABEL[s]}</span>;
+// "unavailable" (Reference denied, so this status is not computed from real
+// overrides) must never render as a pass — the same neutral grey treatment
+// as <Unavailable/>, never "pos". `reason` (from the `issuer_overrides`
+// marker) rides along as a tooltip so a human can tell "not permitted" from
+// "not computed" without leaving the table.
+function StatusChip({ s, reason }: { s: CheckStatus; reason?: string }) {
+  const cls = s === "unavailable" ? "unavailable" : s === "ok" ? "pos" : s === "watch" ? "warn-badge" : "neg";
+  return <span className={cls} title={s === "unavailable" ? reason : undefined}>{STATUS_LABEL[s]}</span>;
 }
 
-function CheckCard({ c }: { c: Check }) {
+function CheckCard({ c, unavailableReason }: { c: Check; unavailableReason?: string }) {
   return (
     <div className="card">
-      <h3>{c.scope_label} <StatusChip s={c.status} /></h3>
+      <h3>{c.scope_label} <StatusChip s={c.status} reason={unavailableReason} /></h3>
       {c.rows.length === 0 ? <p>No positions in scope.</p> : (
         <table className="tbl">
           <thead><tr><th>Group</th><th>Weight</th><th>vs limit {pct(c.limit, 0)}</th><th>Status</th></tr></thead>
@@ -37,14 +40,14 @@ function CheckCard({ c }: { c: Check }) {
                       // used to reach.
                       background: r.status === "breach" ? "#c62828"
                         : r.status === "watch" ? "#b26a00"
-                        : r.status === "unavailable" ? "#9e9e9e"
+                        : r.status === "unavailable" ? UNAVAILABLE_BAR_COLOR
                         : "#2e7d32",
                       height: 8,
                       width: Math.min(120, (r.weight / c.limit) * 120),
                     }} />
                   </div>
                 </td>
-                <td><StatusChip s={r.status} /></td>
+                <td><StatusChip s={r.status} reason={unavailableReason} /></td>
               </tr>
             ))}
           </tbody>
@@ -86,14 +89,25 @@ export default function LimitsPage() {
       </div>
 
       <h3>Concentration</h3>
-      {conc.error && <p className="neg">{conc.error}</p>}
-      {(conc.data?.checks ?? []).map((c) => <CheckCard key={c.check} c={c} />)}
+      {conc.forbidden ? <Unavailable reason={conc.forbidden} /> : conc.error && <p className="neg">{conc.error}</p>}
+      {conc.data?.issuer_overrides.status === "unavailable" && (
+        <Unavailable reason={conc.data.issuer_overrides.reason} />
+      )}
+      {(conc.data?.checks ?? []).map((c) => (
+        <CheckCard key={c.check} c={c} unavailableReason={conc.data?.issuer_overrides.reason} />
+      ))}
       {conc.data && <p className="kpi-sub">{conc.data.excluded_note}</p>}
 
       <h3>Liquidity</h3>
-      {liq.error && <p className="neg">{liq.error}</p>}
+      {liq.forbidden ? <Unavailable reason={liq.forbidden} /> : liq.error && <p className="neg">{liq.error}</p>}
       {liq.data && (
         <div className="card">
+          {liq.data.issuer_overrides.status === "unavailable" && (
+            <Unavailable reason={liq.data.issuer_overrides.reason} />
+          )}
+          {liq.data.nav_status.status === "unavailable" && (
+            <Unavailable reason={liq.data.nav_status.reason} />
+          )}
           <p className="kpi-sub">
             Participation rate {pct(liq.data.params.participation_rate)} of ADV · stress factor{" "}
             {pct(liq.data.params.adv_stress_factor)} · horizon {liq.data.params.liquidity_horizon_days}{" "}
@@ -230,6 +244,7 @@ export default function LimitsPage() {
             </>
           )}
 
+          {flows.forbidden && <Unavailable reason={flows.forbidden} />}
           {flows.data && (flows.data.status === "unavailable" ? (
             <p className="kpi-sub">
               Observed outflows: {flows.data.reason}. Load JOURSRLUX files on the Data page.
@@ -255,7 +270,7 @@ export default function LimitsPage() {
       )}
 
       <h3>Rates</h3>
-      {rates.error && <p className="neg">{rates.error}</p>}
+      {rates.forbidden ? <Unavailable reason={rates.forbidden} /> : rates.error && <p className="neg">{rates.error}</p>}
       {rates.data && (
         <div className="card">
           {rates.data.missing_any && (

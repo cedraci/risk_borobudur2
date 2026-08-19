@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import { getPnl, type PnlDimension } from "../api";
+import Unavailable from "../components/Unavailable";
 import { eur, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
@@ -59,6 +60,16 @@ export default function PnlPage() {
       )}
     </div>
   );
+
+  if (pnl.forbidden) {
+    return (
+      <div>
+        <h2>P&amp;L</h2>
+        {controls}
+        <Unavailable reason={pnl.forbidden} />
+      </div>
+    );
+  }
 
   if (pnl.error) {
     return (

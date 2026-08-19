@@ -18,6 +18,16 @@ body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #f
 .pos { color: #0a7d33; }
 .neg { color: #c62828; }
 .warn-badge { display: inline-block; background: #fff4e0; color: #925b06; border: 1px solid #f0c36d; border-radius: 4px; padding: 2px 8px; font-size: 12px; margin: 2px 6px 2px 0; }
+/* Neutral grey: something is unavailable (permission denied or degraded by a denied
+   secondary domain), never a pass. Kept distinct from .kpi-sub even though they read
+   the same, so the "denied" meaning isn't tied to a class used for unrelated subtext. */
+.unavailable { color: #64748b; font-size: 12px; margin: 4px 0; }
+
+.login-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f4f6f8; }
+.login-card { width: 320px; }
+.login-card .controls { flex-direction: column; align-items: stretch; gap: 12px; }
+.login-card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #64748b; }
+.login-card button { margin-top: 4px; }
 h2 { margin: 0 0 16px; }
 select, input[type="number"], button { font: inherit; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
 button { cursor: pointer; background: #12263a; color: #fff; border: none; }

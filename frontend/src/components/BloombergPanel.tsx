@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   advRequestUrl, bloombergRequestUrl, getAdvDue, uploadBloomberg, ApiError, type BloombergUpload,
 } from "../api";
+import Unavailable from "./Unavailable";
 import { useFetch } from "../hooks";
 
 export default function BloombergPanel() {
@@ -49,6 +50,7 @@ export default function BloombergPanel() {
         </a>
         <label><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> full rebuild</label>
       </div>
+      {due.forbidden && <Unavailable reason={due.forbidden} />}
       <p className="kpi-sub">
         Formulas resolve only when you open the file in Excel on a machine with a
         logged-in Bloomberg Terminal. Nothing here queries Bloomberg on its own.
@@ -109,7 +111,7 @@ export default function BloombergPanel() {
         </div>
       )}
 
-      {err && (
+      {err && (err.status === 403 ? <Unavailable reason={err.detail ?? err.message} /> : (
         <div className="neg">
           <p>Upload failed: {err.detail ?? err.message}</p>
           {err.rows && (
@@ -120,7 +122,7 @@ export default function BloombergPanel() {
             </tbody></table>
           )}
         </div>
-      )}
+      ))}
     </div>
   );
 }

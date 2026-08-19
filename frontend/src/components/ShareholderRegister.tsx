@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, getShareholders, putShareholders, type Shareholder } from "../api";
+import Unavailable from "./Unavailable";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
 
@@ -18,6 +19,7 @@ export default function ShareholderRegister() {
   // portfolios must not carry a half-edited register onto a different fund.
   useEffect(() => { setDraft(null); setMsg(null); }, [portfolio.id]);
 
+  if (reg.forbidden) return <div className="card"><h3>Shareholder register</h3><Unavailable reason={reg.forbidden} /></div>;
   if (reg.data === null && !reg.error) return <div className="card"><h3>Shareholder register</h3><p>Loading…</p></div>;
 
   const rows = draft ?? reg.data ?? [];

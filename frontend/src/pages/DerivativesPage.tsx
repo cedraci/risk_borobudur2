@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import DerivativesExposure from "../components/DerivativesExposure";
+import Unavailable from "../components/Unavailable";
 import { ApiError, emirExportUrl, getEmir, putEmirKpi, type EmirKpi } from "../api";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
@@ -95,8 +96,8 @@ export default function DerivativesPage() {
         </label>
         <a href={emirExportUrl(portfolio.id) + (date ? `?date=${date}` : "")} download>Export evidence workbook</a>
       </div>
-      {emir.error && <p className="neg">{emir.error}</p>}
-      {!data && !emir.error && <p>Loading…</p>}
+      {emir.forbidden ? <Unavailable reason={emir.forbidden} /> : emir.error && <p className="neg">{emir.error}</p>}
+      {!data && !emir.error && !emir.forbidden && <p>Loading…</p>}
       {data?.empty && (
         <div className="card">
           {data.warnings.map((w, i) => <p key={i}>{w}</p>)}

@@ -1,4 +1,5 @@
 import { getCalendar, getDrawdowns, type PeriodReturn } from "../api";
+import Unavailable from "../components/Unavailable";
 import { pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
@@ -29,6 +30,15 @@ export default function Performance() {
   const quarterly = byYear(cal.data?.quarterly ?? []);
   const annual = new Map((cal.data?.annual ?? []).map((r) => [r.year, r.value]));
   const years = [...monthly.keys()].sort((a, b) => b - a).slice(0, 3);
+
+  if (cal.forbidden) {
+    return (
+      <div>
+        <h2>Performance</h2>
+        <Unavailable reason={cal.forbidden} />
+      </div>
+    );
+  }
 
   return (
     <div>

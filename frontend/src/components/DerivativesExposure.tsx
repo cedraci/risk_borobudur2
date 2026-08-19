@@ -1,4 +1,5 @@
 import { getDerivatives } from "../api";
+import Unavailable from "./Unavailable";
 import { CATEGORY_LABELS as LABELS, eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
@@ -16,7 +17,7 @@ export default function DerivativesExposure({ date }: { date?: string }) {
   return (
     <div className="card">
       <h3>Derivatives exposure</h3>
-      {d.error && <p className="neg">{d.error}</p>}
+      {d.forbidden ? <Unavailable reason={d.forbidden} /> : d.error && <p className="neg">{d.error}</p>}
       {data && (
         <>
           <p className="kpi-sub">{data.note}</p>

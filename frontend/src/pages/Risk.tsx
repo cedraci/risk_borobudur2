@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { getDrawdowns, getRolling, type NavPoint } from "../api";
 import EChart from "../components/EChart";
+import Unavailable from "../components/Unavailable";
 import { num, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
@@ -20,6 +21,15 @@ export default function Risk() {
   const [window, setWindow] = useState(60);
   const rolling = useFetch(() => getRolling(portfolio.id, window), [portfolio.id, window]);
   const dd = useFetch(() => getDrawdowns(portfolio.id), [portfolio.id]);
+
+  if (rolling.forbidden) {
+    return (
+      <div>
+        <h2>Risk</h2>
+        <Unavailable reason={rolling.forbidden} />
+      </div>
+    );
+  }
 
   return (
     <div>
