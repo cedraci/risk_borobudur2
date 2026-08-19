@@ -191,6 +191,13 @@ is marked `Secure`, so over plain HTTP browsers drop it and login silently
 fails. Put the server behind an HTTPS reverse proxy (or an SSH tunnel to
 127.0.0.1) — never expose the plain-HTTP port directly.
 
+**Testing access rights end to end**: `cargo run -p server --example
+dev_server` stands up a throwaway server-mode instance on an embedded
+PostgreSQL (no real Postgres needed) and prints the enrolment token;
+`scripts/test-access-rights.ps1` then runs the live authorization test
+suite against it, and `docs/testing/access-rights-manual-checklist.md`
+lists the few remaining UI observations that need human eyes.
+
 ## Development
 
     cargo run -p server          # API on :8787
