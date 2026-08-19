@@ -68,7 +68,6 @@ export default function DataPage() {
           disabled={busy}
           onChange={(e) => void doUpload(Array.from(e.target.files ?? []))}
         />
-        {positions.forbidden && <Unavailable reason={positions.forbidden} />}
         {uploadErr && <p className="neg">Upload failed: {uploadErr}</p>}
         {results && (
           <table className="tbl">
@@ -148,6 +147,7 @@ export default function DataPage() {
 
       <div className="card">
         <h3>Portfolio snapshot</h3>
+        {positions.forbidden && <Unavailable reason={positions.forbidden} />}
         <div className="controls">
           <label>Date:{" "}
             <select value={positions.data?.date ?? ""} onChange={(e) => setPosDate(e.target.value || undefined)}>

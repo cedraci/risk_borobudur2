@@ -1,10 +1,16 @@
 * { box-sizing: border-box; }
 body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #f4f6f8; color: #1a2330; }
 .layout { display: flex; min-height: 100vh; }
-.sidebar { width: 200px; background: #12263a; color: #fff; padding: 20px 0; flex-shrink: 0; }
+.sidebar { width: 200px; background: #12263a; color: #fff; padding: 20px 0; flex-shrink: 0; display: flex; flex-direction: column; }
 .sidebar h1 { font-size: 18px; padding: 0 20px 16px; margin: 0; border-bottom: 1px solid #2a4562; }
 .sidebar a { display: block; color: #b9c9d8; padding: 10px 20px; text-decoration: none; }
 .sidebar a.active { color: #fff; background: #1d3952; border-left: 3px solid #4da3ff; }
+.sidebar-user {
+  margin-top: auto; padding: 16px 20px 0; border-top: 1px solid #2a4562;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.sidebar-user span { color: #b9c9d8; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-user button { background: #1d3952; padding: 4px 10px; font-size: 12px; }
 .content { flex: 1; padding: 24px; max-width: 1280px; }
 .card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(16, 30, 54, .08); margin-bottom: 16px; }
 .cards-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }

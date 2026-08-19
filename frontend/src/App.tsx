@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import {
   BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams,
 } from "react-router-dom";
-import { can, fetchMe, type Me } from "./auth";
+import { can, fetchMe, isDesktopPrincipal, logout, type Me } from "./auth";
 import { getPortfolios, type Portfolio } from "./api";
 import { useFetch } from "./hooks";
 import { lastPortfolio, PortfolioContext, PortfoliosReloadContext, rememberPortfolio } from "./PortfolioContext";
@@ -16,30 +16,48 @@ import LimitsPage from "./pages/LimitsPage";
 import DerivativesPage from "./pages/DerivativesPage";
 import DataPage from "./pages/DataPage";
 
-/** The signed-in principal, provided once by `AuthGate` below. Never null inside
- * the routed app — `AuthGate` only renders it once `/api/me` has resolved. */
-const MeContext = createContext<Me | null>(null);
+/** The signed-in principal plus a way to end the session, provided once by
+ * `AuthGate` below. Never null inside the routed app — `AuthGate` only renders
+ * it once `/api/me` has resolved. */
+interface AuthHandle { me: Me; signOut: () => void }
+const AuthContext = createContext<AuthHandle | null>(null);
+function useAuth(): AuthHandle {
+  const a = useContext(AuthContext);
+  if (!a) throw new Error("useAuth outside AuthGate");
+  return a;
+}
 export function useMe(): Me {
-  const me = useContext(MeContext);
-  if (!me) throw new Error("useMe outside AuthGate");
-  return me;
+  return useAuth().me;
 }
 
-// Each nav destination's dominant (domain, action) grant, per the authorization
-// matrix in crates/server/tests/api_authz_matrix.rs — a link is hidden when the
-// principal has no grant for it on any portfolio, since every page behind it
-// would otherwise render only <Unavailable/>. Pages that touch a second, weaker
-// domain (e.g. Limits' shareholder flows, Data's shareholder register) still
-// degrade section-by-section via <Unavailable/> rather than hiding the whole tab.
-const links: { to: string; label: string; domain: string; action: string }[] = [
-  { to: "", label: "Overview", domain: "nav", action: "view" },
-  { to: "/performance", label: "Performance", domain: "nav", action: "view" },
-  { to: "/pnl", label: "P&L", domain: "positions", action: "view" },
-  { to: "/risk", label: "Risk", domain: "nav", action: "view" },
-  { to: "/var", label: "VaR / ES", domain: "nav", action: "view" },
-  { to: "/limits", label: "Limits", domain: "positions", action: "view" },
-  { to: "/derivatives", label: "Derivatives", domain: "positions", action: "view" },
-  { to: "/data", label: "Data", domain: "reference", action: "view" },
+// Each nav destination's required grant(s), per the authorization matrix in
+// crates/server/tests/api_authz_matrix.rs — a link is hidden when the principal
+// has none of them on the current portfolio, since every page behind it would
+// otherwise render only <Unavailable/>. Most destinations map to one dominant
+// (domain, action); Data touches several domains at once (imports, reference,
+// the shareholder register) with no single one of them dominant, so it's
+// visible if the user has any grant that would make at least one of its cards
+// useful. Pages that touch a second, weaker domain beyond what's listed here
+// (e.g. Limits' shareholder flows) still degrade section-by-section via
+// <Unavailable/> rather than hiding the whole tab.
+interface NavSpec { to: string; label: string; requires: { domain: string; action: string }[] }
+const links: NavSpec[] = [
+  { to: "", label: "Overview", requires: [{ domain: "nav", action: "view" }] },
+  { to: "/performance", label: "Performance", requires: [{ domain: "nav", action: "view" }] },
+  { to: "/pnl", label: "P&L", requires: [{ domain: "positions", action: "view" }] },
+  { to: "/risk", label: "Risk", requires: [{ domain: "nav", action: "view" }] },
+  { to: "/var", label: "VaR / ES", requires: [{ domain: "nav", action: "view" }] },
+  { to: "/limits", label: "Limits", requires: [{ domain: "positions", action: "view" }] },
+  { to: "/derivatives", label: "Derivatives", requires: [{ domain: "positions", action: "view" }] },
+  {
+    to: "/data", label: "Data",
+    requires: [
+      { domain: "reference", action: "view" },
+      { domain: "positions", action: "view" },
+      { domain: "positions", action: "import" },
+      { domain: "shareholders", action: "view" },
+    ],
+  },
 ];
 
 /** `/` has no portfolio of its own — send the user into the remembered one
@@ -63,7 +81,7 @@ function RootRedirect({ portfolios }: { portfolios: Portfolio[] }) {
 }
 
 function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
-  const me = useMe();
+  const { me, signOut } = useAuth();
   const { pid } = useParams<{ pid: string }>();
   const location = useLocation();
   const navigate = useNavigate();
@@ -78,7 +96,7 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
   const prefix = `/p/${portfolio.id}`;
   const rel = location.pathname.startsWith(prefix) ? location.pathname.slice(prefix.length) : "";
   const active = portfolios.filter((p) => !p.archived);
-  const visibleLinks = links.filter((l) => can(me, l.domain, l.action, portfolio.id));
+  const visibleLinks = links.filter((l) => l.requires.some((r) => can(me, r.domain, r.action, portfolio.id)));
 
   return (
     <PortfolioContext.Provider value={portfolio}>
@@ -98,6 +116,14 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
           {visibleLinks.map((l) => (
             <NavLink key={l.to} to={`${prefix}${l.to}`} end={l.to === ""}>{l.label}</NavLink>
           ))}
+          {/* Desktop mode's principal has no real session to end (/api/me always
+              resolves regardless of any cookie) — nothing to sign out of. */}
+          {!isDesktopPrincipal(me) && (
+            <div className="sidebar-user">
+              <span title={me.display_name}>{me.display_name}</span>
+              <button type="button" onClick={signOut}>Sign out</button>
+            </div>
+          )}
         </nav>
         <main className="content" key={portfolio.id}>
           <Routes>
@@ -171,10 +197,18 @@ function AuthGate() {
   if (me === undefined) return null;
   if (me === null) return <LoginPage onLogin={setMe} />;
 
+  // Best-effort: whether or not the server round-trip succeeds, the point of
+  // clicking "sign out" is to stop being signed in locally, so drop back to the
+  // login screen either way rather than stranding the user on a failed request.
+  async function signOut() {
+    try { await logout(); } catch { /* the cookie is gone from here regardless */ }
+    setMe(null);
+  }
+
   return (
-    <MeContext.Provider value={me}>
+    <AuthContext.Provider value={{ me, signOut: () => void signOut() }}>
       <AuthedApp />
-    </MeContext.Provider>
+    </AuthContext.Provider>
   );
 }
 

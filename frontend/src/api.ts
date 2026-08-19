@@ -54,9 +54,19 @@ export class ApiError extends Error {
   }
 }
 
+export interface ReqOptions {
+  /** A 401 normally means "the session is gone" and fires `borobudur:unauthenticated` so
+   * App.tsx drops back to the login screen. `POST /api/login` also 401s on ordinary bad
+   * credentials — that's an expected outcome of the login form itself, not a sign a
+   * previously-valid session died, so `auth.ts`'s `login()` passes this to opt out.
+   * Declared explicitly by the one caller that needs it rather than inferred from the URL,
+   * so the exemption can't silently drift out of sync with which endpoint it's for. */
+  suppressUnauthenticatedEvent?: boolean;
+}
+
 /** Exported so `auth.ts` (login/logout/me) shares the same fetch, error-body-mapping and
  * 401 handling as every other endpoint here, instead of duplicating it. */
-export async function req<T>(url: string, init?: RequestInit): Promise<T> {
+export async function req<T>(url: string, init?: RequestInit, opts?: ReqOptions): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
     let detail: string | undefined, rows: RowError[] | undefined;
@@ -68,7 +78,7 @@ export async function req<T>(url: string, init?: RequestInit): Promise<T> {
       const body = await res.json();
       detail = body.detail; rows = body.rows;
     } catch { /* non-JSON error body */ }
-    if (res.status === 401) {
+    if (res.status === 401 && !opts?.suppressUnauthenticatedEvent) {
       // Global signal: the session is gone (never logged in, expired, or logged out
       // elsewhere). App.tsx listens for this to drop back to the login screen without
       // losing the current URL.

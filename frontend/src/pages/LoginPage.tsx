@@ -20,8 +20,13 @@ export default function LoginPage({ onLogin }: { onLogin: (me: Me) => void }) {
       await login(email, password);
       onLogin(await fetchMe());
     } catch (x) {
-      const ae = x as ApiError;
-      setErr(ae.detail ?? ae.message ?? "Sign-in failed.");
+      if (x instanceof ApiError) {
+        setErr(x.detail ?? x.message ?? "Sign-in failed.");
+      } else {
+        // fetch() itself rejected (offline, DNS failure, server unreachable) before a
+        // response ever came back, so there's no ApiError to read a reason from.
+        setErr("Could not reach the server — check your connection and try again.");
+      }
     } finally {
       setBusy(false);
     }

@@ -193,7 +193,7 @@ export default function LimitsPage() {
                     >
                       <td>{SCENARIO_LABELS[s.key]}</td>
                       {s.status === "unavailable" ? (
-                        <td colSpan={4} className="warn-badge">{s.reason}</td>
+                        <td colSpan={4}><Unavailable reason={s.reason} /></td>
                       ) : (
                         <>
                           <td>{eur(s.required_eur ?? null)}</td>
@@ -203,8 +203,8 @@ export default function LimitsPage() {
                         </>
                       )}
                       <td>
-                        <span className={s.status === "ok" ? "pos" : s.status === "breach" ? "neg" : "warn-badge"}>
-                          {s.status.toUpperCase()}
+                        <span className={s.status === "ok" ? "pos" : s.status === "breach" ? "neg" : "unavailable"}>
+                          {s.status === "unavailable" ? UNAVAILABLE_LABEL : s.status.toUpperCase()}
                         </span>
                       </td>
                     </tr>
@@ -246,11 +246,14 @@ export default function LimitsPage() {
 
           {flows.forbidden && <Unavailable reason={flows.forbidden} />}
           {flows.data && (flows.data.status === "unavailable" ? (
-            <p className="kpi-sub">
-              Observed outflows: {flows.data.reason}. Load JOURSRLUX files on the Data page.
-              {flows.data.dates_excluded_no_nav > 0 &&
-                ` (${flows.data.dates_excluded_no_nav} date(s) excluded for missing NAV)`}
-            </p>
+            <>
+              <Unavailable reason={flows.data.reason} />
+              <p className="kpi-sub">
+                Load JOURSRLUX files on the Data page.
+                {flows.data.dates_excluded_no_nav > 0 &&
+                  ` (${flows.data.dates_excluded_no_nav} date(s) excluded for missing NAV)`}
+              </p>
+            </>
           ) : (
             <p className="kpi-sub">
               Worst observed 20-day outflow{" "}
