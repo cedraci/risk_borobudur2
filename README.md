@@ -7,6 +7,9 @@ an embedded PostgreSQL and serves analytics (YTD, volatility, Sharpe,
 drawdowns, monthly/quarterly tables, VaR/ES with UCITS 99%/20d monitoring) at
 http://127.0.0.1:8787. Existing data lives on the built-in Borobudur portfolio.
 
+A full end-user guide — one chapter per tab, plus access rights and
+administration — lives in [docs/user-guide/](docs/user-guide/README.md).
+
 ## Build
 
 Requires Rust (stable) and Node.js (build-time only).
