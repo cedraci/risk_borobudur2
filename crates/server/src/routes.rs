@@ -1,6 +1,7 @@
 pub mod protect;
 
 use crate::auth::middleware::resolve_principal;
+use crate::config::Mode;
 use crate::handlers;
 use crate::routes::protect::ProtectExt;
 use crate::state::AppState;
@@ -9,11 +10,19 @@ use axum::Router;
 use db::auth::{Action, Domain};
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mode = state.mode;
+    let router = Router::new()
         .public("/api/health", get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }))
         .public("/api/login", axum::routing::post(handlers::session::login))
         .public("/api/logout", axum::routing::post(handlers::session::logout))
         .public("/api/me", get(handlers::session::me))
+        .admin("/api/admin/users", get(handlers::admin::users_list).post(handlers::admin::users_create))
+        .admin("/api/admin/users/{id}/password", axum::routing::put(handlers::admin::password_set))
+        .admin("/api/admin/users/{id}/disabled", axum::routing::put(handlers::admin::disabled_set))
+        .admin("/api/admin/users/{id}/grants", get(handlers::admin::grants_list)
+            .post(handlers::admin::grant_add).delete(handlers::admin::grant_remove))
+        .admin("/api/admin/users/{id}/roles", axum::routing::post(handlers::admin::role_assign))
+        .admin("/api/admin/audit", get(handlers::admin::audit_list))
         .protected_global("/api/refs", get(handlers::refs::list), Domain::Reference, Action::View)
         .protected_global("/api/refs/{code}", axum::routing::put(handlers::refs::put), Domain::Reference, Action::Configure)
         .protected_global("/api/futures-contracts", get(handlers::futures::contracts), Domain::Reference, Action::View)
@@ -122,7 +131,16 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/futures-analytics", get(handlers::futures::list_ctd), Domain::MarketData, Action::View)
         .protected("/api/portfolios/{id}/futures-analytics", axum::routing::post(handlers::futures::upload_ctd), Domain::MarketData, Action::Import)
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
-        .fallback(crate::static_assets::static_handler)
+        .fallback(crate::static_assets::static_handler);
+    // Only mounted in server mode: desktop mode has no accounts, so there is
+    // nothing to enrol into. Not mounting the route (rather than mounting it
+    // and rejecting inside the handler) is what makes it 404 in desktop mode.
+    let router = if mode == Mode::Server {
+        router.public("/api/enrol", axum::routing::post(handlers::admin::enrol))
+    } else {
+        router
+    };
+    router
         .layer(axum::middleware::from_fn_with_state(state.clone(), resolve_principal))
         .with_state(state)
 }

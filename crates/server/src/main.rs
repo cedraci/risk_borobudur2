@@ -26,7 +26,22 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let dbh = db::Db::connect(&url).await?;
-    let app = router(AppState::desktop(dbh));
+    let state = match cfg.mode {
+        Mode::Server => {
+            if let Some(email) = &cfg.admin_email {
+                if let Some(token) = server::startup::ensure_first_administrator(&dbh, email).await? {
+                    tracing::info!("no users exist yet — issued a single-use enrolment token for {email}");
+                    tracing::info!("{token}");
+                    tracing::info!(
+                        "complete enrolment within 1 hour: POST /api/enrol with {{\"token\": \"<above>\", \"password\": \"<new password>\"}}"
+                    );
+                }
+            }
+            AppState::server(dbh)
+        }
+        Mode::Desktop => AppState::desktop(dbh),
+    };
+    let app = router(state);
     if static_assets::assets_empty() {
         tracing::warn!("frontend assets are empty — build the frontend first (see build.ps1)");
     }

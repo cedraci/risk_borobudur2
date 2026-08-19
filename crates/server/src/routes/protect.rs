@@ -1,4 +1,4 @@
-use crate::auth::middleware::{authenticate, require, require_global};
+use crate::auth::middleware::{authenticate, require, require_administrator, require_global};
 use crate::state::AppState;
 use axum::routing::MethodRouter;
 use axum::Router;
@@ -24,6 +24,9 @@ pub trait ProtectExt {
     /// response to what the principal may see (`GET /api/portfolios`) rather
     /// than gating access to a single resource.
     fn authenticated(self, path: &str, mr: MethodRouter<AppState>) -> Self;
+    /// Administrator-only. Checks `ctx.is_administrator`, not a grant — every
+    /// `/api/admin/*` route.
+    fn admin(self, path: &str, mr: MethodRouter<AppState>) -> Self;
     fn public(self, path: &str, mr: MethodRouter<AppState>) -> Self;
 }
 
@@ -47,6 +50,10 @@ impl ProtectExt for Router<AppState> {
 
     fn authenticated(self, path: &str, mr: MethodRouter<AppState>) -> Self {
         self.route(path, mr.layer(axum::middleware::from_fn(authenticate)))
+    }
+
+    fn admin(self, path: &str, mr: MethodRouter<AppState>) -> Self {
+        self.route(path, mr.layer(axum::middleware::from_fn(require_administrator)))
     }
 
     fn public(self, path: &str, mr: MethodRouter<AppState>) -> Self {

@@ -1,0 +1,238 @@
+//! Administration endpoints and first-administrator enrolment. Every route
+//! mounted from here is either checked by `.admin` (requires
+//! `ctx.is_administrator`, see `routes/protect.rs`) or, for `enrol`, is the
+//! one unauthenticated path that stands up the very first administrator —
+//! which is exactly why this file, like `startup.rs`, is on
+//! `crates/db/tests/admin_isolation.rs`'s allow-list for reaching
+//! `db::admin` directly.
+
+use crate::audit;
+use crate::error::AppError;
+use crate::state::AppState;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::{Extension, Json};
+use db::admin::{AuditRow, UserRow};
+use db::auth::{AuthCtx, Grant, Role};
+
+#[derive(serde::Serialize)]
+pub struct UserOut {
+    pub id: i64,
+    pub email: String,
+    pub display_name: String,
+    pub is_administrator: bool,
+    pub disabled: bool,
+}
+
+impl From<UserRow> for UserOut {
+    fn from(u: UserRow) -> Self {
+        UserOut {
+            id: u.id,
+            email: u.email,
+            display_name: u.display_name,
+            is_administrator: u.is_administrator,
+            disabled: u.disabled,
+        }
+    }
+}
+
+/// `users.email` carries a `UNIQUE` constraint; turn a violation into a
+/// friendly 422 instead of a 500, matching `portfolios::map_name_conflict`.
+fn map_email_conflict(e: anyhow::Error) -> AppError {
+    let is_unique = e.downcast_ref::<sqlx::Error>()
+        .and_then(|se| se.as_database_error())
+        .map(|de| de.is_unique_violation())
+        .unwrap_or(false);
+    if is_unique {
+        AppError::Unprocessable("a user with that email already exists".into())
+    } else {
+        AppError::Internal(e)
+    }
+}
+
+async fn require_user(admin: &db::admin::Admin<'_>, id: i64) -> Result<UserRow, AppError> {
+    admin.user_by_id(id).await?.ok_or_else(|| AppError::NotFound(format!("no user {id}")))
+}
+
+pub async fn users_list(State(st): State<AppState>) -> Result<Json<Vec<UserOut>>, AppError> {
+    let rows = st.db.admin().users_list().await?;
+    Ok(Json(rows.into_iter().map(UserOut::from).collect()))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateUserBody {
+    pub email: String,
+    pub display_name: String,
+    pub password: String,
+    #[serde(default)]
+    pub is_administrator: bool,
+}
+
+pub async fn users_create(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Json(b): Json<CreateUserBody>,
+) -> Result<Json<UserOut>, AppError> {
+    let email = b.email.trim();
+    if email.is_empty() {
+        return Err(AppError::Unprocessable("email must not be empty".into()));
+    }
+    let display_name = b.display_name.trim();
+    if display_name.is_empty() {
+        return Err(AppError::Unprocessable("display_name must not be empty".into()));
+    }
+    if b.password.is_empty() {
+        return Err(AppError::Unprocessable("password must not be empty".into()));
+    }
+    let hash = crate::auth::local::hash_password(&b.password)?;
+    let admin = st.db.admin();
+    let id = admin.create_user(email, display_name, &hash, b.is_administrator).await
+        .map_err(map_email_conflict)?;
+    let user = require_user(&admin, id).await?;
+    audit::record(&st, &ctx, "user_created", None, None, serde_json::json!({
+        "target_user_id": id, "email": user.email, "is_administrator": user.is_administrator,
+    })).await;
+    Ok(Json(user.into()))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PasswordBody {
+    pub password: String,
+}
+
+pub async fn password_set(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(b): Json<PasswordBody>,
+) -> Result<StatusCode, AppError> {
+    if b.password.is_empty() {
+        return Err(AppError::Unprocessable("password must not be empty".into()));
+    }
+    let admin = st.db.admin();
+    require_user(&admin, id).await?;
+    let hash = crate::auth::local::hash_password(&b.password)?;
+    admin.set_password(id, &hash).await?;
+    audit::record(&st, &ctx, "password_reset", None, None,
+        serde_json::json!({"target_user_id": id})).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct DisabledBody {
+    pub disabled: bool,
+}
+
+pub async fn disabled_set(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(b): Json<DisabledBody>,
+) -> Result<StatusCode, AppError> {
+    let admin = st.db.admin();
+    require_user(&admin, id).await?;
+    admin.set_disabled(id, b.disabled).await?;
+    if b.disabled {
+        // `session_user` already filters out a disabled account's cookie, but
+        // the row itself would otherwise linger until it expires — delete it
+        // outright so revocation is immediate and the sessions table doesn't
+        // carry dead rows for a disabled user's remaining TTL.
+        admin.sessions_delete_for(id).await?;
+    }
+    audit::record(&st, &ctx, "user_disabled", None, None,
+        serde_json::json!({"target_user_id": id, "disabled": b.disabled})).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn grants_list(
+    State(st): State<AppState>, Path(id): Path<i64>,
+) -> Result<Json<Vec<Grant>>, AppError> {
+    let admin = st.db.admin();
+    require_user(&admin, id).await?;
+    Ok(Json(admin.grant_rows_for(id).await?))
+}
+
+pub async fn grant_add(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(g): Json<Grant>,
+) -> Result<StatusCode, AppError> {
+    let admin = st.db.admin();
+    require_user(&admin, id).await?;
+    admin.grant_add(id, g, Some(ctx.principal_id)).await?;
+    audit::record(&st, &ctx, "grant_added", Some(g.domain), g.portfolio, serde_json::json!({
+        "target_user_id": id, "domain": g.domain.as_str(), "action": g.action.as_str(), "portfolio_id": g.portfolio,
+    })).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn grant_remove(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(g): Json<Grant>,
+) -> Result<StatusCode, AppError> {
+    let admin = st.db.admin();
+    require_user(&admin, id).await?;
+    admin.grant_remove(id, g).await?;
+    audit::record(&st, &ctx, "grant_removed", Some(g.domain), g.portfolio, serde_json::json!({
+        "target_user_id": id, "domain": g.domain.as_str(), "action": g.action.as_str(), "portfolio_id": g.portfolio,
+    })).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct RoleBody {
+    pub role: String,
+    #[serde(default)]
+    pub scope: Option<i64>,
+}
+
+pub async fn role_assign(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(id): Path<i64>, Json(b): Json<RoleBody>,
+) -> Result<StatusCode, AppError> {
+    let role = Role::from_str(&b.role)
+        .ok_or_else(|| AppError::Unprocessable(format!("unknown role '{}'", b.role)))?;
+    let admin = st.db.admin();
+    require_user(&admin, id).await?;
+    admin.role_assign(id, role, b.scope, Some(ctx.principal_id)).await?;
+    audit::record(&st, &ctx, "role_assigned", None, b.scope, serde_json::json!({
+        "target_user_id": id, "role": role.as_str(), "scope": b.scope,
+    })).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct AuditQuery {
+    pub limit: Option<i64>,
+}
+
+pub async fn audit_list(
+    State(st): State<AppState>, Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<AuditRow>>, AppError> {
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    Ok(Json(st.db.admin().audit_recent(limit).await?))
+}
+
+#[derive(serde::Deserialize)]
+pub struct EnrolBody {
+    pub token: String,
+    pub password: String,
+}
+
+/// Completes first-administrator enrolment: consumes the single-use token
+/// `ensure_first_administrator` issued and sets the real password. Not
+/// gated by `.admin` — there is no administrator to authenticate as yet;
+/// the token itself is the credential, exactly as a session cookie is for
+/// `session_user`.
+pub async fn enrol(
+    State(st): State<AppState>, Json(b): Json<EnrolBody>,
+) -> Result<StatusCode, AppError> {
+    if b.password.is_empty() {
+        return Err(AppError::Unprocessable("password must not be empty".into()));
+    }
+    let admin = st.db.admin();
+    let token_hash = crate::auth::local::token_hash(&b.token);
+    let user = admin.session_user(&token_hash).await?.ok_or(AppError::Unauthenticated)?;
+    let hash = crate::auth::local::hash_password(&b.password)?;
+    admin.set_password(user.id, &hash).await?;
+    // Single use: the token row is gone whether this call succeeds or is
+    // replayed afterward, exactly like a logout consumes a session cookie.
+    admin.session_delete(&token_hash).await?;
+
+    let ctx = AuthCtx {
+        principal_id: user.id,
+        display_name: user.display_name.clone(),
+        is_administrator: user.is_administrator,
+        grants: db::auth::GrantSet::default(),
+    };
+    audit::record(&st, &ctx, "enrolled", None, None, serde_json::json!({"email": user.email})).await;
+    Ok(StatusCode::NO_CONTENT)
+}

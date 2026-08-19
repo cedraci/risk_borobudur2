@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod bloomberg;
 pub mod data;
 pub mod emir;

@@ -3,23 +3,27 @@
 /// `AuthCtx` in the first place — a chicken-and-egg problem no `AuthCtx`-gated
 /// `Scoped` method can solve. Nothing else may use it.
 ///
-/// The allow-list below is not the brief's illustrative one: this codebase
-/// has no `handlers/admin.rs` or `startup.rs`, and `auth/desktop.rs`,
-/// `auth/middleware.rs` and `handlers/session.rs` never call `.admin()` or
-/// `db::admin` — they only read the `is_administrator` flag already resolved
-/// onto `Principal`/`AuthCtx`. The single real caller, checked against the
-/// live tree, is `auth/local.rs` (the password/session identity provider,
-/// which is exactly where user lookup, session issuance and audit logging
-/// belong).
+/// `auth/desktop.rs`, `auth/middleware.rs` and `handlers/session.rs` never
+/// call `.admin()` or `db::admin` — they only read the `is_administrator`
+/// flag already resolved onto `Principal`/`AuthCtx`. `auth/local.rs` (the
+/// password/session identity provider) is where user lookup, session
+/// issuance and audit logging naturally belong.
 ///
 /// Task 12 adds `audit.rs`: the sanctioned centralizing wrapper around
 /// `db::admin().audit_append(...)`. Every mutating/exporting handler calls
 /// `crate::audit::record(...)` instead, and must never name `db::admin` or
 /// `.admin()` itself — that is exactly what keeps handlers off this list.
+///
+/// Task 13 adds `handlers/admin.rs` (the `/api/admin/*` administration
+/// endpoints, plus `/api/enrol`) and `startup.rs`
+/// (`ensure_first_administrator`) — both legitimately reach the privileged
+/// path for the same reason `auth/local.rs` does: administering users,
+/// grants and roles, and standing up the very first account, is precisely
+/// the identity/grant machinery this module exists for.
 #[test]
 fn only_identity_grants_and_audit_reach_the_privileged_path() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/src");
-    let allowed = ["auth/local.rs", "audit.rs"];
+    let allowed = ["auth/local.rs", "audit.rs", "handlers/admin.rs", "startup.rs"];
     let mut offenders = Vec::new();
     for entry in walk(&src) {
         let rel = entry.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");

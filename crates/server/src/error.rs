@@ -12,6 +12,11 @@ pub enum AppError {
     Unauthenticated,
     LockedOut(u64),
     Forbidden(db::auth::Denied),
+    /// A route under `/api/admin`, reached by a principal that resolved but
+    /// is not an administrator. Distinct from `Forbidden`, which always
+    /// carries a `Denied` tied to one `Domain`/`Action` pair — administrator
+    /// status is not a grant, so it has no domain to name.
+    AdministratorRequired,
 }
 
 impl From<anyhow::Error> for AppError {
@@ -88,6 +93,12 @@ impl IntoResponse for AppError {
                 [(axum::http::header::RETRY_AFTER, secs.to_string())],
                 Json(serde_json::json!({"title": "Too Many Requests", "status": 429,
                                         "detail": "too many failed sign-in attempts"})),
+            )
+                .into_response(),
+            AppError::AdministratorRequired => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"title": "Forbidden", "status": 403,
+                    "detail": "administrator required"})),
             )
                 .into_response(),
             AppError::Forbidden(d) => match d.kind {

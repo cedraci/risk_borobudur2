@@ -33,6 +33,18 @@ pub async fn authenticate(req: Request, next: Next) -> Result<Response, AppError
     Ok(next.run(req).await)
 }
 
+/// Enforces that the resolved principal is an administrator. Attached by
+/// `.admin`, for every `/api/admin/*` route — administrator status is a flag
+/// on the principal, not a grant, so it has no `Domain`/`Action` pair to check
+/// through `require`/`require_global`.
+pub async fn require_administrator(req: Request, next: Next) -> Result<Response, AppError> {
+    let ctx = req.extensions().get::<AuthCtx>().cloned().ok_or(AppError::Unauthenticated)?;
+    if !ctx.is_administrator {
+        return Err(AppError::AdministratorRequired);
+    }
+    Ok(next.run(req).await)
+}
+
 /// Enforces one route's declared primary requirement on a portfolio-scoped
 /// route. Attached per route by `.protected`, which requires `{id}` in the
 /// route's path — scope is declared at the call site, never inferred here.

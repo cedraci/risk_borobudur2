@@ -4,5 +4,6 @@ pub mod config;
 pub mod error;
 pub mod handlers;
 pub mod routes;
+pub mod startup;
 pub mod state;
 pub mod static_assets;

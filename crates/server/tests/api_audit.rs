@@ -197,6 +197,42 @@ async fn an_import_writes_a_row_tied_to_the_import_ledger() {
 }
 
 #[tokio::test]
+async fn a_grant_change_records_who_granted_it() {
+    let (_desktop, server, pool, edb) = app().await;
+    let pid = portfolio(&pool, "F").await;
+
+    let admin_hash = server::auth::local::hash_password("pw").unwrap();
+    let admin_row = db::admin::Admin::new(&pool);
+    let admin_id = admin_row.create_user("admin-audit@f.lu", "Admin", &admin_hash, true).await.unwrap();
+    let admin_token = "admin-t0";
+    admin_row.session_create(&server::auth::local::token_hash(admin_token), admin_id, 1).await.unwrap();
+    let admin_cookie = format!("borobudur_session={admin_token}");
+
+    let (_, target_id) = user_with(&pool, &[]).await;
+
+    let req = Request::post(format!("/api/admin/users/{target_id}/grants"))
+        .header("cookie", &admin_cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "domain": "nav", "action": "view", "portfolio": pid,
+        })).unwrap()))
+        .unwrap();
+    let res = server.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let rows = audit_rows(&pool).await;
+    let grant_rows: Vec<_> = rows.iter().filter(|r| r.action == "grant_added").collect();
+    assert_eq!(grant_rows.len(), 1, "{rows:?}");
+    let detail = &grant_rows[0].detail;
+    assert_eq!(detail["domain"], "nav", "{detail}");
+    assert_eq!(detail["action"], "view", "{detail}");
+    assert_eq!(detail["target_user_id"].as_i64().unwrap(), target_id, "{detail}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
 async fn login_success_failure_and_lockout_are_all_recorded() {
     let (_desktop, server, pool, edb) = app().await;
     let hash = server::auth::local::hash_password("correct-horse").unwrap();
