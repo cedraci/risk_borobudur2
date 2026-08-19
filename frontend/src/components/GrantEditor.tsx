@@ -13,9 +13,22 @@ import Unavailable from "./Unavailable";
  * (`crates/db/src/auth/model.rs`) expands exactly that server-side, so `view`
  * is shown auto-checked and disabled here rather than left as a second click
  * that the server would just no-op. */
-export default function GrantEditor({ userId, portfolios }: { userId: number; portfolios: Portfolio[] }) {
+export default function GrantEditor({
+  userId, portfolios, portfoliosHint, refreshToken,
+}: {
+  userId: number; portfolios: Portfolio[];
+  /** One-line explanation to show under the scope selector when `portfolios`
+   * doesn't reflect the full set — "list failed to load" vs. "nothing is
+   * visible to your account" are different situations and worth telling
+   * apart rather than both just rendering an empty dropdown. */
+  portfoliosHint?: string | null;
+  /** Bumped by the caller (e.g. after `RoleAssign` writes grants for this
+   * same user) to force a refetch — this matrix has no other way to learn
+   * that grants changed underneath it. */
+  refreshToken?: number;
+}) {
   const [scope, setScope] = useState<number | null>(null);
-  const grants = useFetch(() => getGrants(userId), [userId]);
+  const grants = useFetch(() => getGrants(userId), [userId, refreshToken]);
   const [pending, setPending] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -55,6 +68,7 @@ export default function GrantEditor({ userId, portfolios }: { userId: number; po
           </select>
         </label>
       </div>
+      {portfoliosHint && <p className="kpi-sub">{portfoliosHint}</p>}
       {msg && <p className="neg">{msg}</p>}
       <table className="tbl">
         <thead>

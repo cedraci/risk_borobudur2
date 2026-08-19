@@ -64,6 +64,7 @@ const links: NavSpec[] = [
 /** `/` has no portfolio of its own — send the user into the remembered one
  * (falling back to the first active portfolio when it's missing or archived). */
 function RootRedirect({ portfolios }: { portfolios: Portfolio[] }) {
+  const { me } = useAuth();
   const active = portfolios.filter((p) => !p.archived);
   if (active.length === 0) {
     const first = portfolios[0];
@@ -72,6 +73,12 @@ function RootRedirect({ portfolios }: { portfolios: Portfolio[] }) {
         <main className="content">
           <p>No active portfolios yet.</p>
           {first && <p><Link to={`/p/${first.id}/data`}>Manage portfolios</Link></p>}
+          {/* An administrator with no visible portfolios (e.g. no personal
+              grants yet) would otherwise have no way to reach /admin short of
+              typing the URL — this is the one dead end in the app where the
+              usual sidebar link (PortfolioLayout) never gets a chance to
+              render at all. */}
+          {me.is_administrator && <p><Link to="/admin">Administration</Link></p>}
         </main>
       </div>
     );

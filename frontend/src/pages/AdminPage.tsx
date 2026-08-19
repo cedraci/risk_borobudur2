@@ -3,6 +3,7 @@ import {
   ADMIN_ROLES, ApiError, adminSetDisabled, adminSetPassword, assignRole, createUser, getPortfolios, getUsers,
   type AdminUser, type Portfolio,
 } from "../api";
+import { useMe } from "../App";
 import AuditLog from "../components/AuditLog";
 import GrantEditor from "../components/GrantEditor";
 import Unavailable from "../components/Unavailable";
@@ -24,11 +25,36 @@ function genPassword(length = 20): string {
 }
 
 export default function AdminPage() {
+  const me = useMe();
   const users = useFetch(() => getUsers(), []);
   const portfolios = useFetch(() => getPortfolios(), []);
   const [selected, setSelected] = useState<number | null>(null);
   const [shown, setShown] = useState<{ email: string; password: string } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  // Bumped whenever RoleAssign successfully writes grants for the currently
+  // selected user, so GrantEditor (which owns its own fetch of that user's
+  // grants) refetches instead of going on showing pre-role state.
+  const [grantsVersion, setGrantsVersion] = useState(0);
+
+  // `/api/me` (crates/server/src/handlers/session.rs::MeResponse) carries
+  // neither an id nor an email — display_name is the only thing to match
+  // against the admin users list. That's a heuristic, not a guarantee (two
+  // accounts could share a display name), same caveat as
+  // `auth.ts::isDesktopPrincipal`. The failure mode here is asymmetric
+  // though: worst case it over-protects (disables the buttons for a
+  // same-named different user), never under-protects the caller's own row.
+  const isSelf = (u: AdminUser) => u.display_name === me.display_name;
+
+  // "list failed to load" and "nothing is visible to you" both leave the
+  // scope selector showing only "All portfolios" — worth telling apart
+  // rather than leaving both look like a silent empty dropdown.
+  const portfoliosHint = portfolios.forbidden
+    ? `Portfolio list unavailable: ${portfolios.forbidden}`
+    : portfolios.error
+    ? `Portfolio list failed to load: ${portfolios.error}`
+    : portfolios.data && portfolios.data.length === 0
+    ? "No portfolios are visible to your account — only \"All portfolios\" scope can be used below."
+    : null;
 
   if (users.forbidden) {
     return (
@@ -84,6 +110,7 @@ export default function AdminPage() {
       <UsersCard
         users={users.data ?? []}
         error={users.error}
+        isSelf={isSelf}
         onSelect={setSelected}
         onCreated={(email, password) => { setShown({ email, password }); users.reload(); }}
         onReset={doReset}
@@ -93,8 +120,14 @@ export default function AdminPage() {
       {selectedUser && (
         <div className="card">
           <h3>Permissions — {selectedUser.display_name}</h3>
-          <GrantEditor userId={selectedUser.id} portfolios={portfolios.data ?? []} />
-          <RoleAssign userId={selectedUser.id} portfolios={portfolios.data ?? []} />
+          <GrantEditor
+            userId={selectedUser.id} portfolios={portfolios.data ?? []}
+            portfoliosHint={portfoliosHint} refreshToken={grantsVersion}
+          />
+          <RoleAssign
+            userId={selectedUser.id} portfolios={portfolios.data ?? []}
+            portfoliosHint={portfoliosHint} onApplied={() => setGrantsVersion((v) => v + 1)}
+          />
         </div>
       )}
 
@@ -107,9 +140,9 @@ export default function AdminPage() {
 }
 
 function UsersCard({
-  users, error, onSelect, onCreated, onReset, onToggleDisabled,
+  users, error, isSelf, onSelect, onCreated, onReset, onToggleDisabled,
 }: {
-  users: AdminUser[]; error: string | null; onSelect: (id: number) => void;
+  users: AdminUser[]; error: string | null; isSelf: (u: AdminUser) => boolean; onSelect: (id: number) => void;
   onCreated: (email: string, password: string) => void;
   onReset: (u: AdminUser) => void; onToggleDisabled: (u: AdminUser) => void;
 }) {
@@ -145,19 +178,39 @@ function UsersCard({
       <table className="tbl">
         <thead><tr><th>Name</th><th>Email</th><th>Administrator</th><th>Disabled</th><th></th></tr></thead>
         <tbody>
-          {users.map((u) => (
-            <tr key={u.id}>
-              <td>{u.display_name}</td>
-              <td>{u.email}</td>
-              <td>{u.is_administrator ? "yes" : "—"}</td>
-              <td>{u.disabled ? "yes" : "—"}</td>
-              <td>
-                <button type="button" onClick={() => onSelect(u.id)}>Permissions</button>
-                <button type="button" onClick={() => void onReset(u)}>Reset password</button>
-                <button type="button" onClick={() => void onToggleDisabled(u)}>{u.disabled ? "Enable" : "Disable"}</button>
-              </td>
-            </tr>
-          ))}
+          {users.map((u) => {
+            // Resetting or disabling your own account kills your own
+            // sessions immediately (Task 13): for a self-reset the 401 that
+            // follows unmounts this page and destroys the just-generated
+            // password before it can be copied, and a self-disable just
+            // locks the caller out mid-task. Disabling the buttons (rather
+            // than a confirm dialog) avoids both outcomes outright instead
+            // of just warning about them on the way in.
+            const self = isSelf(u);
+            return (
+              <tr key={u.id}>
+                <td>{u.display_name}</td>
+                <td>{u.email}</td>
+                <td>{u.is_administrator ? "yes" : "—"}</td>
+                <td>{u.disabled ? "yes" : "—"}</td>
+                <td>
+                  <button type="button" onClick={() => onSelect(u.id)}>Permissions</button>
+                  <button
+                    type="button" disabled={self} onClick={() => void onReset(u)}
+                    title={self ? "You cannot reset your own password here — it would end your session before the generated password could be shown." : undefined}
+                  >
+                    Reset password
+                  </button>
+                  <button
+                    type="button" disabled={self} onClick={() => void onToggleDisabled(u)}
+                    title={self ? "You cannot disable your own account — it would end your session immediately." : undefined}
+                  >
+                    {u.disabled ? "Enable" : "Disable"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 
@@ -173,7 +226,15 @@ function UsersCard({
   );
 }
 
-function RoleAssign({ userId, portfolios }: { userId: number; portfolios: Portfolio[] }) {
+function RoleAssign({
+  userId, portfolios, portfoliosHint, onApplied,
+}: {
+  userId: number; portfolios: Portfolio[]; portfoliosHint?: string | null;
+  /** Called after a successful apply so the GrantEditor matrix above (which
+   * owns its own fetch of this user's grants) can refetch — applying a role
+   * writes grants server-side and the matrix has no other way to learn that. */
+  onApplied: () => void;
+}) {
   const [role, setRole] = useState(ADMIN_ROLES[0].value);
   const [scope, setScope] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -185,6 +246,7 @@ function RoleAssign({ userId, portfolios }: { userId: number; portfolios: Portfo
     try {
       await assignRole(userId, role, scope);
       setMsg("Applied.");
+      onApplied();
     } catch (e) {
       const ae = e as ApiError;
       setMsg(`Error: ${ae.detail ?? ae.message}`);
@@ -219,6 +281,7 @@ function RoleAssign({ userId, portfolios }: { userId: number; portfolios: Portfo
         <button type="button" disabled={busy} onClick={() => void apply()}>Apply</button>
         {msg && <span>{msg}</span>}
       </div>
+      {portfoliosHint && <p className="kpi-sub">{portfoliosHint}</p>}
     </div>
   );
 }
