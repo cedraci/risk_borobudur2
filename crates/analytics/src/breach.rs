@@ -35,9 +35,10 @@ pub enum Transition {
 
 /// What changed between the episodes currently open and what this run found.
 ///
-/// Ordering is deterministic — opens in `findings` order, then peaks, then
-/// closes in `live` order — so a test can assert on the sequence and a
-/// reviewer reading the event timeline sees the same order every time.
+/// Ordering is deterministic: findings are processed in `findings` order
+/// (opens and peaks interleaved as they occur), and all closes follow in
+/// `live` order — so a test can assert on the sequence and a reviewer
+/// reading the event timeline sees the same order every time.
 pub fn transitions(live: &[LiveEpisode], findings: &[Finding]) -> Vec<Transition> {
     let key = |c: &str, s: &str| format!("{c}\u{1f}{s}");
     let open_by_key: HashMap<String, &LiveEpisode> =
@@ -133,5 +134,30 @@ mod tests {
         }]);
         assert_eq!(t.len(), 1);
         assert!(matches!(&t[0], Transition::Open { value: None, .. }));
+    }
+
+    #[test]
+    fn a_first_measured_value_raises_a_peak_that_was_never_set() {
+        // An episode can be opened with no value (e.g., liquidity scenarios),
+        // then a measurement arrives; it should set the peak.
+        let t = transitions(&[LiveEpisode {
+            id: 1, check_key: "liq_top5".into(), subject: "Top 5 holders".into(), peak_value: None,
+        }], &[Finding {
+            check_key: "liq_top5".into(), subject: "Top 5 holders".into(), value: Some(0.35),
+        }]);
+        assert_eq!(t.len(), 1);
+        assert!(matches!(&t[0], Transition::RaisePeak { id: 1, value } if (*value - 0.35).abs() < 1e-12));
+    }
+
+    #[test]
+    fn a_valueless_finding_never_disturbs_an_existing_peak() {
+        // The liquidity scenarios always report None; they should never update
+        // an episode's peak, even if it was previously set.
+        let t = transitions(&[LiveEpisode {
+            id: 1, check_key: "liq_top5".into(), subject: "Top 5 holders".into(), peak_value: Some(0.35),
+        }], &[Finding {
+            check_key: "liq_top5".into(), subject: "Top 5 holders".into(), value: None,
+        }]);
+        assert!(t.is_empty(), "valueless finding should not produce any transitions, got {t:?}");
     }
 }
