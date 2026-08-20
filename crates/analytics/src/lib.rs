@@ -8,6 +8,7 @@ pub mod concentration;
 pub mod liquidity;
 pub mod rates;
 pub mod backtest;
+pub mod breach;
 pub mod futures;
 pub mod pnl;
 pub mod emir;
