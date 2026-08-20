@@ -1385,13 +1385,12 @@ pub async fn record(
     let configure = scoped.authorize::<Settings, Configure>(portfolio_id)
         .map_err(|d| anyhow::anyhow!("system context refused: {d}"))?;
 
-    let (results, findings, holdings, weights) =
-        crate::handlers::breaches::compute(&scoped, portfolio_id, nav_date).await?;
+    let computed = crate::handlers::breaches::compute(&scoped, portfolio_id, nav_date).await?;
 
-    let mut input_notes = serde_json::Map::new();
+    let mut input_notes = computed.input_notes.clone();
     // `inputs_complete` is about data that is genuinely absent, never about
     // permissions — the system context holds every grant.
-    if holdings.is_empty() {
+    if computed.holdings.is_empty() {
         input_notes.insert("positions".into(), "no position snapshot for this date".into());
     }
     let inputs_complete = input_notes.is_empty();
@@ -1405,29 +1404,33 @@ pub async fn record(
         actor_user_id,
         inputs_complete,
         input_notes: serde_json::Value::Object(input_notes),
-        results,
+        results: computed.results,
     };
     let run_id = scoped.record_run(&configure, &run).await?;
 
     let live = scoped.live_episodes(&view).await?;
-    let transitions = breach::transitions(&live, &findings);
+    let transitions = breach::transitions(&live, &computed.findings);
 
     // A proposal is only built for episodes about to open, and only where the
     // subject maps to instruments — liquidity, VaR and EMIR subjects do not.
     let prev_date = scoped.position_dates_before(&view, portfolio_id, nav_date).await?;
+    // The previous snapshot is read once, not once per episode, and only for
+    // its groupings — recomputing that date's whole check set to learn two
+    // numbers would be waste.
+    let previous = match prev_date {
+        Some(d) => Some(crate::handlers::breaches::holdings_at(&scoped, portfolio_id, d).await?),
+        None => None,
+    };
     let mut proposals: HashMap<String, Proposal> = HashMap::new();
     for t in &transitions {
         if let breach::Transition::Open { check_key, subject, .. } = t {
-            let now: Vec<SubjectHolding> = holdings.get(subject).cloned().unwrap_or_default();
-            let prev: Option<Vec<SubjectHolding>> = match prev_date {
-                Some(d) => Some(crate::handlers::breaches::holdings_at(&scoped, portfolio_id, d).await?
-                    .get(subject).cloned().unwrap_or_default()),
-                None => None,
-            };
+            let now: Vec<SubjectHolding> = computed.holdings.get(subject).cloned().unwrap_or_default();
+            let prev: Option<Vec<SubjectHolding>> =
+                previous.as_ref().map(|(h, _)| h.get(subject).cloned().unwrap_or_default());
             let p = breach::propose(
                 subject, prev.as_deref(), &now,
-                weights.get(&(prev_date, subject.clone())).copied(),
-                weights.get(&(Some(nav_date), subject.clone())).copied(),
+                previous.as_ref().and_then(|(_, w)| w.get(subject).copied()),
+                computed.weights.get(subject).copied(),
             );
             proposals.insert(format!("{check_key}\u{1f}{subject}"), p);
         }
@@ -1446,26 +1449,61 @@ Add to `crates/server/src/lib.rs`:
 pub mod recorder;
 ```
 
-**Note for the implementer:** `compute`, `holdings_at` and
-`position_dates_before` do not exist yet. Write them in this task:
+**Note for the implementer:** `ComputedRun`, `compute`, `holdings_at` and
+`position_dates_before` do not exist yet. Write them in this task, with
+exactly these shapes:
 
-- `crates/server/src/handlers/breaches.rs::compute(scoped, pid, nav_date)` returns
-  `(Vec<CheckResultRow>, Vec<Finding>, HashMap<String, Vec<SubjectHolding>>, HashMap<(Option<NaiveDate>, String), f64>)`.
-  Build it by lifting the body of `handlers::limits::concentration_h` — the
-  `ConPosition` assembly and the `concentration(&cons)` call — into a function
-  that returns `Check`s instead of JSON, then map each `Check` to a
+```rust
+/// One run's worth of computed checks, plus what the proposal step needs and
+/// what the run row needs to say about its inputs.
+pub struct ComputedRun {
+    pub results: Vec<db::repo::CheckResultRow>,
+    /// One per breaching row.
+    pub findings: Vec<analytics::breach::Finding>,
+    /// Subject (issuer group) -> its instruments at THIS date.
+    pub holdings: std::collections::HashMap<String, Vec<analytics::breach::SubjectHolding>>,
+    /// Subject -> its weight at THIS date.
+    pub weights: std::collections::HashMap<String, f64>,
+    /// Inputs that were genuinely ABSENT — never a permission, since this
+    /// runs under the system context. A check that could not be evaluated is
+    /// omitted from `results` and named here; a check that could not run must
+    /// never appear in the register as one that passed.
+    pub input_notes: serde_json::Map<String, serde_json::Value>,
+}
+
+pub async fn compute(
+    scoped: &db::scoped::Scoped<'_>, pid: i64, nav_date: chrono::NaiveDate,
+) -> anyhow::Result<ComputedRun>;
+
+/// Just the groupings for one date — no checks. Used for the previous
+/// snapshot, where only the quantities and weights matter.
+pub async fn holdings_at(
+    scoped: &db::scoped::Scoped<'_>, pid: i64, date: chrono::NaiveDate,
+) -> anyhow::Result<(
+    std::collections::HashMap<String, Vec<analytics::breach::SubjectHolding>>,
+    std::collections::HashMap<String, f64>,
+)>;
+```
+
+- Build `compute` by lifting the body of `handlers::limits::concentration_h` —
+  the `ConPosition` assembly and the `concentration(&cons)` call — into a
+  function that returns `Check`s instead of JSON, then map each `Check` to a
   `CheckResultRow` (`observed_value` = the worst row's weight) and each
-  breaching `CheckRow` to a `Finding`. Start with **concentration only** in
-  this task; Task 6 adds liquidity, VaR and EMIR to the same function, and
-  the tests here only assert on `issuer_10`.
-- `holdings_at` maps issuer group → its instruments' ISINs and quantities,
-  using the same grouping rule `concentration_h` uses (`issuer_group`
-  override, falling back to `default_issuer_group`, with `Fonds` never
-  regrouped).
-- `Scoped::position_dates_before(&self, a: &Access<Settings, View>, pid: i64, before: NaiveDate)`
-  goes in `crates/db/src/repo/breaches.rs` and returns
-  `Option<NaiveDate>` — the most recent snapshot date strictly before
-  `before`, or `None`.
+  breaching `CheckRow` to a `Finding` whose `subject` is the row's group.
+  Start with **concentration only** in this task; Task 6 adds liquidity, VaR
+  and EMIR to the same function, and the tests here only assert on
+  `issuer_10`.
+- `holdings_at` uses the same grouping rule `concentration_h` uses
+  (`issuer_group` override, falling back to `default_issuer_group`, with
+  `Fonds` never regrouped), so a subject means the same thing in both
+  functions. Extract that rule into one private helper both call — two
+  copies of it drifting apart would silently break every proposal.
+- `Scoped::position_dates_before(&self, a: &Access<Settings, View>, pid: i64, before: NaiveDate) -> anyhow::Result<Option<NaiveDate>>`
+  goes in `crates/db/src/repo/breaches.rs`: the most recent snapshot date
+  strictly before `before`, or `None`.
+- Declare the module: add `pub mod breaches;` to
+  `crates/server/src/handlers/mod.rs` in **this** task (Task 7's conditional
+  wording assumes you already did).
 
 - [ ] **Step 5: Hook the recorder into the import path**
 
@@ -1567,6 +1605,9 @@ Expected: FAIL with "missing liq_top5 from a run".
 - [ ] **Step 3: Extend `compute`**
 
 In `crates/server/src/handlers/breaches.rs`, add to `compute`:
+
+All three additions extend `ComputedRun`: results and findings as before, and
+`input_notes` for anything that could not be evaluated.
 
 - **Liquidity** — call the same assembly `handlers::limits::liquidity_h` uses to build `scenarios`. For each scenario, emit a `CheckResultRow` with `check_key = format!("liq_{}", scenario_key)`, `scope_label` = the scenario's human label (`"Top 5 holders"`, `"Fixed shock"`, `"Top 5 holders, stressed ADV"`, `"Fixed shock, stressed ADV"`), `limit_value: None`, `observed_value: None`, `status` = the scenario's own `"ok"`/`"breach"`, and `detail` = the scenario JSON. A scenario the data cannot produce (no shareholder register) is recorded with `status: "ok"` **only if it genuinely passed**; where it cannot be evaluated, skip the row entirely and add a note to `input_notes` — a check that could not run must not appear in the register as one that passed.
 - **VaR** — read `scoped.get_settings(portfolio_id)`, compute the NAV returns as `handlers::metrics::var` does, and emit `check_key = "var_limit"`, `limit_value = Some(settings.var_limit)`, `observed_value = Some(historical_var)`, `status = "breach"` when `observed > limit`, `"watch"` at or above `0.8 * limit`, else `"ok"`. Where there is too little history for a VaR at all, skip the row and note it.
