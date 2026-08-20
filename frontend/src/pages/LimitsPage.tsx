@@ -152,7 +152,9 @@ export default function LimitsPage() {
                 )}
                 .
               </p>
-              {liq.data.coverage.register.stale && (
+              {liq.data.coverage.register.status === "unavailable" ? (
+                <Unavailable reason={`shareholder register coverage — ${liq.data.coverage.register.reason}`} />
+              ) : liq.data.coverage.register.stale && (
                 <p className="warn-badge">
                   Shareholder register is stale (as of {liq.data.coverage.register.as_of ?? "unknown"}).
                 </p>

@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useState } from "react";
 import {
   BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams,
 } from "react-router-dom";
-import { can, fetchMe, isDesktopPrincipal, logout, type Me } from "./auth";
+import { fetchMe, isDesktopPrincipal, logout, type Me } from "./auth";
+import { visibleNavLinks } from "./nav";
 import { getPortfolios, type Portfolio } from "./api";
 import { useFetch } from "./hooks";
 import { lastPortfolio, PortfolioContext, PortfoliosReloadContext, rememberPortfolio } from "./PortfolioContext";
@@ -30,36 +31,6 @@ function useAuth(): AuthHandle {
 export function useMe(): Me {
   return useAuth().me;
 }
-
-// Each nav destination's required grant(s), per the authorization matrix in
-// crates/server/tests/api_authz_matrix.rs — a link is hidden when the principal
-// has none of them on the current portfolio, since every page behind it would
-// otherwise render only <Unavailable/>. Most destinations map to one dominant
-// (domain, action); Data touches several domains at once (imports, reference,
-// the shareholder register) with no single one of them dominant, so it's
-// visible if the user has any grant that would make at least one of its cards
-// useful. Pages that touch a second, weaker domain beyond what's listed here
-// (e.g. Limits' shareholder flows) still degrade section-by-section via
-// <Unavailable/> rather than hiding the whole tab.
-interface NavSpec { to: string; label: string; requires: { domain: string; action: string }[] }
-const links: NavSpec[] = [
-  { to: "", label: "Overview", requires: [{ domain: "nav", action: "view" }] },
-  { to: "/performance", label: "Performance", requires: [{ domain: "nav", action: "view" }] },
-  { to: "/pnl", label: "P&L", requires: [{ domain: "positions", action: "view" }] },
-  { to: "/risk", label: "Risk", requires: [{ domain: "nav", action: "view" }] },
-  { to: "/var", label: "VaR / ES", requires: [{ domain: "nav", action: "view" }] },
-  { to: "/limits", label: "Limits", requires: [{ domain: "positions", action: "view" }] },
-  { to: "/derivatives", label: "Derivatives", requires: [{ domain: "positions", action: "view" }] },
-  {
-    to: "/data", label: "Data",
-    requires: [
-      { domain: "reference", action: "view" },
-      { domain: "positions", action: "view" },
-      { domain: "positions", action: "import" },
-      { domain: "shareholders", action: "view" },
-    ],
-  },
-];
 
 /** `/` has no portfolio of its own — send the user into the remembered one
  * (falling back to the first active portfolio when it's missing or archived). */
@@ -104,7 +75,7 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
   const prefix = `/p/${portfolio.id}`;
   const rel = location.pathname.startsWith(prefix) ? location.pathname.slice(prefix.length) : "";
   const active = portfolios.filter((p) => !p.archived);
-  const visibleLinks = links.filter((l) => l.requires.some((r) => can(me, r.domain, r.action, portfolio.id)));
+  const visibleLinks = visibleNavLinks(me, portfolio.id);
 
   return (
     <PortfolioContext.Provider value={portfolio}>

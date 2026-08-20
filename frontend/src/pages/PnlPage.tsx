@@ -15,6 +15,13 @@ const DIMENSIONS: { value: PnlDimension; label: string }[] = [
   { value: "issuer_group", label: "Issuer group" },
 ];
 
+/** Adds P&L components that may be null. One missing part makes the sum
+ * unknown, not zero — `eur(null)` then renders "–" instead of a figure the
+ * server explicitly refused to state. */
+function sum(...parts: (number | null | undefined)[]): number | null {
+  return parts.some((p) => p == null) ? null : parts.reduce((a: number, b) => a + (b as number), 0);
+}
+
 function presetRange(preset: string): { from: string; to: string } {
   const today = new Date();
   const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -119,6 +126,12 @@ export default function PnlPage() {
       )}
 
       <div className="card">
+        {/* The split columns below are null when the trade journal is denied.
+            Naming the denial here rather than only in the warning list at the
+            foot of the page keeps the reason beside the dashes it explains. */}
+        {data.transaction_detail?.status === "unavailable" && (
+          <Unavailable reason={`Realized / unrealized split — ${data.transaction_detail.reason}`} />
+        )}
         <table className="tbl">
           <thead>
             <tr>
@@ -145,10 +158,10 @@ export default function PnlPage() {
                         <span title="Partial sale after a mid-period purchase: the FX split for this instrument is approximate."> ⚠</span>
                       )}
                     </td>
-                    <td>{eur(i.realized_price + i.realized_fx)}</td>
-                    <td>{eur(i.unrealized_price + i.unrealized_fx)}</td>
-                    <td>{eur(i.realized_fx + i.unrealized_fx)}</td>
-                    <td>{eur(i.realized_price + i.unrealized_price + i.realized_fx + i.unrealized_fx)}</td>
+                    <td>{eur(sum(i.realized_price, i.realized_fx))}</td>
+                    <td>{eur(sum(i.unrealized_price, i.unrealized_fx))}</td>
+                    <td>{eur(i.fx ?? sum(i.realized_fx, i.unrealized_fx))}</td>
+                    <td>{eur(i.total ?? sum(i.realized_price, i.unrealized_price, i.realized_fx, i.unrealized_fx))}</td>
                   </tr>
                 ))}
               </Fragment>

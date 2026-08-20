@@ -360,6 +360,41 @@ pub async fn get(
         Some(denied) => serde_json::json!({"status": "unavailable", "reason": denied.reason()}),
         None => serde_json::json!({"status": "ok"}),
     };
+    // Same ruling as `emir.rs`'s clearing-obligation block: a marker sitting
+    // beside a computed number is still a number one field away from being
+    // read as fact. With no trade journal every instrument's realized P&L
+    // computes to exactly 0.0 and unrealized absorbs the whole period, so a
+    // rendered split asserts "this book traded nothing" — a stronger and more
+    // wrong claim than "not permitted". Null the split, group and instrument
+    // alike. `total` survives (it is a valuation difference, independent of
+    // the journal) and so does `fx` as a single figure: only its
+    // realized/unrealized *split* is trade-derived, its sum is not. The
+    // instrument rows carry no `total`/`fx` of their own on the wire — the UI
+    // adds the four parts — so both are written in here, or the detail rows
+    // would go blank rather than merely losing their split.
+    let groups: Vec<serde_json::Value> = groups.into_iter().map(|g| {
+        let mut v = serde_json::to_value(g).expect("GroupPnl always serializes");
+        if transactions_denied.is_none() {
+            return v;
+        }
+        if let Some(instruments) = v["instruments"].as_array_mut() {
+            for i in instruments.iter_mut() {
+                let part = |k: &str| i[k].as_f64().unwrap_or(0.0);
+                let (rp, up) = (part("realized_price"), part("unrealized_price"));
+                let (rfx, ufx) = (part("realized_fx"), part("unrealized_fx"));
+                i["total"] = serde_json::json!(rp + up + rfx + ufx);
+                i["fx"] = serde_json::json!(rfx + ufx);
+                for k in ["realized_price", "unrealized_price", "realized_fx", "unrealized_fx"] {
+                    i[k] = serde_json::Value::Null;
+                }
+            }
+        }
+        for k in ["realized", "unrealized", "realized_price", "unrealized_price",
+                  "realized_fx", "unrealized_fx"] {
+            v[k] = serde_json::Value::Null;
+        }
+        v
+    }).collect();
     Ok(Json(serde_json::json!({
         "empty": false,
         "period": {

@@ -176,7 +176,10 @@ export interface LiquidityCoverage {
   adv_pct_of_nav: number;
   fallbacks: { code: string; reason: string }[];
   coupon_gaps: { code: string; reason: string }[];
-  register: { count: number; as_of: string | null; stale: boolean };
+  // A denied register reads exactly like an empty one — `count: 0`,
+  // `stale: false` — so the marker is the only thing that tells the two
+  // apart. `limits.rs` writes it alongside the counts.
+  register: { count: number; as_of: string | null; stale: boolean } & AuthzMarker;
 }
 
 export interface Scenario {
@@ -322,20 +325,28 @@ export const uploadCtd = (pid: number, f: File) => {
 export type PnlDimension =
   | "asset_class" | "country" | "region" | "sector" | "industry" | "currency" | "issuer_group";
 
+// The realized/unrealized split is derived from the trade journal, so every
+// field carrying it is nullable: with `transactions/view` denied the server
+// nulls all of them rather than emit the zeros it would otherwise compute
+// (see `crates/server/src/handlers/pnl.rs`). `total` and `fx` are valuation
+// differences and survive the denial — on instruments they only appear in
+// that case, since the granted shape leaves the UI to add the parts up.
 export interface PnlInstrument {
   isin: string; name: string; asset_class: string;
   country: string | null; region: string | null;
   sector: string | null; industry: string | null;
   currency: string; issuer_group: string | null;
-  realized_price: number; unrealized_price: number;
-  realized_fx: number; unrealized_fx: number;
+  realized_price: number | null; unrealized_price: number | null;
+  realized_fx: number | null; unrealized_fx: number | null;
+  total?: number; fx?: number;
   fx_split_imprecise: boolean; fx_missing: string[];
 }
 export interface PnlGroup {
   key: string;
-  realized_price: number; unrealized_price: number;
-  realized_fx: number; unrealized_fx: number;
-  realized: number; unrealized: number; fx: number; total: number;
+  realized_price: number | null; unrealized_price: number | null;
+  realized_fx: number | null; unrealized_fx: number | null;
+  realized: number | null; unrealized: number | null;
+  fx: number; total: number;
   instruments: PnlInstrument[];
 }
 export interface PnlPeriod {
@@ -354,6 +365,10 @@ export interface Pnl {
   groups?: PnlGroup[];
   reconciliation?: PnlReconciliation;
   unclassified?: number;
+  /** "unavailable" when `transactions/view` is denied: the realized/unrealized
+   * split could not be attributed and the reconciliation residual may be
+   * distorted. Absent on the `empty: true` short-circuit responses. */
+  transaction_detail?: AuthzMarker;
   warnings: string[];
 }
 
@@ -390,7 +405,11 @@ export const getRefs = () => req<RefRow[]>("/api/refs");
 export const putRef = (code: string, body: RefBody) =>
   req<unknown>(`/api/refs/${code}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
-export type EmirVerdict = "ok" | "watch" | "breach";
+// "unavailable": the reference read behind the OTC classification was denied,
+// so `emir.rs` stamps every verdict and nulls every computed number rather
+// than let a defaulted `otc: false` render as a cleared threshold. Must never
+// be painted as a pass — nor, since it is not a finding either, as a breach.
+export type EmirVerdict = "ok" | "watch" | "breach" | "unavailable";
 export interface EmirMonthCell {
   month: string;
   snapshot_date: string | null;
@@ -402,9 +421,9 @@ export interface EmirClass {
   label: string;
   threshold_eur: number;
   months: EmirMonthCell[];
-  avg_total_eur: number;
-  avg_otc_eur: number;
-  pct_of_threshold: number;
+  avg_total_eur: number | null;
+  avg_otc_eur: number | null;
+  pct_of_threshold: number | null;
   verdict: EmirVerdict;
 }
 export interface EmirMonitors {
@@ -438,6 +457,12 @@ export interface EmirResponse {
   margin?: EmirMarginLine[];
   futures_count?: number;
   kpis?: EmirKpi[];
+  /** "unavailable" when the futures contract specs behind the OTC flag are
+   * denied: every verdict and every computed notional in `classes` is then
+   * stamped or nulled, and the evidence export refuses outright. */
+  clearing_obligation?: AuthzMarker;
+  /** "unavailable" when the middle-office KPI records cannot be read. */
+  kpis_status?: AuthzMarker;
   otc_note?: string;
 }
 export const getEmir = (pid: number, date?: string) =>
