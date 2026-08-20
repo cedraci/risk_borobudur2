@@ -783,7 +783,11 @@ git commit -m "feat(analytics): propose active vs passive from position changes"
   - `pub struct BreachRow { pub id: i64, pub check_key: String, pub subject: String, pub opened_nav_date: NaiveDate, pub opened_value: Option<f64>, pub peak_value: Option<f64>, pub closed_nav_date: Option<NaiveDate>, pub state: String, pub classification: String, pub proposed_classification: Option<String>, pub proposal_reason: Option<String>, pub acknowledged_at: Option<DateTime<Utc>>, pub acknowledgement_note: Option<String>, pub deadline_date: Option<NaiveDate>, pub resolved_at: Option<DateTime<Utc>>, pub resolution_note: Option<String> }`
   - `pub struct BreachEventRow { pub at: DateTime<Utc>, pub actor_label: String, pub event: String, pub detail: serde_json::Value }`
   - `Scoped::live_episodes(&self, a: &Access<Settings, View>) -> anyhow::Result<Vec<analytics::breach::LiveEpisode>>`
-  - `Scoped::apply_transitions(&self, a: &Access<Settings, Configure>, run_id: i64, nav_date: NaiveDate, actor_label: &str, actor_user_id: Option<i64>, transitions: &[analytics::breach::Transition], proposals: &HashMap<String, analytics::breach::Proposal>) -> anyhow::Result<()>` — `proposals` is keyed `"{check_key}\u{1f}{subject}"`
+  - `Scoped::apply_transitions(&self, a: &Access<Settings, Configure>, ctx: &db::repo::RunContext<'_>, transitions: &[analytics::breach::Transition], proposals: &HashMap<String, analytics::breach::Proposal>) -> anyhow::Result<()>` — `proposals` is keyed `"{check_key}\u{1f}{subject}"`.
+    `RunContext { run_id: i64, nav_date: NaiveDate, actor_label: &str, actor_user_id: Option<i64> }` is a `Copy` struct in
+    `crates/db/src/repo/breaches.rs`, re-exported from `db::repo`. Task 4 shipped
+    this as eight positional arguments; clippy's `too_many_arguments` forced the
+    grouping, and the coordinator ruled for the struct over a suppression.
   - `Scoped::breaches_for(&self, a: &Access<Settings, View>, state: Option<&str>) -> anyhow::Result<Vec<BreachRow>>`
   - `Scoped::breach_events(&self, a: &Access<Settings, View>, breach_id: i64) -> anyhow::Result<Vec<BreachEventRow>>`
 
@@ -1437,7 +1441,9 @@ pub async fn record(
     }
 
     scoped.apply_transitions(
-        &configure, run_id, nav_date, &actor_label, actor_user_id, &transitions, &proposals,
+        &configure,
+        &db::repo::RunContext { run_id, nav_date, actor_label: &actor_label, actor_user_id },
+        &transitions, &proposals,
     ).await?;
     Ok(run_id)
 }
