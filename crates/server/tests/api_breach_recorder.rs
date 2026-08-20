@@ -125,9 +125,17 @@ async fn a_run_uses_the_real_reference_data_even_when_the_importer_cannot_see_it
     // shareholder register, which no import loads — never a grant the caller
     // happened not to have.
     let notes = run.input_notes.as_object().expect("input_notes is always a JSON object");
+    // Pin the map non-empty first: `all` is vacuously true over no keys, so
+    // without this the two assertions below would pass while proving nothing
+    // if `compute` ever stopped emitting notes at all. No import loads a
+    // shareholder register, so this key is always present here.
+    assert!(notes.contains_key("liq_top5"),
+        "the known-absent input must be noted, or the checks below prove nothing: {notes:?}");
     let noted: Vec<&String> = notes.keys().collect();
     assert!(noted.iter().all(|k| k.starts_with("liq_")),
         "a denial must never surface as an absent input: {noted:?}");
+    // The prefix check above is a proxy; this is the real one — whatever the
+    // key, no note may read like a permission problem.
     for (k, v) in notes.iter() {
         let text = v.as_str().unwrap_or_default().to_lowercase();
         assert!(!text.contains("permit") && !text.contains("denied")

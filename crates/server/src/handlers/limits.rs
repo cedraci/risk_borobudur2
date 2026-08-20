@@ -144,20 +144,14 @@ pub(crate) struct LiquidityScenarioInputs<'a> {
     pub asof: chrono::NaiveDate,
     pub nav: f64,
     pub register: &'a [db::repo::Shareholder],
-    /// Whether `top5`/`hybrid_top5` can be evaluated at all, and from what —
-    /// left to the caller rather than derived from `register.is_empty()`
-    /// here, because the two callers disagree on what "cannot evaluate"
-    /// means: `liquidity_h` treats an empty register as unavailable (a
-    /// dashboard reading "0% needed from top holders" would misrepresent a
-    /// register nobody has loaded yet), while the breach register instead
-    /// records the register's best-known state — `Some(0.0)` even when
-    /// nothing has been loaded, visible as `register_count: 0` in the row's
-    /// `detail` — so a routine "not yet loaded" register does not block
-    /// every other check in the run from being recorded as complete.
-    pub top5_required_pct: Option<f64>,
-    /// Reason shown when `top5_required_pct` is `None`: a denial reason when
-    /// the caller's Shareholders grant was refused, or "no shareholder
-    /// register" when it is genuinely empty.
+    /// Reason shown when `top5`/`hybrid_top5` cannot be evaluated. Both
+    /// callers agree on WHEN that happens — an empty `register` means the
+    /// requirement is unknown, never 0% — and derive it here from
+    /// `register.is_empty()`; they differ only on WHY the register is
+    /// empty, which is all this string carries. `liquidity_h` passes the
+    /// caller's denial reason when a Shareholders grant was refused; the
+    /// breach register, running under the system context where no denial is
+    /// possible, always passes "no shareholder register".
     pub top5_unavailable_reason: &'a str,
 }
 
@@ -240,7 +234,13 @@ pub(crate) fn liquidity_assembly(i: &LiquidityScenarioInputs) -> LiquidityAssemb
         })
     };
 
-    let top5 = i.top5_required_pct;
+    // An empty register makes the top-5 redemption requirement UNKNOWN, not
+    // zero: "if the five largest investors all redeemed at once, could the
+    // fund meet it?" has no honest answer when nobody has loaded who they
+    // are. Derived here rather than passed in so the rule has one home —
+    // two copies of it in the callers could drift apart.
+    let top5 = (!i.register.is_empty())
+        .then(|| i.register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0);
     let fixed = Some(i.settings.redemption_shock);
     let scenarios = vec![
         scenario("top5", top5, &normal),
@@ -347,14 +347,11 @@ pub async fn liquidity_h(
     let top5_unavailable_reason = shareholders_denied_reason
         .clone()
         .unwrap_or_else(|| "no shareholder register".to_string());
-    let top5_pct: f64 = register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0;
-    let top5_required_pct = (!register.is_empty()).then_some(top5_pct);
-
     // The capacities/waterfall/scenario math lives in `liquidity_assembly`,
     // shared with the breach register's `compute` — see its doc comment.
     let assembly = liquidity_assembly(&LiquidityScenarioInputs {
         rows: &rows, by: &by, settings: &settings, asof, nav,
-        register: &register, top5_required_pct, top5_unavailable_reason: &top5_unavailable_reason,
+        register: &register, top5_unavailable_reason: &top5_unavailable_reason,
     });
     let mut scenarios = assembly.scenarios;
     let normal = assembly.normal;

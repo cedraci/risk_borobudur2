@@ -198,14 +198,12 @@ pub async fn compute(
             // `status: "ok"` here would state that a redemption stress test
             // passed when it was never run — the design doc names exactly
             // this ("no shareholder register loaded") as the worked example
-            // of a genuinely absent input, distinct from a denial. `None`
-            // routes `top5`/`hybrid_top5` through the skip+note path below,
-            // same as any other check that could not be evaluated.
-            let top5_required_pct = (!register.is_empty()).then_some(
-                register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0);
+            // of a genuinely absent input, distinct from a denial. The rule
+            // lives in `liquidity_assembly`; it marks `top5`/`hybrid_top5`
+            // "unavailable" and the skip+note path below records why.
             let assembly = super::limits::liquidity_assembly(&super::limits::LiquidityScenarioInputs {
                 rows: &rows, by: &by, settings: &settings, asof: nav_date, nav,
-                register: &register, top5_required_pct,
+                register: &register,
                 top5_unavailable_reason: "no shareholder register",
             });
             for v in &assembly.scenarios {
@@ -248,7 +246,12 @@ pub async fn compute(
             }
         }
         None => {
-            input_notes.insert("liquidity".into(), "no NAV data at or before this date".into());
+            // Keyed per scenario, like every other note: an auditor asking
+            // "why is liq_fixed missing from this run?" must get an answer
+            // under that check's own key, not under a category heading.
+            for (key, _) in LIQUIDITY_LABELS {
+                input_notes.insert(format!("liq_{key}"), "no NAV data at or before this date".into());
+            }
         }
     }
 
@@ -293,6 +296,17 @@ pub async fn compute(
         .map_err(app_error_to_anyhow)?;
     match emir_assembly {
         Some(a) => {
+            // `emir::assemble` soft-degrades for the live route, where
+            // Reference is a secondary domain worth losing rather than
+            // failing the whole page. The register cannot accept that
+            // trade: without contract specs every position defaults to
+            // `otc: false`, so every clearing-obligation verdict would be
+            // computed on wrong data and recorded as a pass. Under the
+            // system context neither can be denied — so if one ever is,
+            // that is a bug in the context, not a degraded run to persist.
+            if a.contracts_denied.is_some() || a.kpis_denied.is_some() {
+                anyhow::bail!("system context refused: EMIR reference data");
+            }
             for c in &a.report.classes {
                 let class_key = serde_json::to_value(c.class)?.as_str().unwrap_or("other").to_string();
                 let check_key = format!("emir_{class_key}");
