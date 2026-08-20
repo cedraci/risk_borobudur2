@@ -272,3 +272,44 @@ async fn login_success_failure_and_lockout_are_all_recorded() {
     pool.close().await;
     edb.stop().await;
 }
+
+/// Finding P7: `audit::record` hardcoded `source_addr: None`, so every row in
+/// the production audit log had a null origin — including `login_failed` and
+/// `login_locked`, the two rows where "from where?" is the first question
+/// asked. Server mode is documented as sitting behind a TLS terminator, so
+/// the forwarded header is the address that means anything.
+#[tokio::test]
+async fn auth_events_record_the_client_address_from_the_proxy() {
+    let (_desktop, server, pool, edb) = app().await;
+    let hash = server::auth::local::hash_password("pw").unwrap();
+    let admin = db::admin::Admin::new(&pool);
+    admin.create_user("addr@f.lu", "Addr", &hash, false).await.unwrap();
+
+    let login = |body: &'static str, xff: &'static str| {
+        let app = server.clone();
+        async move {
+            app.oneshot(
+                Request::post("/api/login")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", xff)
+                    .body(Body::from(body)).unwrap()
+            ).await.unwrap().status()
+        }
+    };
+
+    assert_eq!(login(r#"{"email":"addr@f.lu","password":"pw"}"#, "203.0.113.9").await, StatusCode::OK);
+    assert_eq!(login(r#"{"email":"addr@f.lu","password":"nope"}"#, "203.0.113.7, 10.0.0.1").await,
+               StatusCode::UNAUTHORIZED);
+
+    let rows = admin.audit_recent(50).await.unwrap();
+    let ok = rows.iter().find(|r| r.action == "login").expect("a login row");
+    assert_eq!(ok.source_addr.as_deref(), Some("203.0.113.9"), "{:?}", ok);
+
+    // Only the left-most hop is the client; everything after it is proxy
+    // chatter the client itself can forge just as easily.
+    let failed = rows.iter().find(|r| r.action == "login_failed").expect("a login_failed row");
+    assert_eq!(failed.source_addr.as_deref(), Some("203.0.113.7"), "{:?}", failed);
+
+    pool.close().await;
+    edb.stop().await;
+}

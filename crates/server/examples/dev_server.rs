@@ -52,7 +52,11 @@ async fn main() -> anyhow::Result<()> {
     let ttl: Option<u64> = std::env::var("BOROBUDUR_DEV_SHUTDOWN_SECS")
         .ok()
         .and_then(|v| v.parse().ok());
-    axum::serve(listener, app)
+    // `into_make_service_with_connect_info` is what puts the peer address in
+    // the request extensions; `auth::client_addr` prefers the proxy's
+    // forwarded header and falls back to it, so a deployment without a proxy
+    // still gets a real address into the audit log.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async move {
             match ttl {
                 Some(secs) => {

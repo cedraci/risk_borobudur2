@@ -1,4 +1,5 @@
 use crate::auth::local::{COOKIE_NAME, SESSION_TTL_HOURS};
+use crate::auth::middleware::ClientAddr;
 use crate::auth::{AuthError, Principal};
 use crate::config::Mode;
 use crate::error::AppError;
@@ -6,7 +7,7 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use db::auth::{AuthCtx, GrantSet};
 
 /// A login attempt has no `AuthCtx` yet — that's what a successful login
@@ -15,12 +16,13 @@ use db::auth::{AuthCtx, GrantSet};
 /// actually succeeded, or (a failed/locked attempt may not resolve to a real
 /// user id at all) principal id `0` and the attempted email as the actor
 /// label instead.
-fn login_actor(principal_id: i64, label: &str) -> AuthCtx {
+fn login_actor(principal_id: i64, label: &str, source_addr: Option<String>) -> AuthCtx {
     AuthCtx {
         principal_id,
         display_name: label.to_string(),
         is_administrator: false,
         grants: GrantSet::default(),
+        source_addr,
     }
 }
 
@@ -31,15 +33,27 @@ pub struct LoginBody {
 }
 
 pub async fn login(
-    State(st): State<AppState>, Json(body): Json<LoginBody>,
+    State(st): State<AppState>, Extension(addr): Extension<ClientAddr>, Json(body): Json<LoginBody>,
 ) -> Result<Response, AppError> {
     let Some(local) = st.local_accounts() else {
         // Desktop mode has no accounts to log in to.
         return Err(AppError::NotFound("login is not available in desktop mode".into()));
     };
+    // Checked before any password work: the point of throttling a source is
+    // to stop paying for its attempts, and an Argon2 verification is the most
+    // expensive thing an unauthenticated caller can make this process do.
+    let source = addr.0.as_deref();
+    let now = std::time::Instant::now();
+    if let Some(retry) = st.login_throttle.retry_after(source, now) {
+        let ctx = login_actor(0, &body.email, addr.0.clone());
+        crate::audit::record(&st, &ctx, "login_throttled", None, None,
+            serde_json::json!({"email": body.email, "retry_after_secs": retry.as_secs()})).await;
+        return Err(AppError::LockedOut(retry.as_secs()));
+    }
     match local.login(&body.email, &body.password).await {
         Ok(success) => {
-            let ctx = login_actor(success.user_id, &success.display_name);
+            st.login_throttle.reset(source);
+            let ctx = login_actor(success.user_id, &success.display_name, addr.0.clone());
             crate::audit::record(&st, &ctx, "login", None, None,
                 serde_json::json!({"email": body.email})).await;
             let secure = if st.mode == Mode::Server { "; Secure" } else { "" };
@@ -49,16 +63,25 @@ pub async fn login(
             Ok(([(header::SET_COOKIE, cookie)], Json(serde_json::json!({"ok": true}))).into_response())
         }
         Err(AuthError::LockedOut { retry_after_secs }) => {
-            let ctx = login_actor(0, &body.email);
+            st.login_throttle.record_failure(source, now);
+            let ctx = login_actor(0, &body.email, addr.0.clone());
             crate::audit::record(&st, &ctx, "login_locked", None, None,
                 serde_json::json!({"email": body.email, "retry_after_secs": retry_after_secs})).await;
             Err(AppError::LockedOut(retry_after_secs))
         }
         Err(AuthError::Unauthenticated) => {
-            let ctx = login_actor(0, &body.email);
+            st.login_throttle.record_failure(source, now);
+            let ctx = login_actor(0, &body.email, addr.0.clone());
             crate::audit::record(&st, &ctx, "login_failed", None, None,
                 serde_json::json!({"email": body.email})).await;
-            Err(AppError::Unauthenticated)
+            // If this failure is the one that tips the source over, say so on
+            // the spot rather than answering 401 and 429ing the next attempt —
+            // "too many attempts, wait" is the useful thing to tell whoever is
+            // actually at the keyboard.
+            match st.login_throttle.retry_after(source, now) {
+                Some(retry) => Err(AppError::LockedOut(retry.as_secs())),
+                None => Err(AppError::Unauthenticated),
+            }
         }
         Err(AuthError::Internal(e)) => Err(AppError::Internal(e)),
     }

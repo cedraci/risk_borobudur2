@@ -172,7 +172,10 @@ If you don't have view access to shared reference data, the contract specs (and 
 OTC flag) cannot be resolved. Rather than silently defaulting every position to "not OTC" and
 showing a false clean pass, every class in the threshold table degrades: the verdict shows as
 unavailable and every computed figure (average OTC/total notional, % of threshold, and the month
-detail figures) is blanked out — only the class name, label and fixed threshold remain visible. See
+detail figures) is blanked out — only the class name, label and fixed threshold remain visible. The
+unavailable verdict is shown in the same neutral grey N/A used for every other denial in the
+application: it is neither a pass nor a breach, and a grey N/A notice above the table names the
+permission that is missing. The monthly KPI panel below degrades the same way. See
 [Access rights](access-rights.md).
 
 ## OTC obligations

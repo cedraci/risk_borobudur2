@@ -146,3 +146,50 @@ async fn a_session_token_is_never_stored_in_the_clear() {
     assert_ne!(stored[0], token, "the raw token must not be in the database");
     edb.stop().await;
 }
+
+fn login_req_from(email: &str, password: &str, source: &str) -> Request<Body> {
+    Request::post("/api/login")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", source)
+        .body(Body::from(serde_json::json!({"email": email, "password": password}).to_string()))
+        .unwrap()
+}
+
+/// Finding P8: account lockout counts failures per email, so it does nothing
+/// at all against the shape credential-stuffing actually takes — one source
+/// trying one password against many accounts, never reaching five failures on
+/// any of them. Throttling the source is what stops that, and it also caps
+/// how fast one attacker can drive other people's accounts into lockout.
+#[tokio::test]
+async fn one_source_failing_across_many_accounts_is_throttled() {
+    let (app, pool, edb) = server_app().await;
+    seed_user(&pool, "victim@f.lu", "correct horse battery").await;
+
+    // Ten distinct emails, so no single account ever approaches its own
+    // five-failure lockout — only the source is repeating.
+    let mut sawn_401 = 0;
+    for i in 0..10 {
+        let email = format!("stuff{i}@f.lu");
+        let st = status_of(&app, login_req_from(&email, "guess", "198.51.100.23")).await;
+        if st == StatusCode::UNAUTHORIZED { sawn_401 += 1; }
+    }
+    assert!(sawn_401 >= 5, "the first attempts should be ordinary 401s, saw {sawn_401}");
+
+    let st = status_of(&app, login_req_from("stuff99@f.lu", "guess", "198.51.100.23")).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "the source should be throttled by now");
+
+    // A different source is unaffected — the counter is per origin, not global.
+    assert_eq!(
+        status_of(&app, login_req_from("stuff99@f.lu", "guess", "198.51.100.99")).await,
+        StatusCode::UNAUTHORIZED,
+    );
+
+    // And a real sign-in from a clean source still works.
+    assert_eq!(
+        status_of(&app, login_req_from("victim@f.lu", "correct horse battery", "198.51.100.99")).await,
+        StatusCode::OK,
+    );
+
+    pool.close().await;
+    edb.stop().await;
+}

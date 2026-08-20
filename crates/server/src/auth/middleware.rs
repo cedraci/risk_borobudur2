@@ -5,18 +5,34 @@ use axum::middleware::Next;
 use axum::response::Response;
 use db::auth::{Action, AuthCtx, Domain};
 
+/// The request's client address, inserted for every request whether or not a
+/// principal resolved. Handlers that audit an unauthenticated event (a failed
+/// sign-in) read it from here; everything else finds it on `AuthCtx`.
+#[derive(Clone, Debug)]
+pub struct ClientAddr(pub Option<String>);
+
 /// Resolves the principal and inserts an `AuthCtx` extension. Runs for every
 /// route, protected or public — a public route may still want to know who is
 /// calling, and resolving in one place keeps the two modes identical.
 pub async fn resolve_principal(
     State(st): State<AppState>, mut req: Request, next: Next,
 ) -> Result<Response, AppError> {
+    // Resolved before the principal so the audit log can attribute an
+    // unauthenticated request too — `session::login` reads it back out of the
+    // extensions to stamp `login_failed`/`login_locked` rows, which are
+    // precisely the ones with no principal to name.
+    let source_addr = crate::auth::client_addr::from_request(
+        req.headers(),
+        req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|ci| ci.0),
+    );
+    req.extensions_mut().insert(ClientAddr(source_addr.clone()));
     if let Ok(p) = st.identity.authenticate(req.headers()).await {
         req.extensions_mut().insert(AuthCtx {
             principal_id: p.id,
             display_name: p.display_name,
             is_administrator: p.is_administrator,
             grants: p.grants,
+            source_addr,
         });
     }
     Ok(next.run(req).await)

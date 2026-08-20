@@ -286,7 +286,25 @@ impl<'a> Scoped<'a> {
         Ok(())
     }
 
-    pub async fn portfolio_by_code(&self, _a: &GlobalAccess<Reference, View>, source: &str, code: &str) -> anyhow::Result<Option<i64>> {
+    /// Resolves a depositary fund code to a portfolio id, and *only* to an
+    /// id — no name, no archived flag, nothing that identifies the portfolio.
+    ///
+    /// No `Access`/`GlobalAccess` parameter, for the same reason
+    /// `portfolios_list` has none: this does not authorize anything. It used
+    /// to demand `GlobalAccess<Reference, View>`, which made the whole CACEIS
+    /// feed unusable for the scoped Operations principal the role exists for
+    /// (finding P4) — that grant is instance-wide, and Operations is normally
+    /// granted per portfolio.
+    ///
+    /// The security boundary is unchanged and lives at the call site
+    /// (`handlers::imports::import_one`): every write token is proven against
+    /// the id this returns BEFORE the row behind it is read, so an
+    /// out-of-scope target still yields the same uniform "not permitted"
+    /// message and never its name or existence. What a caller can now learn
+    /// without an instance-wide grant is that some code is mapped *somewhere*
+    /// — and only a caller already holding import rights on a portfolio can
+    /// reach the handler to ask.
+    pub async fn portfolio_by_code(&self, source: &str, code: &str) -> anyhow::Result<Option<i64>> {
         Ok(sqlx::query_scalar("SELECT portfolio_id FROM portfolio_codes WHERE source = $1 AND code = $2")
             .bind(source).bind(code).fetch_optional(self.pool).await?)
     }

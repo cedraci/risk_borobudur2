@@ -191,6 +191,15 @@ is marked `Secure`, so over plain HTTP browsers drop it and login silently
 fails. Put the server behind an HTTPS reverse proxy (or an SSH tunnel to
 127.0.0.1) — never expose the plain-HTTP port directly.
 
+Configure that proxy to forward the client address (`X-Forwarded-For`, or
+`X-Real-IP`). Every audit row records the origin of the request, and failed
+sign-ins are throttled per origin — ten failures from one address inside 15
+minutes start an escalating delay, which is what stops one source grinding a
+password against many accounts, something the per-account lockout cannot see.
+Without a forwarded address the server falls back to the peer socket, which
+behind a proxy is the proxy itself; the audit log then attributes everything
+to one address and the throttling has nothing useful to key on.
+
 **Testing access rights end to end**: `cargo run -p server --example
 dev_server` stands up a throwaway server-mode instance on an embedded
 PostgreSQL (no real Postgres needed) and prints the enrolment token;
@@ -203,8 +212,10 @@ lists the few remaining UI observations that need human eyes.
     cargo run -p server          # API on :8787
     cd frontend && npm run dev   # UI on :5173, proxies /api
 
-Tests: `cargo test` (embedded-PG tests download binaries on first run) and
-`cd frontend && npm run build` (type-check).
+Tests: `cargo test` (embedded-PG tests download binaries on first run),
+`cd frontend && npm test` (UI contract tests — which denial markers render,
+which nav links a grant set unlocks) and `cd frontend && npm run build`
+(type-check). CI runs all three.
 
 Design spec: docs/superpowers/specs/2026-07-30-borobudur-risk-tool-design.md
 Plan: docs/superpowers/plans/2026-07-30-borobudur-risk-tool.md

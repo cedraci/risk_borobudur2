@@ -170,6 +170,12 @@ pub struct AuthCtx {
     pub display_name: String,
     pub is_administrator: bool,
     pub grants: GrantSet,
+    /// Where the request came from, as the front-end proxy reported it.
+    /// Carried here rather than passed separately because every audit row is
+    /// written from a handler that already holds an `AuthCtx` and nothing
+    /// else about the request. `None` in desktop mode, and for any caller
+    /// the deployment could not attribute an address to.
+    pub source_addr: Option<String>,
 }
 
 impl AuthCtx {
@@ -181,6 +187,7 @@ impl AuthCtx {
             display_name: "desktop".to_string(),
             is_administrator: true,
             grants: GrantSet::all_access(),
+            source_addr: None,
         }
     }
 }

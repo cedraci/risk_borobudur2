@@ -44,9 +44,30 @@ async fn portfolio(pool: &sqlx::PgPool, name: &str) -> i64 {
 }
 
 async fn get(app: &axum::Router, uri: &str, cookie: Option<&str>) -> StatusCode {
-    let mut b = Request::get(uri);
+    send(app, &r("", Domain::Nav, Action::View), uri, cookie).await
+}
+
+/// Issues one case's request. The body only has to get past extraction — the
+/// gate under test is middleware, so a route that goes on to reject the body
+/// as malformed has still answered the question this file asks.
+async fn send(app: &axum::Router, case: &Case, uri: &str, cookie: Option<&str>) -> StatusCode {
+    let mut b = Request::builder().method(case.method).uri(uri);
     if let Some(c) = cookie { b = b.header("cookie", c); }
-    app.clone().oneshot(b.body(Body::empty()).unwrap()).await.unwrap().status()
+    let body = match case.body {
+        None => Body::empty(),
+        Some(Payload::Json(j)) => {
+            b = b.header("content-type", "application/json");
+            Body::from(j)
+        }
+        Some(Payload::Multipart) => {
+            b = b.header("content-type", "multipart/form-data; boundary=XB");
+            // A well-formed but empty multipart body: enough to get past
+            // extraction, after which the handler's own "missing field"
+            // rejection is a perfectly good "reached the handler".
+            Body::from("--XB--\r\n")
+        }
+    };
+    app.clone().oneshot(b.body(body).unwrap()).await.unwrap().status()
 }
 
 async fn get_json(app: &axum::Router, uri: &str, cookie: Option<&str>) -> (StatusCode, serde_json::Value) {
@@ -59,29 +80,80 @@ async fn get_json(app: &axum::Router, uri: &str, cookie: Option<&str>) -> (Statu
     (status, v)
 }
 
-struct Case { uri: &'static str, domain: Domain, action: Action }
+#[derive(Clone, Copy)]
+enum Payload { Json(&'static str), Multipart }
+
+struct Case {
+    uri: &'static str,
+    method: &'static str,
+    body: Option<Payload>,
+    domain: Domain,
+    action: Action,
+}
+
+/// Shorthand for the read cases, which are the bulk of the table.
+const fn r(uri: &'static str, domain: Domain, action: Action) -> Case {
+    Case { uri, method: "GET", body: None, domain, action }
+}
 
 const CASES: &[Case] = &[
-    Case { uri: "/api/portfolios/{pid}/nav",                    domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/positions",              domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/summary",        domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/rolling",        domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/drawdowns",      domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/calendar",       domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/var",            domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/backtest",       domain: Domain::Nav,          action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/concentration",  domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/liquidity",      domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/rates",          domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/metrics/derivatives",    domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/pnl",                    domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/emir",                   domain: Domain::Positions,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/emir/export",            domain: Domain::Positions,    action: Action::Export },
-    Case { uri: "/api/portfolios/{pid}/shareholders",           domain: Domain::Shareholders, action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/flows",                  domain: Domain::Shareholders, action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/settings",               domain: Domain::Reference,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/imports",                domain: Domain::Reference,    action: Action::View },
-    Case { uri: "/api/portfolios/{pid}/futures-analytics",      domain: Domain::MarketData,   action: Action::View },
+    r("/api/portfolios/{pid}/nav", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/positions", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/metrics/summary", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/metrics/rolling", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/metrics/drawdowns", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/metrics/calendar", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/metrics/var", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/metrics/backtest", Domain::Nav, Action::View),
+    r("/api/portfolios/{pid}/metrics/concentration", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/metrics/liquidity", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/metrics/rates", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/metrics/derivatives", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/pnl", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/emir", Domain::Positions, Action::View),
+    r("/api/portfolios/{pid}/emir/export", Domain::Positions, Action::Export),
+    r("/api/portfolios/{pid}/shareholders", Domain::Shareholders, Action::View),
+    r("/api/portfolios/{pid}/flows", Domain::Shareholders, Action::View),
+    r("/api/portfolios/{pid}/settings", Domain::Reference, Action::View),
+    r("/api/portfolios/{pid}/imports", Domain::Reference, Action::View),
+    r("/api/portfolios/{pid}/futures-analytics", Domain::MarketData, Action::View),
+    // Writes. Every mutating portfolio-scoped route in `routes.rs` — the
+    // half the matrix used to skip. A mis-declared write is both likelier
+    // (they arrive one at a time) and more expensive than a mis-declared
+    // read (finding P9).
+    Case { uri: "/api/portfolios/{pid}", method: "PUT", body: Some(Payload::Json(r#"{"name":"X","archived":false}"#)),
+           domain: Domain::Reference, action: Action::Configure },
+    Case { uri: "/api/portfolios/{pid}/codes", method: "PUT", body: Some(Payload::Json("[]")),
+           domain: Domain::Reference, action: Action::Configure },
+    Case { uri: "/api/portfolios/{pid}/settings", method: "PUT", body: Some(Payload::Json("{}")),
+           domain: Domain::Reference, action: Action::Configure },
+    Case { uri: "/api/portfolios/{pid}/shareholders", method: "PUT", body: Some(Payload::Json("[]")),
+           domain: Domain::Shareholders, action: Action::Import },
+    Case { uri: "/api/portfolios/{pid}/emir/kpis/2026-08-01", method: "PUT", body: Some(Payload::Json("{}")),
+           domain: Domain::Reference, action: Action::Configure },
+    Case { uri: "/api/portfolios/{pid}/imports", method: "POST", body: Some(Payload::Multipart),
+           domain: Domain::Positions, action: Action::Import },
+    Case { uri: "/api/portfolios/{pid}/futures-analytics", method: "POST", body: Some(Payload::Multipart),
+           domain: Domain::MarketData, action: Action::Import },
+];
+
+/// Instance-wide routes (`.protected_global`). Their contract differs from
+/// the table above in the way that matters most: a grant scoped to a single
+/// portfolio never reaches them, however right its domain and action.
+const GLOBAL_CASES: &[Case] = &[
+    r("/api/refs", Domain::Reference, Action::View),
+    r("/api/futures-contracts", Domain::Reference, Action::View),
+    r("/api/bloomberg/request", Domain::Positions, Action::Export),
+    r("/api/bloomberg/adv-request", Domain::Positions, Action::Export),
+    r("/api/bloomberg/adv-due", Domain::MarketData, Action::View),
+    Case { uri: "/api/refs/XS0000000001", method: "PUT", body: Some(Payload::Json("{}")),
+           domain: Domain::Reference, action: Action::Configure },
+    Case { uri: "/api/futures-contracts/FGBL", method: "PUT", body: Some(Payload::Json("{}")),
+           domain: Domain::Reference, action: Action::Configure },
+    Case { uri: "/api/bloomberg/upload", method: "POST", body: Some(Payload::Multipart),
+           domain: Domain::MarketData, action: Action::Import },
+    Case { uri: "/api/portfolios", method: "POST", body: Some(Payload::Json(r#"{"name":"New","kind":"ucits"}"#)),
+           domain: Domain::Reference, action: Action::Configure },
 ];
 
 fn uri_for(case: &Case, pid: i64) -> String {
@@ -95,8 +167,8 @@ async fn no_cookie_is_401_for_every_case() {
     for case in CASES {
         let uri = uri_for(case, pid);
         assert_eq!(
-            get(&app, &uri, None).await, StatusCode::UNAUTHORIZED,
-            "expected 401 with no cookie for {uri}"
+            send(&app, case, &uri, None).await, StatusCode::UNAUTHORIZED,
+            "expected 401 with no cookie for {} {uri}", case.method
         );
     }
     edb.stop().await;
@@ -109,11 +181,11 @@ async fn the_exact_grant_never_401s_403s_or_404s() {
     for case in CASES {
         let cookie = user_with(&pool, &[Grant { domain: case.domain, action: case.action, portfolio: Some(pid) }]).await;
         let uri = uri_for(case, pid);
-        let status = get(&app, &uri, Some(&cookie)).await;
+        let status = send(&app, case, &uri, Some(&cookie)).await;
         assert!(
             !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
-            "expected the exact grant ({:?}, {:?}) to reach the handler for {uri}, got {status}",
-            case.domain, case.action
+            "expected the exact grant ({:?}, {:?}) to reach the handler for {} {uri}, got {status}",
+            case.domain, case.action, case.method
         );
     }
     edb.stop().await;
@@ -128,8 +200,8 @@ async fn a_grant_on_a_different_portfolio_is_404() {
         let cookie = user_with(&pool, &[Grant { domain: case.domain, action: case.action, portfolio: Some(mine) }]).await;
         let uri = uri_for(case, theirs);
         assert_eq!(
-            get(&app, &uri, Some(&cookie)).await, StatusCode::NOT_FOUND,
-            "expected 404 (out of scope) for {uri} with a grant only on portfolio {mine}"
+            send(&app, case, &uri, Some(&cookie)).await, StatusCode::NOT_FOUND,
+            "expected 404 (out of scope) for {} {uri} with a grant only on portfolio {mine}", case.method
         );
     }
     edb.stop().await;
@@ -146,8 +218,8 @@ async fn a_grant_on_a_different_domain_is_403() {
         let cookie = user_with(&pool, &[Grant { domain: other, action: Action::View, portfolio: Some(pid) }]).await;
         let uri = uri_for(case, pid);
         assert_eq!(
-            get(&app, &uri, Some(&cookie)).await, StatusCode::FORBIDDEN,
-            "expected 403 for {uri} with only a {other:?} grant"
+            send(&app, case, &uri, Some(&cookie)).await, StatusCode::FORBIDDEN,
+            "expected 403 for {} {uri} with only a {other:?} grant", case.method
         );
     }
     edb.stop().await;
@@ -189,5 +261,51 @@ async fn portfolios_list_is_authenticated_and_filters_to_the_visible_scope() {
     assert!(ids.contains(&a) && ids.contains(&b),
         "expected the wildcard principal to see every portfolio including A and B, got {ids:?}");
 
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn no_cookie_is_401_for_every_instance_wide_case() {
+    let (app, _pool, edb) = app().await;
+    for case in GLOBAL_CASES {
+        assert_eq!(
+            send(&app, case, case.uri, None).await, StatusCode::UNAUTHORIZED,
+            "expected 401 with no cookie for {} {}", case.method, case.uri
+        );
+    }
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn the_exact_wildcard_grant_reaches_every_instance_wide_route() {
+    let (app, pool, edb) = app().await;
+    for case in GLOBAL_CASES {
+        let cookie = user_with(&pool, &[Grant { domain: case.domain, action: case.action, portfolio: None }]).await;
+        let status = send(&app, case, case.uri, Some(&cookie)).await;
+        assert!(
+            !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+            "expected the exact wildcard grant ({:?}, {:?}) to reach the handler for {} {}, got {status}",
+            case.domain, case.action, case.method, case.uri
+        );
+    }
+    edb.stop().await;
+}
+
+/// The property that separates `.protected_global` from `.protected`: an
+/// instance-wide resource is answered only by an instance-wide grant. A
+/// portfolio-scoped grant of exactly the right domain and action must not
+/// reach it — otherwise "reference data on fund A" would quietly become
+/// "the shared reference tables for the whole fleet".
+#[tokio::test]
+async fn a_portfolio_scoped_grant_never_reaches_an_instance_wide_route() {
+    let (app, pool, edb) = app().await;
+    let pid = portfolio(&pool, "Scoped").await;
+    for case in GLOBAL_CASES {
+        let cookie = user_with(&pool, &[Grant { domain: case.domain, action: case.action, portfolio: Some(pid) }]).await;
+        assert_eq!(
+            send(&app, case, case.uri, Some(&cookie)).await, StatusCode::FORBIDDEN,
+            "expected 403 for {} {} with a grant scoped to one portfolio", case.method, case.uri
+        );
+    }
     edb.stop().await;
 }

@@ -201,6 +201,29 @@ in, is this:
   entered against it can therefore stay locked out indefinitely, one
   15-minute window after another.
 
+Separately from the per-account rule, the server also throttles **where the
+attempts come from**. Account lockout only ever counts failures against one
+email, so it does nothing about someone trying a single likely password
+against hundreds of accounts in turn — no account ever reaches five. The
+per-origin rule closes that:
+
+- After **ten failed sign-ins from the same network address within 15
+  minutes**, that address is told to wait, whatever accounts the attempts
+  were aimed at. The wait starts at 30 seconds and doubles with each further
+  failure, up to 15 minutes.
+- A successful sign-in from that address clears its count immediately, so a
+  colleague who mistypes their password a few times and then gets it right
+  is never affected. Ten is also well above the five that lock a single
+  account, so ordinary fumbling never reaches it.
+- The address comes from the reverse proxy in front of the server. If the
+  deployment has none, or does not forward the client address, the
+  throttling has nothing to key on and only the per-account rule applies.
+- These counts live in the server's memory, not the database, so restarting
+  the server clears them. Account lockout, which is stored, does not clear.
+
+A throttled attempt is recorded in the audit log as its own event, so a burst
+of them from one address is visible after the fact.
+
 ## Revoking sessions
 
 There is no "sessions" list to browse or a single button labelled "revoke
@@ -259,6 +282,7 @@ Each row shows:
 | Domain | The data domain involved, if the event concerns one — a dash otherwise, for events like a login or a user being created that aren't about any one domain. |
 | Portfolio | The portfolio the event concerns, if any — a dash for events that apply instance-wide (for example, most administration actions and every sign-in event). |
 | Detail | The raw supporting detail for the event — which fields appear depends on the action. |
+| Source | The network address the request came from, as reported by the reverse proxy in front of the server. A dash where the deployment could not attribute one (in particular, everywhere in the single-user desktop application). |
 
 There is no search box, no date-range picker, and no filter by user, action
 or domain on this screen — it is the flat, most-recent-200 list described
@@ -274,7 +298,10 @@ The events recorded fall into a handful of categories:
 - **Configuration changes** — edits to reference data, portfolio setup,
   futures contract confirmation, EMIR KPI entries, and similar settings.
 - **Authentication events** — a successful sign-in, a failed sign-in
-  attempt, and an account being locked out after too many failed attempts.
+  attempt, an account being locked out after too many failed attempts, and
+  an attempt refused because its origin was being throttled. These carry the
+  source address, which is usually the first thing worth knowing about a run
+  of failures.
 - **Administration actions** — everything on this page: a user created, a
   password reset, a user disabled or re-enabled, a grant added or removed,
   a role assigned, and the very first administrator completing enrolment.

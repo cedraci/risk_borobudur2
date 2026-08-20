@@ -1,0 +1,54 @@
+name: CI
+
+# Everything the review of 2026-08-20 found had already been proven wrong by a
+# test that nobody ran, or was never testable because there was no runner for
+# the half of the code it lived in. Both halves run here now, on every push.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # Windows, because that is where this runs in production: the embedded
+    # PostgreSQL the tests download is platform-specific, and so is the desktop
+    # build. Testing on a platform nobody deploys would prove less.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        # The first run downloads a portable PostgreSQL per test binary; the
+        # cache above keeps that off the critical path afterwards.
+        run: cargo test --workspace
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: type-check and build
+        run: npm run build
+      - name: UI contract tests
+        run: npm test

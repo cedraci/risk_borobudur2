@@ -23,7 +23,7 @@ pub async fn record(
         domain,
         portfolio_id,
         detail,
-        source_addr: None,
+        source_addr: ctx.source_addr.clone(),
     };
     if let Err(e) = st.db.admin().audit_append(event).await {
         tracing::error!("audit write failed for {action}: {e:#}");

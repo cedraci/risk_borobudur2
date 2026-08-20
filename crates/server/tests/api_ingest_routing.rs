@@ -232,8 +232,11 @@ async fn caceis_file_coded_to_an_ungranted_portfolio_is_refused_without_leaking_
         .bind(b_id).execute(&pool).await.unwrap();
 
     // A principal scoped to A's three import domains, plus a wildcard
-    // Reference/View grant (needed to resolve the CACEIS code at all) — but
-    // no grant of any kind, on any domain, for B.
+    // Reference/View grant — but no grant of any kind, on any domain, for B.
+    // The wildcard is incidental here (code resolution no longer needs it,
+    // see `Scoped::portfolio_by_code`); it is kept because it makes the
+    // assertion stronger: even an instance-wide reference reader learns
+    // neither B's name nor whether it exists.
     let hash = server::auth::local::hash_password("pw").unwrap();
     let admin = db::admin::Admin::new(&pool);
     let uid = admin.create_user("scoped@f.lu", "Scoped", &hash, false).await.unwrap();
@@ -289,6 +292,54 @@ async fn caceis_file_coded_to_an_ungranted_portfolio_is_refused_without_leaking_
     assert!(sample_result["error"].is_null(), "{sample_result}");
     assert_eq!(sample_result["portfolio_id"].as_i64().unwrap(), a_id, "{sample_result}");
     assert!(sample_result["outcome"]["import_id"].is_i64(), "{sample_result}");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// Finding P4: the Operations role exists for the people who load the weekly
+/// files, and is normally granted with a portfolio scope. Routing a
+/// self-identifying CACEIS file used to demand an *instance-wide*
+/// Reference/View grant to resolve its fund code, so a scoped Operations
+/// principal was refused on the very feed the role exists for — on a fund it
+/// holds every import grant over.
+#[tokio::test]
+async fn a_scoped_operations_principal_can_import_a_caceis_file_for_its_own_portfolio() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::server(dbh.clone()));
+
+    let a_id: i64 = sqlx::query_scalar(
+        "INSERT INTO portfolios (name, kind) VALUES ('Mandat Ops', 'mandate') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO portfolio_codes (portfolio_id, source, code) VALUES ($1, 'caceis', '165878')")
+        .bind(a_id).execute(&pool).await.unwrap();
+
+    // Exactly what `Role::Operations` expands to at scope A — every grant
+    // scoped to the portfolio, nothing instance-wide.
+    let hash = server::auth::local::hash_password("pw").unwrap();
+    let admin = db::admin::Admin::new(&pool);
+    let uid = admin.create_user("ops@f.lu", "Ops", &hash, false).await.unwrap();
+    for g in db::auth::Role::Operations.expand(Some(a_id)) {
+        admin.grant_add(uid, g, None).await.unwrap();
+    }
+    let token = "ops-token";
+    admin.session_create(&server::auth::local::token_hash(token), uid, 1).await.unwrap();
+    let cookie = format!("borobudur_session={token}");
+
+    let histovl = std::fs::read(HISTOVL).unwrap();
+    let res = app.clone().oneshot(multi_upload_req_with_cookie(
+        &format!("/api/portfolios/{a_id}/imports"),
+        &[("HISTOVLLUX_165878_20260729_20260730170850.csv", &histovl)],
+        Some(&cookie),
+    )).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_of(res).await;
+    assert!(body[0]["error"].is_null(), "scoped Operations must be able to load its own fund's feed: {body}");
+    assert_eq!(body[0]["portfolio_id"].as_i64().unwrap(), a_id, "{body}");
+    assert!(body[0]["outcome"]["nav_rows"].as_i64().unwrap() > 0, "{body}");
 
     pool.close().await;
     edb.stop().await;

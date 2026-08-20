@@ -1,6 +1,8 @@
+pub mod client_addr;
 pub mod desktop;
 pub mod local;
 pub mod middleware;
+pub mod throttle;
 
 use axum::http::HeaderMap;
 use db::auth::GrantSet;
