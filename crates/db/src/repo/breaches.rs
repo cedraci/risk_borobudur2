@@ -259,9 +259,21 @@ impl Scoped<'_> {
                         .execute(&mut *tx).await?;
                 }
                 Transition::RaisePeak { id, value } => {
-                    sqlx::query(
-                        "UPDATE limit_breaches SET peak_value = $2, peak_nav_date = $3 WHERE id = $1")
-                        .bind(id).bind(value).bind(ctx.nav_date).execute(&mut *tx).await?;
+                    // The id in a transition is data, not a grant: without this
+                    // portfolio check a caller authorized for one fund could name
+                    // another fund's episode and falsify its record. `bail!` here
+                    // runs before `tx.commit()`, so sqlx rolls the whole batch back
+                    // on drop and nothing partial is persisted.
+                    let hit: Option<i64> = sqlx::query_scalar(
+                        "UPDATE limit_breaches SET peak_value = $2, peak_nav_date = $3
+                         WHERE id = $1 AND portfolio_id = $4 RETURNING id")
+                        .bind(id).bind(value).bind(ctx.nav_date).bind(a.portfolio_id())
+                        .fetch_optional(&mut *tx).await?;
+                    if hit.is_none() {
+                        anyhow::bail!(
+                            "transition names breach {id}, which is not in portfolio {}",
+                            a.portfolio_id());
+                    }
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'note',$4)")
@@ -270,9 +282,16 @@ impl Scoped<'_> {
                         .execute(&mut *tx).await?;
                 }
                 Transition::Close { id } => {
-                    sqlx::query(
-                        "UPDATE limit_breaches SET closed_run_id = $2, closed_nav_date = $3 WHERE id = $1")
-                        .bind(id).bind(ctx.run_id).bind(ctx.nav_date).execute(&mut *tx).await?;
+                    let hit: Option<i64> = sqlx::query_scalar(
+                        "UPDATE limit_breaches SET closed_run_id = $2, closed_nav_date = $3
+                         WHERE id = $1 AND portfolio_id = $4 RETURNING id")
+                        .bind(id).bind(ctx.run_id).bind(ctx.nav_date).bind(a.portfolio_id())
+                        .fetch_optional(&mut *tx).await?;
+                    if hit.is_none() {
+                        anyhow::bail!(
+                            "transition names breach {id}, which is not in portfolio {}",
+                            a.portfolio_id());
+                    }
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'cleared',$4)")

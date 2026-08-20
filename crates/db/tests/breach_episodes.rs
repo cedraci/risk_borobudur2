@@ -105,6 +105,7 @@ async fn a_second_live_episode_for_the_same_subject_is_refused() {
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
     let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
 
     let run1 = scoped.record_run(&configure, &run_on(7)).await.unwrap();
     let open = || Transition::Open {
@@ -126,7 +127,11 @@ async fn a_second_live_episode_for_the_same_subject_is_refused() {
             actor_label: "system",
             actor_user_id: None,
         }, &[open()], &HashMap::new()).await;
-    assert!(again.is_err(), "the partial unique index must refuse a second live episode");
+    let err = again.unwrap_err().to_string();
+    assert!(err.contains("idx_breaches_live"),
+        "the refusal must come from the partial unique index, not from something else: {err}");
+    assert_eq!(scoped.breaches_for(&view, None).await.unwrap().len(), 1,
+        "the refused transaction left nothing behind");
 
     edb.stop().await;
 }
@@ -163,6 +168,97 @@ async fn raising_the_peak_records_the_worst_reading_and_its_date() {
     let row = &scoped.breaches_for(&view, None).await.unwrap()[0];
     assert_eq!(row.peak_value, Some(0.131));
     assert_eq!(row.opened_value, Some(0.106), "the opening value is not overwritten");
+    assert_eq!(row.peak_nav_date, NaiveDate::from_ymd_opt(2026, 8, 14),
+        "the peak carries the date it was struck on, not the opening date");
+
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn a_transition_naming_another_portfolios_episode_is_refused() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let c1 = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let v1 = scoped.authorize::<Settings, View>(1).unwrap();
+
+    // Portfolio 1 has a live episode.
+    let run1 = scoped.record_run(&c1, &run_on(7)).await.unwrap();
+    scoped.apply_transitions(&c1,
+        &RunContext {
+            run_id: run1,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        },
+        &[Transition::Open { check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106) }],
+        &HashMap::new()).await.unwrap();
+    let victim = scoped.breaches_for(&v1, None).await.unwrap()[0].id;
+
+    // A second fund, and a grant that reaches only it.
+    let p2: i64 = sqlx::query_scalar(
+        "INSERT INTO portfolios (name, kind) VALUES ('Other','ucits') RETURNING id")
+        .fetch_one(dbh.test_pool()).await.unwrap();
+    let c2 = scoped.authorize::<Settings, Configure>(p2).unwrap();
+    let run2: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_check_runs (portfolio_id, nav_date, triggered_by, inputs_complete, input_notes)
+         VALUES ($1, DATE '2026-08-08', 'manual', true, '{}'::jsonb) RETURNING id")
+        .bind(p2).fetch_one(dbh.test_pool()).await.unwrap();
+
+    let out = scoped.apply_transitions(&c2,
+        &RunContext {
+            run_id: run2,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        }, &[Transition::Close { id: victim }], &HashMap::new()).await;
+    assert!(out.is_err(), "a grant on one fund must not close another fund's episode");
+
+    // Portfolio 1's record is untouched: still live, still one event.
+    let row = &scoped.breaches_for(&v1, None).await.unwrap()[0];
+    assert_eq!(row.closed_nav_date, None, "the victim episode must still be live");
+    let events = scoped.breach_events(&v1, victim).await.unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
+    assert_eq!(kinds, vec!["opened"], "no falsified 'cleared' event was appended");
+
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn a_cleared_but_unsigned_episode_does_not_block_a_new_one() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let open = || Transition::Open {
+        check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106),
+    };
+    let at = |run_id: i64, d: u32| RunContext {
+        run_id, nav_date: NaiveDate::from_ymd_opt(2026, 8, d).unwrap(),
+        actor_label: "system", actor_user_id: None,
+    };
+
+    let run1 = scoped.record_run(&configure, &run_on(7)).await.unwrap();
+    scoped.apply_transitions(&configure, &at(run1, 7), &[open()], &HashMap::new())
+        .await.unwrap();
+    let first = scoped.breaches_for(&view, None).await.unwrap()[0].id;
+
+    // It clears on the data. Nobody signs it off: state is still `open`.
+    let run2 = scoped.record_run(&configure, &run_on(14)).await.unwrap();
+    scoped.apply_transitions(&configure, &at(run2, 14),
+        &[Transition::Close { id: first }], &HashMap::new()).await.unwrap();
+
+    // The same subject breaches again. This is a second episode, not a revival.
+    let run3 = scoped.record_run(&configure, &run_on(21)).await.unwrap();
+    scoped.apply_transitions(&configure, &at(run3, 21), &[open()], &HashMap::new())
+        .await.unwrap();
+
+    let all = scoped.breaches_for(&view, None).await.unwrap();
+    assert_eq!(all.len(), 2, "the cleared-but-unsigned episode must not absorb the new one");
+    let still_open: Vec<i64> = all.iter().filter(|b| b.closed_nav_date.is_none()).map(|b| b.id).collect();
+    assert_eq!(still_open.len(), 1, "exactly one episode is live");
+    assert_ne!(still_open[0], first, "the live one is the new episode, not the cleared one");
 
     edb.stop().await;
 }
