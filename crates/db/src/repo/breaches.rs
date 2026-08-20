@@ -167,6 +167,17 @@ pub struct BreachEventRow {
     pub detail: serde_json::Value,
 }
 
+/// Who recorded a run, when, and against which run row. These four travel
+/// together through every transition an `apply_transitions` call writes, so
+/// they are one value rather than four positional arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct RunContext<'a> {
+    pub run_id: i64,
+    pub nav_date: NaiveDate,
+    pub actor_label: &'a str,
+    pub actor_user_id: Option<i64>,
+}
+
 const BREACH_COLUMNS: &str =
     "id, check_key, subject, opened_nav_date, opened_value, peak_value, peak_nav_date, \
      closed_nav_date, state, classification, proposed_classification, proposal_reason, \
@@ -217,8 +228,7 @@ impl Scoped<'_> {
     /// in a single transaction: an episode without its `opened` event would be
     /// a record with no provenance.
     pub async fn apply_transitions(
-        &self, a: &Access<Settings, Configure>, run_id: i64, nav_date: NaiveDate,
-        actor_label: &str, actor_user_id: Option<i64>,
+        &self, a: &Access<Settings, Configure>, ctx: &RunContext<'_>,
         transitions: &[Transition], proposals: &HashMap<String, Proposal>,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
@@ -233,16 +243,16 @@ impl Scoped<'_> {
                               proposed_classification, proposal_reason)
                          VALUES ($1,$2,$3,$4,$5,$6,$6,$5,$7,$8) RETURNING id")
                         .bind(a.portfolio_id()).bind(check_key).bind(subject)
-                        .bind(run_id).bind(nav_date).bind(value)
+                        .bind(ctx.run_id).bind(ctx.nav_date).bind(value)
                         .bind(p.and_then(|p| p.classification))
                         .bind(p.map(|p| p.reason.as_str()))
                         .fetch_one(&mut *tx).await?;
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'opened',$4)")
-                        .bind(breach_id).bind(actor_user_id).bind(actor_label)
+                        .bind(breach_id).bind(ctx.actor_user_id).bind(ctx.actor_label)
                         .bind(serde_json::json!({
-                            "nav_date": nav_date, "value": value,
+                            "nav_date": ctx.nav_date, "value": value,
                             "proposed": p.and_then(|p| p.classification),
                             "reason": p.map(|p| p.reason.clone()),
                         }))
@@ -251,23 +261,23 @@ impl Scoped<'_> {
                 Transition::RaisePeak { id, value } => {
                     sqlx::query(
                         "UPDATE limit_breaches SET peak_value = $2, peak_nav_date = $3 WHERE id = $1")
-                        .bind(id).bind(value).bind(nav_date).execute(&mut *tx).await?;
+                        .bind(id).bind(value).bind(ctx.nav_date).execute(&mut *tx).await?;
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'note',$4)")
-                        .bind(id).bind(actor_user_id).bind(actor_label)
-                        .bind(serde_json::json!({"peak_value": value, "nav_date": nav_date}))
+                        .bind(id).bind(ctx.actor_user_id).bind(ctx.actor_label)
+                        .bind(serde_json::json!({"peak_value": value, "nav_date": ctx.nav_date}))
                         .execute(&mut *tx).await?;
                 }
                 Transition::Close { id } => {
                     sqlx::query(
                         "UPDATE limit_breaches SET closed_run_id = $2, closed_nav_date = $3 WHERE id = $1")
-                        .bind(id).bind(run_id).bind(nav_date).execute(&mut *tx).await?;
+                        .bind(id).bind(ctx.run_id).bind(ctx.nav_date).execute(&mut *tx).await?;
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'cleared',$4)")
-                        .bind(id).bind(actor_user_id).bind(actor_label)
-                        .bind(serde_json::json!({"nav_date": nav_date}))
+                        .bind(id).bind(ctx.actor_user_id).bind(ctx.actor_label)
+                        .bind(serde_json::json!({"nav_date": ctx.nav_date}))
                         .execute(&mut *tx).await?;
                 }
             }

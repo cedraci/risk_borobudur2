@@ -58,10 +58,10 @@ pub fn transitions(live: &[LiveEpisode], findings: &[Finding]) -> Vec<Transition
                 // A worse reading than the episode has ever seen is worth
                 // recording; an equal or better one inside an open episode is
                 // not news.
-                if let Some(v) = f.value {
-                    if e.peak_value.is_none_or(|p| v > p) {
-                        out.push(Transition::RaisePeak { id: e.id, value: v });
-                    }
+                if let Some(v) = f.value
+                    && e.peak_value.is_none_or(|p| v > p)
+                {
+                    out.push(Transition::RaisePeak { id: e.id, value: v });
                 }
             }
         }
@@ -147,17 +147,17 @@ pub fn propose(
             let prior_qty = before.get(h.isin.as_str()).copied().flatten();
             let curr_qty = h.quantity;
 
-            if prior_qty.is_none() || curr_qty.is_none() {
-                // Incomparable: one side is unknown.
-                if incomparable_isin.is_empty() {
-                    incomparable_isin = h.isin.as_str();
+            match (prior_qty, curr_qty) {
+                (Some(was), Some(now_q)) => {
+                    if now_q > was + QTY_EPSILON {
+                        bought_h = Some(h);
+                    }
                 }
-            } else {
-                // Both sides are Some; check if purchased.
-                let was = prior_qty.unwrap();
-                let now_q = curr_qty.unwrap();
-                if now_q > was + QTY_EPSILON {
-                    bought_h = Some(h);
+                // Incomparable: one side is unknown.
+                _ => {
+                    if incomparable_isin.is_empty() {
+                        incomparable_isin = h.isin.as_str();
+                    }
                 }
             }
         }

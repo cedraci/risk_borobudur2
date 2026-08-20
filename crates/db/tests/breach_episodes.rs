@@ -2,7 +2,7 @@ use analytics::breach::{LiveEpisode, Proposal, Transition};
 use chrono::NaiveDate;
 use db::auth::marker::{Configure, Settings, View};
 use db::auth::AuthCtx;
-use db::repo::{CheckResultRow, NewRun};
+use db::repo::{CheckResultRow, NewRun, RunContext};
 use std::collections::HashMap;
 
 async fn fresh() -> (db::Db, db::embedded::EmbeddedDb) {
@@ -48,8 +48,13 @@ async fn an_episode_opens_carries_its_proposal_and_closes() {
         reason: "no purchase in ACME since the previous snapshot".into(),
     });
     scoped.apply_transitions(
-        &configure, run1, NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
-        "system", None,
+        &configure,
+        &RunContext {
+            run_id: run1,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        },
         &[Transition::Open { check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106) }],
         &proposals,
     ).await.unwrap();
@@ -71,8 +76,14 @@ async fn an_episode_opens_carries_its_proposal_and_closes() {
     // Day 14: it clears on the data. The state does NOT move.
     let run2 = scoped.record_run(&configure, &run_on(14)).await.unwrap();
     scoped.apply_transitions(
-        &configure, run2, NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
-        "system", None, &[Transition::Close { id }], &HashMap::new(),
+        &configure,
+        &RunContext {
+            run_id: run2,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        },
+        &[Transition::Close { id }], &HashMap::new(),
     ).await.unwrap();
 
     let all = scoped.breaches_for(&view, None).await.unwrap();
@@ -99,12 +110,22 @@ async fn a_second_live_episode_for_the_same_subject_is_refused() {
     let open = || Transition::Open {
         check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106),
     };
-    scoped.apply_transitions(&configure, run1, NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
-        "system", None, &[open()], &HashMap::new()).await.unwrap();
+    scoped.apply_transitions(&configure,
+        &RunContext {
+            run_id: run1,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        }, &[open()], &HashMap::new()).await.unwrap();
 
     let run2 = scoped.record_run(&configure, &run_on(8)).await.unwrap();
-    let again = scoped.apply_transitions(&configure, run2, NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
-        "system", None, &[open()], &HashMap::new()).await;
+    let again = scoped.apply_transitions(&configure,
+        &RunContext {
+            run_id: run2,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        }, &[open()], &HashMap::new()).await;
     assert!(again.is_err(), "the partial unique index must refuse a second live episode");
 
     edb.stop().await;
@@ -119,15 +140,25 @@ async fn raising_the_peak_records_the_worst_reading_and_its_date() {
     let view = scoped.authorize::<Settings, View>(1).unwrap();
 
     let run1 = scoped.record_run(&configure, &run_on(7)).await.unwrap();
-    scoped.apply_transitions(&configure, run1, NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
-        "system", None,
+    scoped.apply_transitions(&configure,
+        &RunContext {
+            run_id: run1,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        },
         &[Transition::Open { check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106) }],
         &HashMap::new()).await.unwrap();
     let id = scoped.breaches_for(&view, None).await.unwrap()[0].id;
 
     let run2 = scoped.record_run(&configure, &run_on(14)).await.unwrap();
-    scoped.apply_transitions(&configure, run2, NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
-        "system", None, &[Transition::RaisePeak { id, value: 0.131 }], &HashMap::new()).await.unwrap();
+    scoped.apply_transitions(&configure,
+        &RunContext {
+            run_id: run2,
+            nav_date: NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
+            actor_label: "system",
+            actor_user_id: None,
+        }, &[Transition::RaisePeak { id, value: 0.131 }], &HashMap::new()).await.unwrap();
 
     let row = &scoped.breaches_for(&view, None).await.unwrap()[0];
     assert_eq!(row.peak_value, Some(0.131));
