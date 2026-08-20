@@ -119,11 +119,13 @@ async fn import_one(
     let target_id = match &id.fund_code {
         None => selected.id,
         Some((source, code)) => {
-            let ref_view = match scoped.authorize_global::<Reference, View>() {
-                Ok(a) => a,
-                Err(e) => { r.error = Some(err_msg(AppError::from(e))); return r; }
-            };
-            match scoped.portfolio_by_code(&ref_view, source, code).await {
+            // No grant is required to turn a fund code into a bare id — see
+            // `Scoped::portfolio_by_code`. Requiring an instance-wide
+            // Reference/View here locked the scoped Operations role out of the
+            // depositary feed entirely (finding P4). The authorization that
+            // matters is the per-target Import block below, which still runs
+            // before anything about the resolved portfolio is read.
+            match scoped.portfolio_by_code(source, code).await {
                 Err(e) => { r.error = Some(e.to_string()); return r; }
                 Ok(None) => {
                     r.error = Some(format!(

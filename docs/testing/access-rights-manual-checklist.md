@@ -9,6 +9,11 @@ elsewhere; **do not re-test it by hand**:
 - `scripts/test-access-rights.ps1` — the same contract re-proven end-to-end
   against a live server-mode instance, plus account lifecycle and the audit
   trail.
+- `cd frontend && npm test` — the browser half: that every `unavailable`
+  marker the server emits is actually rendered, that a denial never takes a
+  pass or a breach colour, and which nav links each grant set unlocks. Added
+  2026-08-20; before it, the UI side of feature wrapping was checked only by
+  the eyes below, which is how four unread markers survived.
 
 This checklist is the remainder: what only a person looking at the browser
 can observe (what is *shown*, *hidden*, *greyed*, *worded*). About 25
@@ -89,15 +94,19 @@ on A only):
 - [ ] Limits → liquidity: the top-5 redemption scenario reads
       **"not permitted: shareholder register"** — visibly different from
       the "no shareholder register" wording the administrator sees on a
-      fund whose register was simply never uploaded.
-- [ ] Denied sections read **N/A / unavailable — never PASS/OK**: a
-      missing grant must not render as a passing check anywhere on
-      Limits/Derivatives.
-- [ ] Derivatives / EMIR: clearing-obligation verdicts show
-      **unavailable** (reference denied), and the evidence export button
-      produces an explicit error — never a silently degraded file.
-- [ ] P&L: the transaction-detail portion is marked unavailable
-      (transactions denied) rather than silently folded into the residual.
+      fund whose register was simply never uploaded. The ADV-coverage line
+      above it says the same thing rather than reporting an empty register.
+- [ ] Denied sections read **N/A / unavailable — never PASS/OK, and never
+      BREACH either**: a missing grant is not a finding, and must not take
+      the red used for one anywhere on Limits/Derivatives.
+- [ ] Derivatives / EMIR: clearing-obligation verdicts show a grey
+      **N/A** with the reason named above the table (reference denied), and
+      the evidence export button produces an explicit error — never a
+      silently degraded file.
+- [ ] P&L: the **Realized and Unrealized columns are blank** (dashes), with
+      the reason named above the table. Total and "of which FX" still show
+      real figures. A realized column full of `0 €` is the specific failure
+      this is looking for.
 
 ## 5. Account lifecycle UX (admin, ~4 min)
 
@@ -111,6 +120,10 @@ on A only):
 - [ ] The audit log table renders the script's run: user_created,
       grant_added/removed, role_assigned, logins — and the failed/locked
       sign-ins show the **typed email** as the actor.
+- [ ] Every row carries a **Source** address. On a dev server this is
+      `127.0.0.1`; behind a proxy it is whatever the proxy forwards. A column
+      of dashes means the deployment is not forwarding the client address —
+      see the server-mode section of the README.
 
 ## 6. Session UX (both windows, ~4 min)
 

@@ -15,7 +15,7 @@ export default function AuditLog() {
   return (
     <table className="tbl">
       <thead>
-        <tr><th>Time</th><th>Actor</th><th>Action</th><th>Domain</th><th>Portfolio</th><th>Detail</th></tr>
+        <tr><th>Time</th><th>Actor</th><th>Action</th><th>Domain</th><th>Portfolio</th><th>Source</th><th>Detail</th></tr>
       </thead>
       <tbody>
         {audit.data.map((r) => (
@@ -25,6 +25,10 @@ export default function AuditLog() {
             <td>{r.action}</td>
             <td>{r.domain ?? "—"}</td>
             <td>{r.portfolio_id ?? "—"}</td>
+            {/* Null wherever the deployment could not attribute an address —
+                always in desktop mode, and behind a proxy that does not
+                forward one (see the README's server-mode section). */}
+            <td>{r.source_addr ?? "—"}</td>
             <td><code>{JSON.stringify(r.detail)}</code></td>
           </tr>
         ))}

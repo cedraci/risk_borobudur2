@@ -71,7 +71,11 @@ async fn main() -> anyhow::Result<()> {
     if cfg.open_browser {
         let _ = webbrowser::open(&format!("http://{}", cfg.bind));
     }
-    axum::serve(listener, app)
+    // `into_make_service_with_connect_info` is what puts the peer address in
+    // the request extensions; `auth::client_addr` prefers the proxy's
+    // forwarded header and falls back to it, so a deployment without a proxy
+    // still gets a real address into the audit log.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
         .await?;
     if let Some(edb) = embedded {

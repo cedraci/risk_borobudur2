@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react";
 import DerivativesExposure from "../components/DerivativesExposure";
-import Unavailable from "../components/Unavailable";
+import Unavailable, { UNAVAILABLE_LABEL } from "../components/Unavailable";
 import { ApiError, emirExportUrl, getEmir, putEmirKpi, type EmirKpi } from "../api";
 import { eur, num, pct } from "../fmt";
 import { useFetch } from "../hooks";
@@ -17,7 +17,15 @@ const REC_LABEL: Record<EmirKpi["reconciliation"], string> = {
   done: "Done", not_done: "Not done", not_applicable: "N/A",
 };
 
-function VerdictChip({ v }: { v: string }) {
+/** "unavailable" is neither a pass nor a finding: it must not wear the green
+ * of OK, and it must not wear the red of BREACH either — a denied reference
+ * read is not a clearing-threshold breach, and painting it as one sends
+ * someone chasing an escalation that does not exist. It gets the same neutral
+ * grey N/A as every other denial in the app (see components/Unavailable). */
+function VerdictChip({ v, reason }: { v: string; reason?: string }) {
+  if (v === "unavailable") {
+    return <span className="unavailable" title={reason}>{UNAVAILABLE_LABEL}</span>;
+  }
   const cls = v === "ok" ? "pos" : v === "watch" ? "warn-badge" : "neg";
   return <span className={cls}>{VERDICT_LABEL[v] ?? v}</span>;
 }
@@ -113,6 +121,12 @@ export default function DerivativesPage() {
               Average of month-end gross notional over the last 12 months
               ({data.months_present} of {data.months_total} months have a snapshot). {data.otc_note}
             </p>
+            {/* Every verdict and every notional in the table below is stamped
+                or nulled when this marker is unavailable; without the reason
+                on screen the column of N/As has no explanation. */}
+            {data.clearing_obligation?.status === "unavailable" && (
+              <Unavailable reason={`clearing-threshold verdicts not computed — ${data.clearing_obligation.reason}`} />
+            )}
             <table className="tbl">
               <thead>
                 <tr>
@@ -129,7 +143,7 @@ export default function DerivativesPage() {
                       <td>{eur(c.avg_total_eur)}</td>
                       <td>{eur(c.threshold_eur)}</td>
                       <td>{pct(c.pct_of_threshold)}</td>
-                      <td><VerdictChip v={c.verdict} /></td>
+                      <td><VerdictChip v={c.verdict} reason={data.clearing_obligation?.reason} /></td>
                     </tr>
                     {open[c.class] && c.months.map((m) => (
                       <tr key={m.month}>
@@ -196,7 +210,11 @@ export default function DerivativesPage() {
               Middle-office facts the tool cannot derive: confirmation follow-up, portfolio
               reconciliation and disputes. One record per calendar month, reviewed in the risk committee.
             </p>
-            <KpiForm pid={portfolio.id} onSaved={emir.reload} />
+            {data.kpis_status?.status === "unavailable" ? (
+              <Unavailable reason={data.kpis_status.reason} />
+            ) : (
+              <KpiForm pid={portfolio.id} onSaved={emir.reload} />
+            )}
             {(data.kpis ?? []).length > 0 && (
               <table className="tbl">
                 <thead>

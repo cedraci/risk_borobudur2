@@ -137,6 +137,10 @@ portfolio's settings screen:
   same horizon.
 - If the shareholder register is more than 90 days old, a warning states
   "Shareholder register is stale (as of \<date\>)."
+- If your access does not include the shareholder register, this line shows a
+  grey N/A naming the missing permission instead. A denied register otherwise
+  looks exactly like an empty one — no holders, nothing stale — so the notice
+  is the only thing that tells the two apart here.
 
 ### Liquidity profile chart
 

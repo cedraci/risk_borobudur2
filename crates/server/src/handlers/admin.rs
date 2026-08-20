@@ -258,7 +258,8 @@ pub struct EnrolBody {
 /// user still carrying `UNUSABLE_PASSWORD_HASH`, i.e. one that has never
 /// completed enrolment.
 pub async fn enrol(
-    State(st): State<AppState>, Json(b): Json<EnrolBody>,
+    State(st): State<AppState>, Extension(addr): Extension<crate::auth::middleware::ClientAddr>,
+    Json(b): Json<EnrolBody>,
 ) -> Result<StatusCode, AppError> {
     if b.password.is_empty() {
         return Err(AppError::Unprocessable("password must not be empty".into()));
@@ -288,6 +289,7 @@ pub async fn enrol(
         display_name: user.display_name.clone(),
         is_administrator: user.is_administrator,
         grants: db::auth::GrantSet::default(),
+        source_addr: addr.0,
     };
     audit::record(&st, &ctx, "enrolled", None, None, serde_json::json!({"email": user.email})).await;
     Ok(StatusCode::NO_CONTENT)

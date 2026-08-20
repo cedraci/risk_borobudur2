@@ -12,19 +12,18 @@ async fn codes_roundtrip_and_uniqueness() {
 
     // Borobudur is portfolio 1 (seeded by 0008); create a second portfolio.
     let global_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
-    let global_view = scoped.authorize_global::<Reference, View>().unwrap();
     let p2 = scoped.portfolio_create(&global_configure, "Mandat A", "mandate").await.unwrap();
 
     let configure1 = scoped.authorize::<Reference, Configure>(1).unwrap();
     let view1 = scoped.authorize::<Reference, View>(1).unwrap();
 
     scoped.portfolio_codes_replace(&configure1, &[("caceis".into(), "165878".into())]).await.unwrap();
-    assert_eq!(scoped.portfolio_by_code(&global_view, "caceis", "165878").await.unwrap(), Some(1));
-    assert_eq!(scoped.portfolio_by_code(&global_view, "caceis", "999999").await.unwrap(), None);
+    assert_eq!(scoped.portfolio_by_code("caceis", "165878").await.unwrap(), Some(1));
+    assert_eq!(scoped.portfolio_by_code("caceis", "999999").await.unwrap(), None);
 
     // Replace removes what the new set omits.
     scoped.portfolio_codes_replace(&configure1, &[("caceis".into(), "111111".into())]).await.unwrap();
-    assert_eq!(scoped.portfolio_by_code(&global_view, "caceis", "165878").await.unwrap(), None);
+    assert_eq!(scoped.portfolio_by_code("caceis", "165878").await.unwrap(), None);
     let codes = scoped.portfolio_codes_for(&view1).await.unwrap();
     assert_eq!(codes.len(), 1);
     assert_eq!(codes[0].code, "111111");

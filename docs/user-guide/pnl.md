@@ -100,7 +100,9 @@ A portfolio whose positions are imported from the CACEIS CSV feed does not curre
 journal loaded into the system. Without trade history, the page cannot separate realized from
 unrealized P&L or attribute currency effects the way it does for a portfolio with a full journal —
 every instrument in such a portfolio is treated as having no trades, so its entire period movement
-shows as unrealized price/FX change, with no realized figure. See
+shows as unrealized price/FX change, with no realized figure. (This is different from *not being
+permitted* to see the journal, where the split is blanked instead — see the warnings section below.
+Here the journal genuinely does not exist, and what the page shows is the truth about the data.) See
 [Data import](data.md) for more on what each import source provides.
 
 ## Grouping dimensions
@@ -165,7 +167,11 @@ stopping the page from showing what it can compute. Warnings that can appear inc
 
 - **Trade history denied or unavailable** — if you do not have access to transaction data for this
   portfolio, trade-level P&L attribution cannot be computed and the reconciliation's residual may be
-  distorted. See [Access rights](access-rights.md).
+  distorted. The Realized and Unrealized columns are then blanked rather than filled in: with no
+  journal, every instrument would otherwise compute a realized figure of exactly zero, which reads
+  as "this book traded nothing" instead of "this could not be attributed". Total and "of which FX"
+  remain, because neither depends on the journal. A grey N/A notice above the table names the
+  missing permission. See [Access rights](access-rights.md).
 - **Unrecognized trade side** — a trade record had a side value that wasn't recognized as a buy or
   sell, so it was ignored.
 - **Sells exceed recorded buys** — the trade history for an instrument shows more shares sold than
@@ -182,5 +188,5 @@ the page — transactions/trade history, reference data (classifications), marke
 NAV history — and each of these degrades independently and gracefully rather than blocking the
 page: if you lack access to one of them, the page still renders with whatever it can compute from
 the rest, and calls out the gap through the warnings described above (most visibly for trade
-history, since it drives the realized/unrealized split). See [Access rights](access-rights.md) for
-details on how permissions are structured.
+history, which both blanks the realized/unrealized columns and posts a grey N/A notice above the
+table). See [Access rights](access-rights.md) for details on how permissions are structured.

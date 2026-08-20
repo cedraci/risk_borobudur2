@@ -323,6 +323,30 @@ async fn pnl_marks_transaction_detail_unavailable_when_transactions_are_denied()
         "{body}"
     );
 
+    // Finding P1: the marker is not enough on its own. With no trade journal
+    // every instrument's realized P&L computes to exactly 0.0 and unrealized
+    // absorbs the period, so a rendered split states "this book traded
+    // nothing" — a stronger and more wrong claim than "not permitted". The
+    // split must be null, group and instrument alike; `total` and `fx`
+    // survive because neither depends on the journal.
+    let groups = body["groups"].as_array().unwrap();
+    assert!(!groups.is_empty(), "the fixture must produce at least one group: {body}");
+    for g in groups {
+        for k in ["realized", "unrealized", "realized_price", "unrealized_price",
+                  "realized_fx", "unrealized_fx"] {
+            assert!(g[k].is_null(), "group {k} must be null when transactions are denied: {body}");
+        }
+        assert!(g["total"].is_f64(), "group total must survive the denial: {body}");
+        assert!(g["fx"].is_f64(), "group fx must survive the denial: {body}");
+        for i in g["instruments"].as_array().unwrap() {
+            for k in ["realized_price", "unrealized_price", "realized_fx", "unrealized_fx"] {
+                assert!(i[k].is_null(), "instrument {k} must be null when transactions are denied: {body}");
+            }
+            assert!(i["total"].is_f64(), "instrument total must survive the denial: {body}");
+            assert!(i["fx"].is_f64(), "instrument fx must survive the denial: {body}");
+        }
+    }
+
     pool.close().await;
     edb.stop().await;
 }
