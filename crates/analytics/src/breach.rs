@@ -74,6 +74,91 @@ pub fn transitions(live: &[LiveEpisode], findings: &[Finding]) -> Vec<Transition
     out
 }
 
+/// One instrument belonging to a breaching subject, at one snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectHolding {
+    pub isin: String,
+    pub quantity: Option<f64>,
+}
+
+/// What the machine thinks caused a breach, and why. `classification` is
+/// `None` when the data cannot support a suggestion — never a guess.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Proposal {
+    pub classification: Option<&'static str>,
+    pub reason: String,
+}
+
+/// Quantities below this are treated as equal: position files carry rounding,
+/// and a 1e-9 drift is not a purchase.
+const QTY_EPSILON: f64 = 1e-6;
+
+/// Proposes `active` or `passive` for a breach of `subject`, from the change
+/// in its holdings between the previous snapshot and this one.
+///
+/// Deliberately derived from positions rather than the trade journal:
+/// CACEIS-fed portfolios have no journal at all, and a classification that
+/// silently skips those funds is worse than one that works everywhere and
+/// asks a person to confirm it. Nothing here decides anything — the caller
+/// stores this as a *proposal* and a reviewer confirms or overrides it.
+pub fn propose(
+    subject: &str,
+    prev: Option<&[SubjectHolding]>,
+    now: &[SubjectHolding],
+    prev_weight: Option<f64>,
+    now_weight: Option<f64>,
+) -> Proposal {
+    let Some(prev) = prev else {
+        return Proposal {
+            classification: None,
+            reason: "first snapshot for this portfolio; no prior position to compare".to_string(),
+        };
+    };
+    if prev.is_empty() && now.is_empty() {
+        return Proposal {
+            classification: None,
+            reason: format!("{subject} has no instrument holdings; not derived from positions"),
+        };
+    }
+    let before: std::collections::HashMap<&str, f64> = prev.iter()
+        .map(|h| (h.isin.as_str(), h.quantity.unwrap_or(0.0)))
+        .collect();
+    let bought = now.iter().find(|h| {
+        let was = before.get(h.isin.as_str()).copied().unwrap_or(0.0);
+        h.quantity.unwrap_or(0.0) > was + QTY_EPSILON
+    });
+    match bought {
+        Some(h) => {
+            let was = before.get(h.isin.as_str()).copied().unwrap_or(0.0);
+            Proposal {
+                classification: Some("active"),
+                reason: format!(
+                    "quantity of {} rose from {} to {} since the previous snapshot",
+                    h.isin, trim(was), trim(h.quantity.unwrap_or(0.0))),
+            }
+        }
+        None => Proposal {
+            classification: Some("passive"),
+            reason: format!(
+                "no purchase in {subject} since the previous snapshot; weight moved from {} to {}",
+                pct(prev_weight), pct(now_weight)),
+        },
+    }
+}
+
+fn pct(x: Option<f64>) -> String {
+    match x {
+        Some(v) => format!("{:.2}%", v * 100.0),
+        None => "an unknown weight".to_string(),
+    }
+}
+
+/// Quantities are whole units far more often than not; render them without a
+/// trailing ".00" so the reason reads like something a person wrote.
+fn trim(x: f64) -> String {
+    if (x - x.round()).abs() < QTY_EPSILON { format!("{}", x.round() as i64) } else { format!("{x:.4}") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +244,49 @@ mod tests {
             check_key: "liq_top5".into(), subject: "Top 5 holders".into(), value: None,
         }]);
         assert!(t.is_empty(), "valueless finding should not produce any transitions, got {t:?}");
+    }
+
+    fn hold(isin: &str, q: f64) -> SubjectHolding {
+        SubjectHolding { isin: isin.into(), quantity: Some(q) }
+    }
+
+    #[test]
+    fn no_purchase_proposes_passive_and_says_how_the_weight_moved() {
+        let p = propose("ACME", Some(&[hold("X1", 100.0)]), &[hold("X1", 100.0)],
+                        Some(0.094), Some(0.106));
+        assert_eq!(p.classification, Some("passive"));
+        assert!(p.reason.contains("no purchase in ACME"), "{}", p.reason);
+        assert!(p.reason.contains("9.40%") && p.reason.contains("10.60%"), "{}", p.reason);
+    }
+
+    #[test]
+    fn an_increased_quantity_proposes_active_and_names_the_instrument() {
+        let p = propose("ACME", Some(&[hold("X1", 100.0)]), &[hold("X1", 180.0)],
+                        Some(0.094), Some(0.106));
+        assert_eq!(p.classification, Some("active"));
+        assert!(p.reason.contains("X1"), "{}", p.reason);
+        assert!(p.reason.contains("100") && p.reason.contains("180"), "{}", p.reason);
+    }
+
+    #[test]
+    fn an_instrument_that_is_new_this_snapshot_is_a_purchase() {
+        let p = propose("ACME", Some(&[]), &[hold("X2", 50.0)], Some(0.0), Some(0.11));
+        assert_eq!(p.classification, Some("active"));
+        assert!(p.reason.contains("X2"), "{}", p.reason);
+    }
+
+    #[test]
+    fn with_no_previous_snapshot_nothing_is_proposed() {
+        let p = propose("ACME", None, &[hold("X1", 100.0)], None, Some(0.106));
+        assert_eq!(p.classification, None);
+        assert!(p.reason.contains("no prior position to compare"), "{}", p.reason);
+    }
+
+    #[test]
+    fn a_subject_with_no_holdings_at_all_proposes_nothing() {
+        // Liquidity, VaR and EMIR episodes have no issuer subject.
+        let p = propose("Top 5 holders", Some(&[]), &[], None, None);
+        assert_eq!(p.classification, None);
+        assert!(p.reason.contains("not derived from positions"), "{}", p.reason);
     }
 }
