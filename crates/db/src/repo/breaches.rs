@@ -9,6 +9,7 @@
 use crate::auth::marker::{Configure, Settings, View};
 use crate::auth::Access;
 use crate::scoped::Scoped;
+use analytics::breach::{LiveEpisode, Proposal, Transition};
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -134,5 +135,189 @@ impl Scoped<'_> {
             out.push((run, results));
         }
         Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BreachRow {
+    pub id: i64,
+    pub check_key: String,
+    pub subject: String,
+    pub opened_nav_date: NaiveDate,
+    pub opened_value: Option<f64>,
+    pub peak_value: Option<f64>,
+    pub peak_nav_date: Option<NaiveDate>,
+    pub closed_nav_date: Option<NaiveDate>,
+    pub state: String,
+    pub classification: String,
+    pub proposed_classification: Option<String>,
+    pub proposal_reason: Option<String>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledgement_note: Option<String>,
+    pub deadline_date: Option<NaiveDate>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolution_note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BreachEventRow {
+    pub at: DateTime<Utc>,
+    pub actor_label: String,
+    pub event: String,
+    pub detail: serde_json::Value,
+}
+
+const BREACH_COLUMNS: &str =
+    "id, check_key, subject, opened_nav_date, opened_value, peak_value, peak_nav_date, \
+     closed_nav_date, state, classification, proposed_classification, proposal_reason, \
+     acknowledged_at, acknowledgement_note, deadline_date, resolved_at, resolution_note";
+
+fn breach_from_row(r: &sqlx::postgres::PgRow) -> BreachRow {
+    BreachRow {
+        id: r.get("id"),
+        check_key: r.get("check_key"),
+        subject: r.get("subject"),
+        opened_nav_date: r.get("opened_nav_date"),
+        opened_value: r.get("opened_value"),
+        peak_value: r.get("peak_value"),
+        peak_nav_date: r.get("peak_nav_date"),
+        closed_nav_date: r.get("closed_nav_date"),
+        state: r.get("state"),
+        classification: r.get("classification"),
+        proposed_classification: r.get("proposed_classification"),
+        proposal_reason: r.get("proposal_reason"),
+        acknowledged_at: r.get("acknowledged_at"),
+        acknowledgement_note: r.get("acknowledgement_note"),
+        deadline_date: r.get("deadline_date"),
+        resolved_at: r.get("resolved_at"),
+        resolution_note: r.get("resolution_note"),
+    }
+}
+
+impl Scoped<'_> {
+    /// Episodes still in breach on the data. This is what the next run's
+    /// transitions are computed against.
+    pub async fn live_episodes(
+        &self, a: &Access<Settings, View>,
+    ) -> anyhow::Result<Vec<LiveEpisode>> {
+        Ok(sqlx::query(
+            "SELECT id, check_key, subject, peak_value FROM limit_breaches
+             WHERE portfolio_id = $1 AND closed_nav_date IS NULL AND state <> 'resolved'
+             ORDER BY id")
+            .bind(a.portfolio_id()).fetch_all(self.pool).await?
+            .iter().map(|r| LiveEpisode {
+                id: r.get("id"),
+                check_key: r.get("check_key"),
+                subject: r.get("subject"),
+                peak_value: r.get("peak_value"),
+            }).collect())
+    }
+
+    /// Applies one run's transitions and writes the matching timeline events,
+    /// in a single transaction: an episode without its `opened` event would be
+    /// a record with no provenance.
+    pub async fn apply_transitions(
+        &self, a: &Access<Settings, Configure>, run_id: i64, nav_date: NaiveDate,
+        actor_label: &str, actor_user_id: Option<i64>,
+        transitions: &[Transition], proposals: &HashMap<String, Proposal>,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for t in transitions {
+            match t {
+                Transition::Open { check_key, subject, value } => {
+                    let p = proposals.get(&format!("{check_key}\u{1f}{subject}"));
+                    let breach_id: i64 = sqlx::query_scalar(
+                        "INSERT INTO limit_breaches
+                             (portfolio_id, check_key, subject, opened_run_id, opened_nav_date,
+                              opened_value, peak_value, peak_nav_date,
+                              proposed_classification, proposal_reason)
+                         VALUES ($1,$2,$3,$4,$5,$6,$6,$5,$7,$8) RETURNING id")
+                        .bind(a.portfolio_id()).bind(check_key).bind(subject)
+                        .bind(run_id).bind(nav_date).bind(value)
+                        .bind(p.and_then(|p| p.classification))
+                        .bind(p.map(|p| p.reason.as_str()))
+                        .fetch_one(&mut *tx).await?;
+                    sqlx::query(
+                        "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
+                         VALUES ($1,$2,$3,'opened',$4)")
+                        .bind(breach_id).bind(actor_user_id).bind(actor_label)
+                        .bind(serde_json::json!({
+                            "nav_date": nav_date, "value": value,
+                            "proposed": p.and_then(|p| p.classification),
+                            "reason": p.map(|p| p.reason.clone()),
+                        }))
+                        .execute(&mut *tx).await?;
+                }
+                Transition::RaisePeak { id, value } => {
+                    sqlx::query(
+                        "UPDATE limit_breaches SET peak_value = $2, peak_nav_date = $3 WHERE id = $1")
+                        .bind(id).bind(value).bind(nav_date).execute(&mut *tx).await?;
+                    sqlx::query(
+                        "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
+                         VALUES ($1,$2,$3,'note',$4)")
+                        .bind(id).bind(actor_user_id).bind(actor_label)
+                        .bind(serde_json::json!({"peak_value": value, "nav_date": nav_date}))
+                        .execute(&mut *tx).await?;
+                }
+                Transition::Close { id } => {
+                    sqlx::query(
+                        "UPDATE limit_breaches SET closed_run_id = $2, closed_nav_date = $3 WHERE id = $1")
+                        .bind(id).bind(run_id).bind(nav_date).execute(&mut *tx).await?;
+                    sqlx::query(
+                        "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
+                         VALUES ($1,$2,$3,'cleared',$4)")
+                        .bind(id).bind(actor_user_id).bind(actor_label)
+                        .bind(serde_json::json!({"nav_date": nav_date}))
+                        .execute(&mut *tx).await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The register. `state` filters; `None` returns everything, newest first.
+    pub async fn breaches_for(
+        &self, a: &Access<Settings, View>, state: Option<&str>,
+    ) -> anyhow::Result<Vec<BreachRow>> {
+        let sql = format!(
+            "SELECT {BREACH_COLUMNS} FROM limit_breaches
+             WHERE portfolio_id = $1 AND ($2::text IS NULL OR state = $2)
+             ORDER BY opened_nav_date DESC, id DESC");
+        Ok(sqlx::query(&sql).bind(a.portfolio_id()).bind(state)
+            .fetch_all(self.pool).await?
+            .iter().map(breach_from_row).collect())
+    }
+
+    /// One episode, or `None` when it belongs to another portfolio — the
+    /// `portfolio_id` predicate is what stops an id from one fund being read
+    /// through another fund's grant.
+    pub async fn breach_get(
+        &self, a: &Access<Settings, View>, breach_id: i64,
+    ) -> anyhow::Result<Option<BreachRow>> {
+        let sql = format!(
+            "SELECT {BREACH_COLUMNS} FROM limit_breaches WHERE id = $1 AND portfolio_id = $2");
+        Ok(sqlx::query(&sql).bind(breach_id).bind(a.portfolio_id())
+            .fetch_optional(self.pool).await?
+            .as_ref().map(breach_from_row))
+    }
+
+    pub async fn breach_events(
+        &self, a: &Access<Settings, View>, breach_id: i64,
+    ) -> anyhow::Result<Vec<BreachEventRow>> {
+        Ok(sqlx::query(
+            "SELECT e.at, e.actor_label, e.event, e.detail
+             FROM limit_breach_events e
+             JOIN limit_breaches b ON b.id = e.breach_id
+             WHERE e.breach_id = $1 AND b.portfolio_id = $2
+             ORDER BY e.at, e.id")
+            .bind(breach_id).bind(a.portfolio_id())
+            .fetch_all(self.pool).await?
+            .iter().map(|r| BreachEventRow {
+                at: r.get("at"),
+                actor_label: r.get("actor_label"),
+                event: r.get("event"),
+                detail: r.get("detail"),
+            }).collect())
     }
 }
