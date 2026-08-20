@@ -78,6 +78,23 @@ impl Scoped<'_> {
         Ok(run_id)
     }
 
+    /// The most recent snapshot date strictly before `before`, or `None` —
+    /// what a proposal compares this run's holdings against. Mirrors
+    /// `import_batch`'s token-mismatch guard: `pid` travelling separately
+    /// from the token must not silently name a different portfolio.
+    pub async fn position_dates_before(
+        &self, a: &Access<Settings, View>, pid: i64, before: NaiveDate,
+    ) -> anyhow::Result<Option<NaiveDate>> {
+        anyhow::ensure!(pid == a.portfolio_id(),
+            "position_dates_before: pid {pid} does not match the token's portfolio {}",
+            a.portfolio_id());
+        Ok(sqlx::query_scalar(
+            "SELECT MAX(nav_date) FROM position_snapshots
+             WHERE portfolio_id = $1 AND nav_date < $2")
+            .bind(a.portfolio_id()).bind(before)
+            .fetch_one(self.pool).await?)
+    }
+
     /// Newest run first, each with its results. `limit` is clamped by the
     /// caller; the register page asks for a page at a time.
     pub async fn runs_for(

@@ -204,4 +204,22 @@ impl AuthCtx {
             source_addr: None,
         }
     }
+
+    /// The context a *recorded* computation runs under.
+    ///
+    /// The breach register is the fund's compliance record, not a transcript
+    /// of what one user could see: a run computed on fallback issuer groups
+    /// because the importer lacked reference access would be a denial
+    /// rendering as data, persisted. Constructed only by
+    /// `server::recorder`; it never reaches a request handler, and it writes
+    /// nothing a principal with full grants could not have computed.
+    pub fn system() -> Self {
+        AuthCtx {
+            principal_id: 0,
+            display_name: "system".to_string(),
+            is_administrator: false,
+            grants: GrantSet::all_access(),
+            source_addr: None,
+        }
+    }
 }

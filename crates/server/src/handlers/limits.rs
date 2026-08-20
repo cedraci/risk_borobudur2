@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::state::AppState;
-use analytics::{concentration, default_issuer_group, ConPosition};
+use analytics::{concentration, ConPosition};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Json};
 use chrono::NaiveDate;
@@ -44,7 +44,7 @@ async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q:
     Ok((dates, date, rows, refs))
 }
 
-fn ref_map(refs: &[db::repo::InstrumentRef]) -> HashMap<&str, &db::repo::InstrumentRef> {
+pub(crate) fn ref_map(refs: &[db::repo::InstrumentRef]) -> HashMap<&str, &db::repo::InstrumentRef> {
     refs.iter().map(|r| (r.code.as_str(), r)).collect()
 }
 
@@ -56,19 +56,10 @@ pub async fn concentration_h(
     super::portfolios::ensure(&scoped, pid, false).await?;
     let (dates, date, rows, refs) = snapshot(&scoped, &a, &q).await?;
     let by = ref_map(&refs);
-    let cons: Vec<ConPosition> = rows.iter().filter_map(|p| {
-        let w = p.weight?;
-        let name = p.name.clone().unwrap_or_default();
-        // fund_20 is per target fund: overrides don't regroup Fonds rows
-        let group = if p.asset_type == "Fonds" {
-            default_issuer_group(&p.asset_type, &name)
-        } else {
-            by.get(p.isin.as_str())
-                .and_then(|r| r.issuer_group.clone())
-                .unwrap_or_else(|| default_issuer_group(&p.asset_type, &name))
-        };
-        Some(ConPosition { asset_type: p.asset_type.clone(), group, weight: w })
-    }).collect();
+    // The grouping rule lives in `breaches::subject_group` (via
+    // `con_positions`), shared with the recorder: the grouping a check is
+    // computed on must be the grouping the register records.
+    let cons: Vec<ConPosition> = super::breaches::con_positions(&rows, &by);
     // Ruling 2 (Task 9 review, Task 11): a denied Reference read must not
     // silently drop the issuer-group/liquidity overrides that feed the
     // group/fund/deposit checks above — that would hide a real 5/10/40
