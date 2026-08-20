@@ -512,9 +512,11 @@ export const assignRole = (id: number, role: string, scope: number | null) =>
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ role, scope }),
   });
 
-/** The six domains and four actions, in the exact serde spellings from
+/** The seven domains and four actions, in the exact serde spellings from
  * `crates/db/src/auth/model.rs::{Domain,Action}::as_str`. */
-export const ADMIN_DOMAINS = ["positions", "nav", "transactions", "shareholders", "market_data", "reference"] as const;
+export const ADMIN_DOMAINS = [
+  "positions", "nav", "transactions", "shareholders", "market_data", "reference", "settings",
+] as const;
 export const ADMIN_ACTIONS = ["view", "export", "import", "configure"] as const;
 export function domainLabel(d: string): string {
   switch (d) {
@@ -524,6 +526,7 @@ export function domainLabel(d: string): string {
     case "shareholders": return "Shareholder register";
     case "market_data": return "Market data";
     case "reference": return "Reference data";
+    case "settings": return "Portfolio settings";
     default: return d;
   }
 }

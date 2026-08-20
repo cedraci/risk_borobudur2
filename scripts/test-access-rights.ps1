@@ -321,6 +321,26 @@ Check 'renaming B is 403 (configure was A-only)' ($r.Status -eq 403) "got $($r.S
 $r = Invoke-Api -Method POST -Path '/api/portfolios' -Cookie $sub -Body @{ name = "never2-$tag"; kind = 'ucits' }
 Check 'CREATING a portfolio still 403: needs the all-portfolios configure grant' ($r.Status -eq 403) "got $($r.Status)"
 
+# The P10 split: reference/configure is fleet-level bookkeeping (does this
+# portfolio exist, what is it called) and must NOT carry the authority to move
+# the fund's own risk parameters. That is settings/configure, granted separately.
+$r = Invoke-Api -Method GET -Path "/api/portfolios/$pidA/settings" -Cookie $sub
+Check 'reference/configure alone cannot even read the fund settings (403)' ($r.Status -eq 403) "got $($r.Status)"
+$null = Invoke-Api -Method POST -Path "/api/admin/users/$subjectId/grants" -Cookie $adm `
+    -Body (New-Grant 'settings' 'configure' $pidA)
+$r = Invoke-Api -Method GET -Path "/api/portfolios/$pidA/settings" -Cookie $sub
+Check 'settings/configure grants the fund settings (configure implies view)' ($r.Status -eq 200) "got $($r.Status)"
+if ($r.Status -eq 200) {
+    $newSettings = $r.Json
+    $newSettings.var_limit = [math]::Round($r.Json.var_limit / 2, 6)
+    $w = Invoke-Api -Method PUT -Path "/api/portfolios/$pidA/settings" -Cookie $sub -Body $newSettings
+    Check '  ...and allows changing the VaR limit' ($w.Status -eq 200) "got $($w.Status)"
+}
+$r = Invoke-Api -Method GET -Path "/api/portfolios/$pidB/settings" -Cookie $sub
+Check "B's settings stay 403 (settings/configure was A-only)" ($r.Status -eq 403) "got $($r.Status)"
+$null = Invoke-Api -Method DELETE -Path "/api/admin/users/$subjectId/grants" -Cookie $adm `
+    -Body (New-Grant 'settings' 'configure' $pidA)
+
 # ------------------------------------------------------- phase 8: roles
 
 Phase 'Roles: exact bundles, additivity, validation'
@@ -330,15 +350,19 @@ $roleId = (Invoke-Api -Method POST -Path '/api/admin/users' -Cookie $adm `
 $r = Invoke-Api -Method POST -Path "/api/admin/users/$roleId/roles" -Cookie $adm -Body @{ role = 'auditor'; scope = $pidA }
 Check 'auditor role applies (204)' ($r.Status -eq 204) "got $($r.Status)"
 $grants = @((Invoke-Api -Path "/api/admin/users/$roleId/grants" -Cookie $adm).Json)
-Check 'auditor = exactly 6 stored grants, all view, all scoped to A' `
-    ($grants.Count -eq 6 -and @($grants | Where-Object { $_.action -ne 'view' -or $_.portfolio -ne $pidA }).Count -eq 0) `
+# Auditor is "view on every domain", so its size is the domain count itself
+# rather than a number to be edited whenever a domain is added or split.
+$domainCount = $grants.Count
+Check 'auditor = one view grant per domain, all scoped to A' `
+    (@($grants | Where-Object { $_.action -ne 'view' -or $_.portfolio -ne $pidA }).Count -eq 0 -and $domainCount -ge 7) `
     "got $($grants | ConvertTo-Json -Compress)"
 $null = Invoke-Api -Method POST -Path "/api/admin/users/$roleId/roles" -Cookie $adm -Body @{ role = 'operations'; scope = $pidA }
 $grants = @((Invoke-Api -Path "/api/admin/users/$roleId/grants" -Cookie $adm).Json)
 $imports = @($grants | Where-Object action -eq 'import')
-Check 'operations on top is ADDITIVE: auditor views remain, 4 imports appear (10 rows)' `
-    ($grants.Count -eq 10 -and $imports.Count -eq 4 -and @($grants | Where-Object action -eq 'view').Count -eq 6) `
-    "got $($grants.Count) rows, $($imports.Count) imports"
+Check 'operations on top is ADDITIVE: every auditor view remains, 4 imports appear' `
+    ($grants.Count -eq ($domainCount + 4) -and $imports.Count -eq 4 `
+        -and @($grants | Where-Object action -eq 'view').Count -eq $domainCount) `
+    "got $($grants.Count) rows, $($imports.Count) imports, expected $($domainCount + 4) rows"
 $r = Invoke-Api -Method POST -Path "/api/admin/users/$roleId/roles" -Cookie $adm -Body @{ role = 'not_a_role'; scope = $pidA }
 Check 'an unknown role name is 422' ($r.Status -eq 422) "got $($r.Status)"
 $r = Invoke-Api -Method POST -Path "/api/admin/users/$roleId/roles" -Cookie $adm -Body @{ role = 'auditor'; scope = 999999999 }

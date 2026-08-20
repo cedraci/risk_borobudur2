@@ -32,6 +32,10 @@ export const NAV_LINKS: NavSpec[] = [
       // would authorize them (finding P5).
       { domain: "market_data", action: "view" },
       { domain: "market_data", action: "import" },
+      // The settings card, the depositary code mapping and the import ledger
+      // moved to their own domain in the P10 split; the tab that hosts them
+      // has to recognise it (finding P10).
+      { domain: "settings", action: "view" },
     ],
   },
 ];

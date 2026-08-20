@@ -75,3 +75,54 @@ async fn grants_are_removed_when_their_portfolio_is_deleted() {
     assert_eq!(grants, 0, "a grant must not outlive its portfolio");
     edb.stop().await;
 }
+
+/// The P10 split moved per-portfolio configuration out of `reference` and
+/// into its own `settings` domain. Everyone already holding a `reference`
+/// grant was, by construction, holding the settings authority too — so the
+/// migration has to hand them the matching `settings` row, or an upgrade
+/// silently takes the fund's own configuration away from the people who had
+/// it yesterday.
+#[tokio::test]
+async fn the_settings_split_carries_existing_reference_grants_across() {
+    let (pool, edb) = fresh().await;
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO users (email, display_name, password_hash, is_administrator)
+         VALUES ('legacy@b.c', 'Legacy', 'x', false) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+
+    // Simulate a database migrated from before the split: `reference` rows
+    // only, at both scopes, then re-run the back-fill the migration performs.
+    sqlx::query("DELETE FROM grants WHERE user_id = $1").bind(uid).execute(&pool).await.unwrap();
+    for (action, portfolio) in [("view", None), ("configure", Some(1i64))] {
+        sqlx::query("INSERT INTO grants (user_id, domain, action, portfolio_id) VALUES ($1,'reference',$2,$3)")
+            .bind(uid).bind(action).bind(portfolio).execute(&pool).await.unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO grants (user_id, domain, action, portfolio_id)
+         SELECT user_id, 'settings', action, portfolio_id FROM grants WHERE domain = 'reference'
+         ON CONFLICT DO NOTHING")
+        .execute(&pool).await.unwrap();
+
+    let mirrored: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT action, portfolio_id FROM grants WHERE user_id = $1 AND domain = 'settings' ORDER BY action")
+        .bind(uid).fetch_all(&pool).await.unwrap();
+    assert_eq!(mirrored, vec![("configure".to_string(), Some(1)), ("view".to_string(), None)],
+        "every reference grant should have a settings twin after the split");
+
+    edb.stop().await;
+}
+
+/// `grants.domain` is constrained, so a new domain that the constraint does
+/// not know about would be rejected at write time however well the Rust enum
+/// spells it.
+#[tokio::test]
+async fn the_settings_domain_is_accepted_by_the_grants_constraint() {
+    let (pool, edb) = fresh().await;
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO users (email, display_name, password_hash, is_administrator)
+         VALUES ('s@b.c', 'S', 'x', false) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO grants (user_id, domain, action, portfolio_id) VALUES ($1,'settings','configure',NULL)")
+        .bind(uid).execute(&pool).await.expect("the settings domain must be writable");
+    edb.stop().await;
+}

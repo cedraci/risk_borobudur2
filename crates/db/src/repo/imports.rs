@@ -1,4 +1,4 @@
-use crate::auth::marker::{Import, Nav, Positions, Reference, Transactions, View};
+use crate::auth::marker::{Import, Nav, Positions, Settings, Transactions, View};
 use crate::auth::Access;
 use crate::scoped::Scoped;
 use chrono::NaiveDate;
@@ -291,7 +291,7 @@ impl<'a> Scoped<'a> {
         self.import_batch(positions_a, nav, transactions, filename, sha256, &b).await
     }
 
-    pub async fn imports_list(&self, a: &Access<Reference, View>) -> anyhow::Result<Vec<ImportRecord>> {
+    pub async fn imports_list(&self, a: &Access<Settings, View>) -> anyhow::Result<Vec<ImportRecord>> {
         Ok(sqlx::query_as(
             "SELECT id, filename, nav_date, imported_at, row_counts FROM imports
              WHERE portfolio_id = $1 ORDER BY imported_at DESC",

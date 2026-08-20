@@ -2,26 +2,26 @@ use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
-use db::auth::marker::{Configure, Reference, View};
+use db::auth::marker::{Configure, Settings, View};
 use db::auth::{AuthCtx, Domain};
 use db::settings::AppSettings;
 
 pub async fn get(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<AppSettings>, AppError> {
     let scoped = st.db.scope(&ctx);
-    scoped.authorize::<Reference, View>(pid)?;
+    scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
     Ok(Json(scoped.get_settings(pid).await?))
 }
 
 pub async fn put(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Json(s): Json<AppSettings>) -> Result<Json<AppSettings>, AppError> {
     let scoped = st.db.scope(&ctx);
-    scoped.authorize::<Reference, Configure>(pid)?;
+    scoped.authorize::<Settings, Configure>(pid)?;
     super::portfolios::ensure(&scoped, pid, true).await?;
     validate(&s).map_err(AppError::BadRequest)?;
     let before = scoped.get_settings(pid).await?;
     scoped.put_settings(pid, &s).await?;
     let after = scoped.get_settings(pid).await?;
-    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Settings), Some(pid),
         serde_json::json!({"before": before, "after": after})).await;
     Ok(Json(after))
 }

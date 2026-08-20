@@ -45,6 +45,7 @@ pub mod marker {
     domain_marker!(Shareholders, Shareholders);
     domain_marker!(MarketData, MarketData);
     domain_marker!(Reference, Reference);
+    domain_marker!(Settings, Settings);
 
     action_marker!(View, View);
     action_marker!(Export, Export);

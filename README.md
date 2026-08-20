@@ -212,6 +212,11 @@ lists the few remaining UI observations that need human eyes.
     cargo run -p server          # API on :8787
     cd frontend && npm run dev   # UI on :5173, proxies /api
 
+Adding a migration under `crates/db/migrations/`: `sqlx::migrate!` embeds the
+directory at compile time and does not always notice a new file on its own —
+`touch crates/db/src/lib.rs` before rebuilding, or the next test run applies
+the old set and fails somewhere unrelated.
+
 Tests: `cargo test` (embedded-PG tests download binaries on first run),
 `cd frontend && npm test` (UI contract tests — which denial markers render,
 which nav links a grant set unlocks) and `cd frontend && npm run build`

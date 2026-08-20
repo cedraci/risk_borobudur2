@@ -11,13 +11,25 @@ pub enum Domain {
     Transactions,
     Shareholders,
     MarketData,
+    /// Instrument data shared by every portfolio: classifications, issuer
+    /// groups, liquidity overrides, bond statics, futures contract specs, FX
+    /// rates. Fleet-wide by nature — a grant on it is a grant over data that
+    /// belongs to no single fund.
     Reference,
+    /// One portfolio's own configuration: its VaR limit and window, its
+    /// redemption stress and liquidity parameters, its depositary code
+    /// mapping, its monthly EMIR KPI records, its import ledger. Split out of
+    /// `Reference` (finding P10) because the two were never the same
+    /// authority: curating the shared instrument tables is an instance-wide
+    /// act, and moving a fund's VaR limit is emphatically not.
+    Settings,
 }
 
 impl Domain {
-    pub const ALL: [Domain; 6] = [
+    pub const ALL: [Domain; 7] = [
         Domain::Positions, Domain::Nav, Domain::Transactions,
         Domain::Shareholders, Domain::MarketData, Domain::Reference,
+        Domain::Settings,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -28,6 +40,7 @@ impl Domain {
             Domain::Shareholders => "shareholders",
             Domain::MarketData => "market_data",
             Domain::Reference => "reference",
+            Domain::Settings => "settings",
         }
     }
 
@@ -49,6 +62,7 @@ impl Domain {
             Domain::Shareholders => "shareholder register",
             Domain::MarketData => "market data",
             Domain::Reference => "reference data",
+            Domain::Settings => "portfolio settings",
         }
     }
 }
