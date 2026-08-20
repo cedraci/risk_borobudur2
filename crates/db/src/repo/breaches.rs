@@ -11,6 +11,7 @@ use crate::auth::Access;
 use crate::scoped::Scoped;
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::Row;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CheckRunRow {
@@ -88,9 +89,9 @@ impl Scoped<'_> {
              ORDER BY nav_date DESC, run_at DESC LIMIT $2")
             .bind(a.portfolio_id()).bind(limit)
             .fetch_all(self.pool).await?;
-        let mut out = Vec::with_capacity(runs.len());
-        for r in &runs {
-            let run = CheckRunRow {
+        let run_rows: Vec<CheckRunRow> = runs
+            .iter()
+            .map(|r| CheckRunRow {
                 id: r.get("id"),
                 nav_date: r.get("nav_date"),
                 run_at: r.get("run_at"),
@@ -99,19 +100,37 @@ impl Scoped<'_> {
                 actor_user_id: r.get("actor_user_id"),
                 inputs_complete: r.get("inputs_complete"),
                 input_notes: r.get("input_notes"),
-            };
-            let results = sqlx::query(
-                "SELECT check_key, scope_label, limit_value, observed_value, status, detail
-                 FROM limit_check_results WHERE run_id = $1 ORDER BY check_key")
-                .bind(run.id).fetch_all(self.pool).await?
-                .iter().map(|x| CheckResultRow {
+            })
+            .collect();
+
+        // One query for every run's results rather than one per run: the page
+        // asks for up to 500 runs at a time, and a loop here would be up to
+        // 500 extra round-trips. `run_id` groups the single result set back
+        // onto each run in Rust instead.
+        let ids: Vec<i64> = run_rows.iter().map(|r| r.id).collect();
+        let mut by_run: HashMap<i64, Vec<CheckResultRow>> = HashMap::new();
+        if !ids.is_empty() {
+            let result_rows = sqlx::query(
+                "SELECT run_id, check_key, scope_label, limit_value, observed_value, status, detail
+                 FROM limit_check_results WHERE run_id = ANY($1) ORDER BY run_id, check_key")
+                .bind(&ids[..])
+                .fetch_all(self.pool).await?;
+            for x in &result_rows {
+                let run_id: i64 = x.get("run_id");
+                by_run.entry(run_id).or_default().push(CheckResultRow {
                     check_key: x.get("check_key"),
                     scope_label: x.get("scope_label"),
                     limit_value: x.get("limit_value"),
                     observed_value: x.get("observed_value"),
                     status: x.get("status"),
                     detail: x.get("detail"),
-                }).collect();
+                });
+            }
+        }
+
+        let mut out = Vec::with_capacity(run_rows.len());
+        for run in run_rows {
+            let results = by_run.remove(&run.id).unwrap_or_default();
             out.push((run, results));
         }
         Ok(out)

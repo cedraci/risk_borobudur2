@@ -95,3 +95,59 @@ async fn a_result_with_no_natural_scalar_pair_stores_nulls() {
 
     edb.stop().await;
 }
+
+/// `runs_for` fetches all runs' results in one query and groups them back in
+/// Rust (see the comment on `runs_for`). A naive grouping bug — e.g.
+/// attaching the whole result set to every run, or mismatching rows to the
+/// wrong run — would leak one run's results onto the other. Two runs on
+/// different nav dates with disjoint check keys and distinct values makes
+/// that leak visible.
+#[tokio::test]
+async fn each_run_carries_only_its_own_results() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+
+    let run_a = NewRun {
+        nav_date: NaiveDate::from_ymd_opt(2026, 8, 6).unwrap(),
+        triggered_by: "import".into(),
+        import_id: None,
+        actor_user_id: None,
+        inputs_complete: true,
+        input_notes: serde_json::json!({}),
+        results: vec![result("issuer_10", "ok", Some(0.02))],
+    };
+    let run_b = NewRun {
+        nav_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+        triggered_by: "import".into(),
+        import_id: None,
+        actor_user_id: None,
+        inputs_complete: true,
+        input_notes: serde_json::json!({}),
+        results: vec![result("group_20", "breach", Some(0.25))],
+    };
+    scoped.record_run(&configure, &run_a).await.unwrap();
+    scoped.record_run(&configure, &run_b).await.unwrap();
+
+    let rows = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(rows.len(), 2, "two runs recorded");
+
+    // Newest run first: run_b (2026-08-07) before run_a (2026-08-06).
+    let (newest, newest_results) = &rows[0];
+    assert_eq!(newest.nav_date, NaiveDate::from_ymd_opt(2026, 8, 7).unwrap());
+    assert_eq!(newest_results.len(), 1);
+    assert_eq!(newest_results[0].check_key, "group_20");
+    assert_eq!(newest_results[0].status, "breach");
+    assert_eq!(newest_results[0].observed_value, Some(0.25));
+
+    let (oldest, oldest_results) = &rows[1];
+    assert_eq!(oldest.nav_date, NaiveDate::from_ymd_opt(2026, 8, 6).unwrap());
+    assert_eq!(oldest_results.len(), 1);
+    assert_eq!(oldest_results[0].check_key, "issuer_10");
+    assert_eq!(oldest_results[0].status, "ok");
+    assert_eq!(oldest_results[0].observed_value, Some(0.02));
+
+    edb.stop().await;
+}
