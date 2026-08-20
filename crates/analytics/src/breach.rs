@@ -90,7 +90,7 @@ pub struct Proposal {
 }
 
 /// Quantities below this are treated as equal: position files carry rounding,
-/// and a 1e-9 drift is not a purchase.
+/// and a 1e-6 drift is not a purchase.
 const QTY_EPSILON: f64 = 1e-6;
 
 /// Proposes `active` or `passive` for a breach of `subject`, from the change
@@ -120,29 +120,77 @@ pub fn propose(
             reason: format!("{subject} has no instrument holdings; not derived from positions"),
         };
     }
-    let before: std::collections::HashMap<&str, f64> = prev.iter()
-        .map(|h| (h.isin.as_str(), h.quantity.unwrap_or(0.0)))
+
+    // Build map of previous holdings, preserving None quantities: an instrument
+    // with quantity=None is incomparable, not zero.
+    let before: std::collections::HashMap<&str, Option<f64>> = prev.iter()
+        .map(|h| (h.isin.as_str(), h.quantity))
         .collect();
-    let bought = now.iter().find(|h| {
-        let was = before.get(h.isin.as_str()).copied().unwrap_or(0.0);
-        h.quantity.unwrap_or(0.0) > was + QTY_EPSILON
-    });
-    match bought {
-        Some(h) => {
-            let was = before.get(h.isin.as_str()).copied().unwrap_or(0.0);
-            Proposal {
-                classification: Some("active"),
-                reason: format!(
-                    "quantity of {} rose from {} to {} since the previous snapshot",
-                    h.isin, trim(was), trim(h.quantity.unwrap_or(0.0))),
+
+    // Scan all instruments to detect purchases and incomparability. An instrument is
+    // incomparable when the data cannot support a comparison: either side is None.
+    // Priority: if any comparable instrument was bought → active; else if any
+    // incomparable → None (passive claims all were checked); else → passive.
+    let mut bought_h: Option<&SubjectHolding> = None;
+    let mut incomparable_isin = "";
+
+    for h in now {
+        let is_new = !before.contains_key(h.isin.as_str());
+
+        if is_new {
+            // New instrument: comparable by definition (prior quantity is 0).
+            if h.quantity.unwrap_or(0.0) > 0.0 + QTY_EPSILON {
+                bought_h = Some(h);
+            }
+        } else {
+            // Instrument was in prev; check comparability.
+            let prior_qty = before.get(h.isin.as_str()).copied().flatten();
+            let curr_qty = h.quantity;
+
+            if prior_qty.is_none() || curr_qty.is_none() {
+                // Incomparable: one side is unknown.
+                if incomparable_isin.is_empty() {
+                    incomparable_isin = h.isin.as_str();
+                }
+            } else {
+                // Both sides are Some; check if purchased.
+                let was = prior_qty.unwrap();
+                let now_q = curr_qty.unwrap();
+                if now_q > was + QTY_EPSILON {
+                    bought_h = Some(h);
+                }
             }
         }
-        None => Proposal {
-            classification: Some("passive"),
+    }
+
+    // If any comparable instrument was bought, return active immediately.
+    if let Some(h) = bought_h {
+        let was = before.get(h.isin.as_str())
+            .copied()
+            .flatten()
+            .unwrap_or(0.0);
+        return Proposal {
+            classification: Some("active"),
             reason: format!(
-                "no purchase in {subject} since the previous snapshot; weight moved from {} to {}",
-                pct(prev_weight), pct(now_weight)),
-        },
+                "quantity of {} rose from {} to {} since the previous snapshot",
+                h.isin, trim(was), trim(h.quantity.unwrap_or(0.0))),
+        };
+    }
+
+    // No purchase found on comparable instruments. If any incomparable, decline.
+    if !incomparable_isin.is_empty() {
+        return Proposal {
+            classification: None,
+            reason: format!("quantity of {incomparable_isin} is not reported at one of the two snapshots, so a purchase cannot be ruled out"),
+        };
+    }
+
+    // All comparable, none purchased: passive.
+    Proposal {
+        classification: Some("passive"),
+        reason: format!(
+            "no purchase in {subject} since the previous snapshot; weight moved from {} to {}",
+            pct(prev_weight), pct(now_weight)),
     }
 }
 
@@ -288,5 +336,36 @@ mod tests {
         let p = propose("Top 5 holders", Some(&[]), &[], None, None);
         assert_eq!(p.classification, None);
         assert!(p.reason.contains("not derived from positions"), "{}", p.reason);
+    }
+
+    #[test]
+    fn a_none_prior_quantity_with_a_larger_current_makes_it_incomparable() {
+        let p = propose("ACME", Some(&[SubjectHolding { isin: "X1".into(), quantity: None }]),
+                        &[hold("X1", 100.0)],
+                        Some(0.094), Some(0.106));
+        assert_eq!(p.classification, None);
+        assert!(p.reason.contains("X1"), "{}", p.reason);
+    }
+
+    #[test]
+    fn a_none_prior_quantity_on_one_instrument_does_not_mask_a_real_purchase_on_another() {
+        let prev = vec![
+            SubjectHolding { isin: "X1".into(), quantity: None },
+            hold("X2", 50.0),
+        ];
+        let now = vec![
+            SubjectHolding { isin: "X1".into(), quantity: None },
+            hold("X2", 100.0),
+        ];
+        let p = propose("ACME", Some(&prev), &now, Some(0.094), Some(0.106));
+        assert_eq!(p.classification, Some("active"));
+        assert!(p.reason.contains("X2"), "{}", p.reason);
+    }
+
+    #[test]
+    fn a_full_divestment_proposes_passive() {
+        let p = propose("ACME", Some(&[hold("X1", 100.0)]), &[], Some(0.094), Some(0.0));
+        assert_eq!(p.classification, Some("passive"));
+        assert!(p.reason.contains("no purchase"), "{}", p.reason);
     }
 }
