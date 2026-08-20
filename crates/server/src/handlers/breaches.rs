@@ -10,10 +10,12 @@
 //! Task 5 computes concentration only; Task 6 adds liquidity, VaR and EMIR to
 //! `compute`.
 
+use crate::error::AppError;
 use analytics::breach::{Finding, SubjectHolding};
 use analytics::{concentration, default_issuer_group, CheckStatus, ConPosition};
 use chrono::NaiveDate;
-use db::auth::marker::{Positions, Reference, View};
+use db::auth::marker::{Nav, Positions, Reference, Shareholders, View};
+use db::auth::Access;
 use db::repo::CheckResultRow;
 use db::scoped::Scoped;
 use std::collections::HashMap;
@@ -97,28 +99,52 @@ fn group_holdings(
 
 async fn snapshot_grouped(
     scoped: &Scoped<'_>, pid: i64, date: NaiveDate,
-) -> anyhow::Result<(Vec<db::repo::PositionRecord>, Vec<db::repo::InstrumentRef>)> {
+) -> anyhow::Result<(Access<Positions, View>, Vec<db::repo::PositionRecord>, Vec<db::repo::InstrumentRef>)> {
     let a = scoped.authorize::<Positions, View>(pid)
         .map_err(|d| anyhow::anyhow!("system context refused: {d}"))?;
     let rows = scoped.positions_for(&a, date).await?;
     let rv = scoped.authorize_global::<Reference, View>()
         .map_err(|d| anyhow::anyhow!("system context refused: {d}"))?;
     let refs = scoped.refs_all(&rv).await?;
-    Ok((rows, refs))
+    Ok((a, rows, refs))
 }
 
+/// `AppError` has no `Display`/`ToString` impl (it renders straight to an
+/// HTTP response, see `handlers::imports::err_msg`), so a variant reached
+/// from this system-context path — which should never see a `Forbidden` or
+/// user-facing variant — is converted to `anyhow::Error` by hand.
+fn app_error_to_anyhow(e: AppError) -> anyhow::Error {
+    match e {
+        AppError::Internal(e) => e,
+        AppError::Forbidden(d) => anyhow::anyhow!("system context refused: {d}"),
+        _ => anyhow::anyhow!("unexpected error while assembling EMIR classes for the register"),
+    }
+}
+
+/// The scenario keys `liquidity_assembly` returns, paired with the human
+/// label recorded as the row's `scope_label`. This is the ONE mapping from
+/// scenario key to label; `limits::liquidity_h` has no equivalent because
+/// its scenarios are addressed by `key` in JSON, never rendered as a
+/// standalone label.
+const LIQUIDITY_LABELS: [(&str, &str); 4] = [
+    ("top5", "Top 5 holders"),
+    ("fixed", "Fixed shock"),
+    ("hybrid_top5", "Top 5 holders, stressed ADV"),
+    ("hybrid_fixed", "Fixed shock, stressed ADV"),
+];
+
 /// Computes the checks for one portfolio at one date, as rows to record.
-/// Concentration only in this task; Task 6 adds the rest.
 pub async fn compute(
     scoped: &Scoped<'_>, pid: i64, nav_date: NaiveDate,
 ) -> anyhow::Result<ComputedRun> {
-    let (rows, refs) = snapshot_grouped(scoped, pid, nav_date).await?;
+    let (pos_access, rows, refs) = snapshot_grouped(scoped, pid, nav_date).await?;
     let by = super::limits::ref_map(&refs);
     let cons = con_positions(&rows, &by);
     let checks = concentration(&cons);
 
     let mut results = Vec::with_capacity(checks.len());
     let mut findings = Vec::new();
+    let mut input_notes = serde_json::Map::new();
     for c in &checks {
         // Rows come sorted descending by weight, but take the max explicitly:
         // the register must not depend on a presentation ordering.
@@ -143,13 +169,163 @@ pub async fn compute(
         }
     }
 
+    let settings = scoped.get_settings(pid).await?;
+
+    // ---- Liquidity: the same scenario assembly `limits::liquidity_h` uses.
+    // Shareholders and Nav are read under the system context, so a missing
+    // register or NAV row here is always a genuinely absent input, never a
+    // permission gap (see `ComputedRun::input_notes`).
+    let sh_access = scoped.authorize::<Shareholders, View>(pid)
+        .map_err(|d| anyhow::anyhow!("system context refused: {d}"))?;
+    let register = scoped.shareholders_for(&sh_access).await?;
+
+    let nav_access = scoped.authorize::<Nav, View>(pid)
+        .map_err(|d| anyhow::anyhow!("system context refused: {d}"))?;
+    let nav_rows = scoped.nav_rows(&nav_access).await?;
+    // The position snapshot's own date does not always have a matching NAV
+    // row (the depositary's NAV history can lag a snapshot by a business
+    // day) — the register uses the latest NAV known at or before the
+    // snapshot date rather than requiring an exact match, so a routine
+    // one-day lag does not blank out every liquidity scenario on every run.
+    let liquidity_nav = nav_rows.iter().rev().find(|r| r.date <= nav_date).map(|r| (r.date, r.aum));
+
+    match liquidity_nav {
+        Some((nav_basis_date, nav)) => {
+            // An empty register is an ABSENT input, not a 0% redemption
+            // requirement: "if the five largest investors all redeemed at
+            // once, could the fund meet it?" has no honest answer when
+            // nobody has loaded who the largest investors are. Recording
+            // `status: "ok"` here would state that a redemption stress test
+            // passed when it was never run — the design doc names exactly
+            // this ("no shareholder register loaded") as the worked example
+            // of a genuinely absent input, distinct from a denial. `None`
+            // routes `top5`/`hybrid_top5` through the skip+note path below,
+            // same as any other check that could not be evaluated.
+            let top5_required_pct = (!register.is_empty()).then_some(
+                register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0);
+            let assembly = super::limits::liquidity_assembly(&super::limits::LiquidityScenarioInputs {
+                rows: &rows, by: &by, settings: &settings, asof: nav_date, nav,
+                register: &register, top5_required_pct,
+                top5_unavailable_reason: "no shareholder register",
+            });
+            for v in &assembly.scenarios {
+                let key = v["key"].as_str().unwrap_or_default();
+                let label = LIQUIDITY_LABELS.iter().find(|(k, _)| *k == key).map(|(_, l)| *l).unwrap_or(key);
+                let check_key = format!("liq_{key}");
+                // The DB's `limit_check_results.status` CHECK constraint only
+                // allows ok/watch/breach — "unavailable" (a scenario the
+                // register could not evaluate, e.g. an empty shareholder
+                // register) cannot be stored as a row at all. Recording it
+                // with a fabricated "ok" would be exactly the false pass this
+                // whole feature exists to prevent, so it is omitted from
+                // `results` and named in `input_notes` instead.
+                if v["status"].as_str() == Some("unavailable") {
+                    let reason = v["reason"].as_str().unwrap_or("unavailable").to_string();
+                    input_notes.insert(check_key, reason.into());
+                    continue;
+                }
+                let status = v["status"].as_str().unwrap_or("ok").to_string();
+                if status == "breach" {
+                    findings.push(Finding { check_key: check_key.clone(), subject: label.to_string(), value: None });
+                }
+                // The register's NAV lookup is at-or-before `nav_date`, not
+                // an exact match (see `liquidity_nav` above) — `nav_basis_date`
+                // records which NAV date the waterfall actually used, so a
+                // later reader is never left to infer it.
+                let mut detail = v.clone();
+                detail["nav_basis_date"] = serde_json::json!(nav_basis_date);
+                results.push(CheckResultRow {
+                    check_key,
+                    scope_label: label.to_string(),
+                    // No honest scalar pair: a liquidity verdict comes from a
+                    // waterfall over several days, not a single limit/observed
+                    // pair (see `detail` instead).
+                    limit_value: None,
+                    observed_value: None,
+                    status,
+                    detail,
+                });
+            }
+        }
+        None => {
+            input_notes.insert("liquidity".into(), "no NAV data at or before this date".into());
+        }
+    }
+
+    // ---- VaR: the same NAV-returns math `metrics::var` uses. ----------
+    let nav_points = super::metrics::to_points(&nav_rows);
+    let rets: Vec<f64> = analytics::daily_returns(&nav_points).iter().map(|p| p.value).collect();
+    let aum = nav_rows.last().map(|r| r.aum);
+    let mut var_warnings = Vec::new();
+    let var_result = super::metrics::var_block(
+        &rets, settings.var_confidence, settings.var_horizon_days,
+        settings.var_window_days, settings.var_limit, aum, &mut var_warnings,
+    );
+    match var_result.and_then(|b| b.historical.map(|h| (b, h))) {
+        Some((block, hist)) => {
+            let observed = hist.var;
+            let limit = settings.var_limit;
+            let status = if observed > limit { "breach" }
+                else if observed >= 0.8 * limit { "watch" }
+                else { "ok" };
+            if status == "breach" {
+                findings.push(Finding { check_key: "var_limit".into(), subject: "Historical VaR".into(), value: Some(observed) });
+            }
+            results.push(CheckResultRow {
+                check_key: "var_limit".into(),
+                scope_label: "Historical VaR".into(),
+                limit_value: Some(limit),
+                observed_value: Some(observed),
+                status: status.to_string(),
+                detail: serde_json::to_value(&block)?,
+            });
+        }
+        None => {
+            // Too little NAV history to compute a VaR at all — never
+            // recorded as a passing "ok".
+            input_notes.insert("var_limit".into(), "too little price history for VaR".into());
+        }
+    }
+
+    // ---- EMIR: the same 12-month threshold assembly `emir::get` uses. -
+    let emir_assembly = super::emir::assemble(scoped, &pos_access, pid, &Some(nav_date.to_string()))
+        .await
+        .map_err(app_error_to_anyhow)?;
+    match emir_assembly {
+        Some(a) => {
+            for c in &a.report.classes {
+                let class_key = serde_json::to_value(c.class)?.as_str().unwrap_or("other").to_string();
+                let check_key = format!("emir_{class_key}");
+                let status = c.verdict.as_str().to_string();
+                if status == "breach" {
+                    findings.push(Finding {
+                        check_key: check_key.clone(),
+                        subject: c.label.to_string(),
+                        value: Some(c.avg_otc_eur),
+                    });
+                }
+                results.push(CheckResultRow {
+                    check_key,
+                    scope_label: c.label.to_string(),
+                    limit_value: Some(c.threshold_eur),
+                    observed_value: Some(c.avg_otc_eur),
+                    status,
+                    detail: serde_json::to_value(c)?,
+                });
+            }
+        }
+        None => {
+            input_notes.insert("emir".into(), "no position snapshot to compute EMIR thresholds against".into());
+        }
+    }
+
     let (holdings, weights) = group_holdings(&rows, &by);
     Ok(ComputedRun {
         results,
         findings,
         holdings,
         weights,
-        input_notes: serde_json::Map::new(),
+        input_notes,
     })
 }
 
@@ -161,7 +337,7 @@ pub async fn holdings_at(
     HashMap<String, Vec<SubjectHolding>>,
     HashMap<String, f64>,
 )> {
-    let (rows, refs) = snapshot_grouped(scoped, pid, date).await?;
+    let (_pos_access, rows, refs) = snapshot_grouped(scoped, pid, date).await?;
     let by = super::limits::ref_map(&refs);
     Ok(group_holdings(&rows, &by))
 }

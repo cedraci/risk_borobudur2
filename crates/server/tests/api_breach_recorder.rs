@@ -45,13 +45,27 @@ async fn an_import_records_one_run_per_snapshot_date() {
     let scoped = dbh.scope(&ctx);
     let view = scoped.authorize::<Settings, View>(1).unwrap();
     let runs = scoped.runs_for(&view, 50).await.unwrap();
-    assert!(!runs.is_empty(), "an import must record a run");
+    // `sample.xlsx` (crates/ingest/tests/fixtures/sample.xlsx) parses to a
+    // single positions snapshot date (`wb.nav_date == 2026-07-24`, asserted
+    // in crates/ingest/tests/parse_sample.rs) — one snapshot date, so exactly
+    // one run, not merely "at least one".
+    assert_eq!(runs.len(), 1,
+        "sample.xlsx has exactly one snapshot date, so one import must record exactly one run: {runs:?}");
     let (run, results) = &runs[0];
     assert_eq!(run.triggered_by, "import");
     assert!(run.import_id.is_some(), "the run must point at the import that caused it");
     assert!(results.iter().any(|r| r.check_key == "issuer_10"),
         "the concentration checks must be recorded: {:?}",
         results.iter().map(|r| &r.check_key).collect::<Vec<_>>());
+
+    // Re-uploading the same file is a duplicate import (same content hash);
+    // it must not double-record the run, or the register's evidence trail
+    // would no longer correspond 1:1 with what was actually imported.
+    let res2 = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res2.status(), StatusCode::OK);
+    let runs_after = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(runs_after.len(), 1,
+        "re-uploading the same file must not record an additional run: {runs_after:?}");
 
     pool.close().await;
     edb.stop().await;
@@ -106,8 +120,20 @@ async fn a_run_uses_the_real_reference_data_even_when_the_importer_cannot_see_it
     let view = scoped.authorize::<Settings, View>(1).unwrap();
     let runs = scoped.runs_for(&view, 50).await.unwrap();
     let (run, results) = &runs[0];
-    assert!(run.inputs_complete,
-        "inputs_complete is about missing data, never about the caller's grants");
+    // The Ops principal cannot read the reference table. That must not show
+    // up as an input problem: the ONLY thing missing from this run is the
+    // shareholder register, which no import loads — never a grant the caller
+    // happened not to have.
+    let notes = run.input_notes.as_object().expect("input_notes is always a JSON object");
+    let noted: Vec<&String> = notes.keys().collect();
+    assert!(noted.iter().all(|k| k.starts_with("liq_")),
+        "a denial must never surface as an absent input: {noted:?}");
+    for (k, v) in notes.iter() {
+        let text = v.as_str().unwrap_or_default().to_lowercase();
+        assert!(!text.contains("permit") && !text.contains("denied")
+                && !text.contains("grant") && !text.contains("access"),
+            "input note {k} reads like a permission problem: {text}");
+    }
     let issuer = results.iter().find(|r| r.check_key == "issuer_10").unwrap();
     assert_ne!(issuer.status, "unavailable",
         "a recorded run must never carry a denial marker: {issuer:?}");
@@ -117,6 +143,56 @@ async fn a_run_uses_the_real_reference_data_even_when_the_importer_cannot_see_it
         "the override must have been applied under the system context, got {groups:?}");
 
     let _ = desktop;
+    pool.close().await;
+    edb.stop().await;
+}
+
+#[tokio::test]
+async fn a_run_covers_every_check_that_has_a_limit() {
+    let (desktop, pool, dbh, edb) = app().await;
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let (run, results) = &scoped.runs_for(&view, 50).await.unwrap()[0];
+    let keys: std::collections::BTreeSet<&str> =
+        results.iter().map(|r| r.check_key.as_str()).collect();
+
+    // Sample.xlsx loads no shareholder register (that's a separate PUT
+    // endpoint), so liq_top5/liq_hybrid_top5 are the two register-dependent
+    // scenarios and are deliberately excluded from this list — see below.
+    for expected in ["issuer_10", "forty", "group_20", "fund_20", "deposit_20",
+                     "liq_fixed", "liq_hybrid_fixed",
+                     "var_limit",
+                     "emir_credit", "emir_equity", "emir_interest_rate", "emir_fx",
+                     "emir_commodity_other"] {
+        assert!(keys.contains(expected), "missing {expected} from a run: {keys:?}");
+    }
+
+    // No shareholder register was loaded, so the top-5 redemption scenarios
+    // could not run. They must be ABSENT and explained — never recorded as a
+    // pass on a stress test that never happened.
+    assert!(!keys.contains("liq_top5") && !keys.contains("liq_hybrid_top5"),
+        "a scenario that could not be evaluated must not be recorded: {keys:?}");
+    let notes = run.input_notes.as_object().expect("input_notes is always a JSON object");
+    assert!(notes.contains_key("liq_top5"),
+        "the skipped scenario must say why it was skipped: {notes:?}");
+    assert!(!run.inputs_complete,
+        "a run missing the shareholder register is not a complete run");
+
+    // The liquidity scenarios that DID run have no honest scalar pair.
+    let liq = results.iter().find(|r| r.check_key == "liq_fixed").unwrap();
+    assert_eq!(liq.limit_value, None);
+    assert_eq!(liq.observed_value, None);
+    assert!(!liq.scope_label.is_empty());
+
+    // VaR does: the configured limit against the measured utilisation.
+    let var = results.iter().find(|r| r.check_key == "var_limit").unwrap();
+    assert!(var.limit_value.is_some(), "var_limit stores the configured limit");
+
     pool.close().await;
     edb.stop().await;
 }
