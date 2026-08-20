@@ -50,16 +50,22 @@ pub fn router(state: AppState) -> Router {
         // and `Scoped::portfolios_list` narrows the result to what their
         // grants actually cover (`PortfolioScope::All` vs `Only(ids)`).
         .authenticated("/api/portfolios", get(handlers::portfolios::list))
+        // Portfolio lifecycle (create, rename, archive) stays on Reference —
+        // deliberately, per the P10 decision. `Settings` took the
+        // per-portfolio *configuration* half (a fund's risk parameters, its
+        // depositary code mapping, its EMIR KPI records, its import ledger);
+        // deciding that a fund exists at all is a different act, and it stays
+        // where it was.
         .protected_global("/api/portfolios", axum::routing::post(handlers::portfolios::create), Domain::Reference, Action::Configure)
         .protected("/api/portfolios/{id}", axum::routing::put(handlers::portfolios::update), Domain::Reference, Action::Configure)
-        .protected("/api/portfolios/{id}/codes", get(handlers::portfolios::codes_list), Domain::Reference, Action::View)
-        .protected("/api/portfolios/{id}/codes", axum::routing::put(handlers::portfolios::codes_put), Domain::Reference, Action::Configure)
+        .protected("/api/portfolios/{id}/codes", get(handlers::portfolios::codes_list), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/codes", axum::routing::put(handlers::portfolios::codes_put), Domain::Settings, Action::Configure)
         .protected("/api/portfolios/{id}/shareholders", get(handlers::portfolios::shareholders_list), Domain::Shareholders, Action::View)
         .protected("/api/portfolios/{id}/shareholders", axum::routing::put(handlers::portfolios::shareholders_put), Domain::Shareholders, Action::Import)
         .protected("/api/portfolios/{id}/flows", get(handlers::portfolios::flows), Domain::Shareholders, Action::View)
-        .protected("/api/portfolios/{id}/settings", get(handlers::settings::get), Domain::Reference, Action::View)
-        .protected("/api/portfolios/{id}/settings", axum::routing::put(handlers::settings::put), Domain::Reference, Action::Configure)
-        .protected("/api/portfolios/{id}/imports", get(handlers::imports::list), Domain::Reference, Action::View)
+        .protected("/api/portfolios/{id}/settings", get(handlers::settings::get), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/settings", axum::routing::put(handlers::settings::put), Domain::Settings, Action::Configure)
+        .protected("/api/portfolios/{id}/imports", get(handlers::imports::list), Domain::Settings, Action::View)
         // `import_batch`/`import_workbook` write across positions, nav and
         // transactions at once (Task 6's table: "multi"). `positions` on
         // the URL `{id}` is only a coarse route-level pre-filter — the core
@@ -126,7 +132,7 @@ pub fn router(state: AppState) -> Router {
         // the evidence export refuses outright rather than emit a document
         // built on it (Task 11).
         .protected("/api/portfolios/{id}/emir", get(handlers::emir::get), Domain::Positions, Action::View)
-        .protected("/api/portfolios/{id}/emir/kpis/{month}", axum::routing::put(handlers::emir::put_kpi), Domain::Reference, Action::Configure)
+        .protected("/api/portfolios/{id}/emir/kpis/{month}", axum::routing::put(handlers::emir::put_kpi), Domain::Settings, Action::Configure)
         .protected("/api/portfolios/{id}/emir/export", get(handlers::emir::export), Domain::Positions, Action::Export)
         .protected("/api/portfolios/{id}/futures-analytics", get(handlers::futures::list_ctd), Domain::MarketData, Action::View)
         .protected("/api/portfolios/{id}/futures-analytics", axum::routing::post(handlers::futures::upload_ctd), Domain::MarketData, Action::Import)

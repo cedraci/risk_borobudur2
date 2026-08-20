@@ -150,10 +150,10 @@ rather than ticking every checkbox by hand. The four built-in roles are:
 
 | Role | What it grants |
 | --- | --- |
-| Risk Analyst | View and export on positions, NAV history, transactions, market data and reference data. No access to the shareholder register. |
-| Head of Risk | View and export on all six domains, plus configure on reference data. |
-| Operations | Import on positions, NAV history, transactions and market data, plus view on reference data. No shareholder register access, no export. |
-| Auditor | View only, on all six domains. No export, import or configure anywhere. |
+| Risk Analyst | View and export on positions, NAV history, transactions, market data, reference data and portfolio settings. No access to the shareholder register. |
+| Head of Risk | View and export on all seven domains, plus configure on reference data and on portfolio settings. |
+| Operations | Import on positions, NAV history, transactions and market data, plus view on reference data and portfolio settings. No shareholder register access, no export. |
+| Auditor | View only, on all seven domains. No export, import or configure anywhere. |
 
 To apply one:
 

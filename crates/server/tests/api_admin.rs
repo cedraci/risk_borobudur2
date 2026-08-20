@@ -161,7 +161,8 @@ async fn assigning_a_role_writes_its_expanded_grants() {
         .filter(|g| g["action"] == "view")
         .map(|g| g["domain"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(views.len(), 6, "auditor must carry view on all six domains: {grants:?}");
+    assert_eq!(views.len(), db::auth::Domain::ALL.len(),
+        "auditor must carry view on every domain: {grants:?}");
 
     pool.close().await;
     edb.stop().await;

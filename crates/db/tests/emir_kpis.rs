@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use db::auth::marker::{Configure, Reference, View};
+use db::auth::marker::{Configure, Settings, View};
 use db::auth::AuthCtx;
 
 #[tokio::test]
@@ -10,8 +10,8 @@ async fn kpi_upsert_round_trip_and_constraints() {
     let pool = dbh.test_pool().clone();
     let ctx = AuthCtx::desktop();
     let scoped = dbh.scope(&ctx);
-    let configure = scoped.authorize::<Reference, Configure>(1).unwrap();
-    let view = scoped.authorize::<Reference, View>(1).unwrap();
+    let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
 
     let d = |s: &str| s.parse::<NaiveDate>().unwrap();
     let k = db::repo::EmirKpi {

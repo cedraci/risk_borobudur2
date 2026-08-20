@@ -2,7 +2,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Multipart, Path, State};
 use axum::{Extension, Json};
-use db::auth::marker::{Import, Nav, Positions, Reference, Transactions, View};
+use db::auth::marker::{Import, Nav, Positions, Settings, Transactions, View};
 use db::auth::{AuthCtx, Domain};
 use db::scoped::Scoped;
 use sha2::Digest;
@@ -199,7 +199,7 @@ async fn import_one(
 
 pub async fn list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::ImportRecord>>, AppError> {
     let scoped = st.db.scope(&ctx);
-    let a = scoped.authorize::<Reference, View>(pid)?;
+    let a = scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
     Ok(Json(scoped.imports_list(&a).await?))
 }

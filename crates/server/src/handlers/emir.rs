@@ -9,7 +9,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use chrono::{Datelike, NaiveDate};
-use db::auth::marker::{Configure, Export, Positions, Reference, View};
+use db::auth::marker::{Configure, Export, Positions, Reference, Settings, View};
 use db::auth::{Access, AuthCtx, Denied, Domain};
 use db::scoped::Scoped;
 use ingest::emir_file;
@@ -132,7 +132,7 @@ pub async fn assemble(
     };
 
     let report = emir::thresholds(&months);
-    let (kpis, kpis_denied) = match scoped.authorize::<Reference, View>(pid) {
+    let (kpis, kpis_denied) = match scoped.authorize::<Settings, View>(pid) {
         Ok(rv) => (scoped.emir_kpis_all(&rv).await?, None),
         Err(denied) => (Vec::new(), Some(denied)),
     };
@@ -300,7 +300,7 @@ pub async fn put_kpi(
     Json(b): Json<KpiBody>,
 ) -> Result<Json<db::repo::EmirKpi>, AppError> {
     let scoped = st.db.scope(&ctx);
-    let a = scoped.authorize::<Reference, Configure>(pid)?;
+    let a = scoped.authorize::<Settings, Configure>(pid)?;
     super::portfolios::ensure(&scoped, pid, true).await?;
     let month = month
         .parse::<NaiveDate>()
@@ -324,7 +324,7 @@ pub async fn put_kpi(
         note: b.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     };
     scoped.emir_kpi_upsert(&a, &k).await?;
-    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Settings), Some(pid),
         serde_json::json!({"kind": "emir_kpi", "after": k})).await;
     Ok(Json(k))
 }

@@ -46,7 +46,7 @@ impl Role {
         match self {
             Role::RiskAnalyst => {
                 let domains = [Domain::Positions, Domain::Nav, Domain::Transactions,
-                               Domain::MarketData, Domain::Reference];
+                               Domain::MarketData, Domain::Reference, Domain::Settings];
                 domains.into_iter()
                     .flat_map(|d| [mk(d, Action::View), mk(d, Action::Export)])
                     .collect()
@@ -56,12 +56,21 @@ impl Role {
                     .flat_map(|d| [mk(d, Action::View), mk(d, Action::Export)])
                     .collect();
                 g.push(mk(Domain::Reference, Action::Configure));
+                // Setting the fund's own VaR limit, redemption stress and
+                // liquidity parameters is this role's job. It lived under
+                // `Reference` until the P10 split; the bundle follows it, or
+                // applying the role would stop granting what it is for.
+                g.push(mk(Domain::Settings, Action::Configure));
                 g
             }
             Role::Operations => {
                 let domains = [Domain::Positions, Domain::Nav, Domain::Transactions, Domain::MarketData];
                 let mut g: Vec<Grant> = domains.into_iter().map(|d| mk(d, Action::Import)).collect();
                 g.push(mk(Domain::Reference, Action::View));
+                // Read-only on the fund's own configuration: loading a
+                // depositary file means seeing which fund code maps where,
+                // without the authority to change it.
+                g.push(mk(Domain::Settings, Action::View));
                 g
             }
             Role::Auditor => Domain::ALL.into_iter().map(|d| mk(d, Action::View)).collect(),

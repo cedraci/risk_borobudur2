@@ -114,8 +114,9 @@ const CASES: &[Case] = &[
     r("/api/portfolios/{pid}/emir/export", Domain::Positions, Action::Export),
     r("/api/portfolios/{pid}/shareholders", Domain::Shareholders, Action::View),
     r("/api/portfolios/{pid}/flows", Domain::Shareholders, Action::View),
-    r("/api/portfolios/{pid}/settings", Domain::Reference, Action::View),
-    r("/api/portfolios/{pid}/imports", Domain::Reference, Action::View),
+    r("/api/portfolios/{pid}/codes", Domain::Settings, Action::View),
+    r("/api/portfolios/{pid}/settings", Domain::Settings, Action::View),
+    r("/api/portfolios/{pid}/imports", Domain::Settings, Action::View),
     r("/api/portfolios/{pid}/futures-analytics", Domain::MarketData, Action::View),
     // Writes. Every mutating portfolio-scoped route in `routes.rs` — the
     // half the matrix used to skip. A mis-declared write is both likelier
@@ -124,13 +125,13 @@ const CASES: &[Case] = &[
     Case { uri: "/api/portfolios/{pid}", method: "PUT", body: Some(Payload::Json(r#"{"name":"X","archived":false}"#)),
            domain: Domain::Reference, action: Action::Configure },
     Case { uri: "/api/portfolios/{pid}/codes", method: "PUT", body: Some(Payload::Json("[]")),
-           domain: Domain::Reference, action: Action::Configure },
+           domain: Domain::Settings, action: Action::Configure },
     Case { uri: "/api/portfolios/{pid}/settings", method: "PUT", body: Some(Payload::Json("{}")),
-           domain: Domain::Reference, action: Action::Configure },
+           domain: Domain::Settings, action: Action::Configure },
     Case { uri: "/api/portfolios/{pid}/shareholders", method: "PUT", body: Some(Payload::Json("[]")),
            domain: Domain::Shareholders, action: Action::Import },
     Case { uri: "/api/portfolios/{pid}/emir/kpis/2026-08-01", method: "PUT", body: Some(Payload::Json("{}")),
-           domain: Domain::Reference, action: Action::Configure },
+           domain: Domain::Settings, action: Action::Configure },
     Case { uri: "/api/portfolios/{pid}/imports", method: "POST", body: Some(Payload::Multipart),
            domain: Domain::Positions, action: Action::Import },
     Case { uri: "/api/portfolios/{pid}/futures-analytics", method: "POST", body: Some(Payload::Multipart),
@@ -215,6 +216,7 @@ async fn a_grant_on_a_different_domain_is_403() {
         // A domain the case does not itself use, so the grant is visible on
         // this portfolio (avoiding the out-of-scope 404) but wrong.
         let other = if case.domain == Domain::Reference { Domain::Nav } else { Domain::Reference };
+        assert_ne!(other, case.domain, "the contrast domain must differ from the case's own");
         let cookie = user_with(&pool, &[Grant { domain: other, action: Action::View, portfolio: Some(pid) }]).await;
         let uri = uri_for(case, pid);
         assert_eq!(

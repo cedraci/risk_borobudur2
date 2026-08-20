@@ -12,7 +12,7 @@ this applies: the desktop user automatically has every permission on every portf
 administrator rights. Everything below describes **server mode**, where the tool is shared by
 several people who sign in with their own account.
 
-## The six domains
+## The seven domains
 
 A domain is a category of data. Every permission you are given is for one domain at a time.
 
@@ -23,7 +23,16 @@ A domain is a category of data. Every permission you are given is for one domain
 | Transactions | The trade/dealing history used to split P&L into realized and unrealized amounts. |
 | Shareholders | The shareholder register and subscription/redemption flows, used for redemption stress testing. |
 | Market data | Market-sourced analytics such as bond futures' CTD (cheapest-to-deliver) data. |
-| Reference | Static/reference data: instrument classifications (country, sector, industry, issuer group), portfolio settings, and the import log. |
+| Reference | Shared instrument data, the same for every portfolio: classifications (country, sector, industry, issuer group), issuer groups, liquidity overrides, bond statics, futures contract specifications and FX rates. Also whether a portfolio exists at all — creating, renaming and archiving one. |
+| Settings | One portfolio's own configuration: its VaR confidence, horizon, window and limit, its redemption stress and liquidity parameters, its depositary code mapping, its monthly EMIR KPI records, and its import log. |
+
+> **Why Reference and Settings are separate.** They used to be one domain, and that made a
+> fleet-wide "configure reference data" grant quietly powerful: it carried the authority to move
+> every fund's VaR limit and redemption stress along with the shared instrument tables. Curating
+> data that belongs to no single fund and setting one fund's risk parameters are different jobs,
+> and are now different grants. Existing permissions were carried across when the split was made,
+> so nobody lost access — but it is worth reviewing whether everyone who holds Reference still
+> needs Settings too.
 
 ## The four actions
 
@@ -66,10 +75,10 @@ administrator has to re-apply it.
 
 | Role | Grants |
 | --- | --- |
-| Risk Analyst | View and export on positions, NAV, transactions, market data, and reference data. (No shareholder register access, and no configure rights anywhere.) |
-| Head of Risk | View and export on all six domains, plus the ability to configure reference data. The broadest analytical role. |
-| Operations | Import rights on positions, NAV, transactions, and market data (which, as above, also grants viewing them), plus view-only access to reference data. Built for the people who load the weekly files rather than analyze the output. |
-| Auditor | View-only access across all six domains. No export, import, or configure rights anywhere. |
+| Risk Analyst | View and export on positions, NAV, transactions, market data, reference data and the portfolio's own settings. (No shareholder register access, and no configure rights anywhere.) |
+| Head of Risk | View and export on all seven domains, plus the ability to configure reference data and the portfolio's own settings. The broadest analytical role. |
+| Operations | Import rights on positions, NAV, transactions, and market data (which, as above, also grants viewing them), plus view-only access to reference data and to the portfolio's settings — enough to see which depositary fund code maps where, without the authority to change it. Built for the people who load the weekly files rather than analyze the output. |
+| Auditor | View-only access across all seven domains. No export, import, or configure rights anywhere. |
 
 Because grants can be freely added and removed after a role is applied, an administrator can also
 fine-tune an individual's access beyond what a role provides — a role is a convenient starting

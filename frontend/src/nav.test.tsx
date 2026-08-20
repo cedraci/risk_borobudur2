@@ -49,3 +49,15 @@ describe("sidebar gating", () => {
     expect(labels(me)).toContain("Data");
   });
 });
+
+/** The P10 split moved per-portfolio configuration to its own domain. The
+ * Data page is where that configuration is edited (settings card, depositary
+ * code mapping, import ledger), so the tab has to recognise the new domain or
+ * a Head of Risk granted exactly the fund's own configuration would find no
+ * way in. */
+describe("sidebar gating after the settings split", () => {
+  it("offers Data to a principal holding only the fund's own settings", () => {
+    const me = principal(["settings", "view", PID]);
+    expect(labels(me)).toContain("Data");
+  });
+});

@@ -120,3 +120,76 @@ async fn unknown_api_route_returns_404_not_spa_html() {
     assert_eq!(body["status"], 404);
     assert_eq!(body["title"], "Not Found");
 }
+
+/// Finding P10: `Domain::Reference` gated three different authorities at
+/// once. The shared instrument reference tables are genuinely fleet-wide, so
+/// editing them is genuinely an instance-wide act — but a fund's own risk
+/// settings are not, and an instance-wide `reference/configure` grant must
+/// not carry the power to move every portfolio's VaR limit and redemption
+/// stress with it. Per-portfolio configuration lives on `Domain::Settings`.
+#[tokio::test]
+async fn fleet_wide_reference_configure_cannot_change_a_funds_risk_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let edb = db::embedded::start(dir.path(), true).await.unwrap();
+    let dbh = db::Db::connect(&edb.url).await.unwrap();
+    let pool = dbh.test_pool().clone();
+    let app = server::routes::router(server::state::AppState::server(dbh.clone()));
+
+    let hash = server::auth::local::hash_password("pw").unwrap();
+    let admin = db::admin::Admin::new(&pool);
+
+    let cookie_for = |token: &'static str| format!("borobudur_session={token}");
+
+    // Someone who may curate the shared reference data across the whole fleet.
+    let curator = admin.create_user("curator@f.lu", "Curator", &hash, false).await.unwrap();
+    for action in [db::auth::Action::View, db::auth::Action::Configure] {
+        admin.grant_add(curator, db::auth::Grant {
+            domain: db::auth::Domain::Reference, action, portfolio: None,
+        }, None).await.unwrap();
+    }
+    admin.session_create(&server::auth::local::token_hash("curator-t"), curator, 1).await.unwrap();
+
+    // Someone who owns portfolio 1's own configuration, and nothing else.
+    let owner = admin.create_user("owner@f.lu", "Owner", &hash, false).await.unwrap();
+    admin.grant_add(owner, db::auth::Grant {
+        domain: db::auth::Domain::Settings, action: db::auth::Action::Configure, portfolio: Some(1),
+    }, None).await.unwrap();
+    admin.session_create(&server::auth::local::token_hash("owner-t"), owner, 1).await.unwrap();
+
+    let read = |cookie: String| {
+        let app = app.clone();
+        async move {
+            let res = app.oneshot(Request::get("/api/portfolios/1/settings")
+                .header("cookie", cookie).body(Body::empty()).unwrap()).await.unwrap();
+            let status = res.status();
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            (status, if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes).unwrap() })
+        }
+    };
+
+    // The owner can read, and change, their own fund's settings.
+    let (status, body) = read(cookie_for("owner-t")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut changed = body.clone();
+    changed["var_limit"] = serde_json::json!(0.15);
+    let res = app.clone().oneshot(
+        Request::put("/api/portfolios/1/settings")
+            .header("cookie", cookie_for("owner-t"))
+            .header("content-type", "application/json")
+            .body(Body::from(changed.to_string())).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The fleet-wide reference curator can do neither.
+    let (status, _) = read(cookie_for("curator-t")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "reference/configure must not read a fund's own settings");
+    let res = app.clone().oneshot(
+        Request::put("/api/portfolios/1/settings")
+            .header("cookie", cookie_for("curator-t"))
+            .header("content-type", "application/json")
+            .body(Body::from(changed.to_string())).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN,
+        "an instance-wide reference grant must not move a fund's VaR limit");
+
+    pool.close().await;
+    edb.stop().await;
+}

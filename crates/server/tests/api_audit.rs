@@ -97,9 +97,14 @@ async fn an_export_writes_one_audit_row() {
     let pid = portfolio(&pool, "F").await;
     seed(&desktop, pid).await;
 
+    // The evidence export refuses outright rather than emit a degraded
+    // document, so it needs every read behind it: the contract specs
+    // (Reference, fleet-wide) and the monthly KPI records (Settings, which
+    // took the per-portfolio half in the P10 split).
     let (cookie, _) = user_with(&pool, &[
         Grant { domain: Domain::Positions, action: Action::Export, portfolio: Some(pid) },
         Grant { domain: Domain::Reference, action: Action::View, portfolio: None },
+        Grant { domain: Domain::Settings, action: Action::View, portfolio: Some(pid) },
     ]).await;
 
     let status = get(&server, &format!("/api/portfolios/{pid}/emir/export"), Some(&cookie)).await;
@@ -144,7 +149,7 @@ async fn a_settings_change_records_before_and_after() {
     let pid = portfolio(&pool, "F").await;
 
     let (cookie, _) = user_with(&pool, &[
-        Grant { domain: Domain::Reference, action: Action::Configure, portfolio: Some(pid) },
+        Grant { domain: Domain::Settings, action: Action::Configure, portfolio: Some(pid) },
     ]).await;
 
     let (_, before) = get_json(&server, &format!("/api/portfolios/{pid}/settings"), Some(&cookie)).await;

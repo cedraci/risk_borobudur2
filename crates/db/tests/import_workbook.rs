@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use db::auth::marker::{Import, Nav, Positions, Reference, Transactions, View};
+use db::auth::marker::{Import, Nav, Positions, Settings, Transactions, View};
 use db::auth::AuthCtx;
 
 fn d(y: i32, m: u32, day: u32) -> NaiveDate { NaiveDate::from_ymd_opt(y, m, day).unwrap() }
@@ -22,7 +22,7 @@ async fn import_upsert_and_duplicate_semantics() {
     let t = scoped.authorize::<Transactions, Import>(1).unwrap();
     let nav_view = scoped.authorize::<Nav, View>(1).unwrap();
     let pos_view = scoped.authorize::<Positions, View>(1).unwrap();
-    let ref_view = scoped.authorize::<Reference, View>(1).unwrap();
+    let settings_view = scoped.authorize::<Settings, View>(1).unwrap();
     let wb = sample();
 
     let o1 = scoped.import_workbook(&p, &n, &t, "sample.xlsx", "sha-1", &wb).await.unwrap();
@@ -56,7 +56,7 @@ async fn import_upsert_and_duplicate_semantics() {
     assert_eq!(pos.len(), 111);
     assert!(pos.iter().any(|p| p.isin == "GRS145003000"));
 
-    let imports = scoped.imports_list(&ref_view).await.unwrap();
+    let imports = scoped.imports_list(&settings_view).await.unwrap();
     assert_eq!(imports.len(), 2);
 
     pool.close().await;

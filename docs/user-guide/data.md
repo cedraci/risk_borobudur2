@@ -113,11 +113,13 @@ this panel. Clearing the field and saving removes the mapping.
 
 ### Access rights on this panel
 
-Renaming a portfolio, archiving/restoring one, and editing its CACEIS code all require configure
-rights on reference data — either for that specific portfolio or for all portfolios. Creating a
-portfolio is stricter: since the new portfolio does not exist yet, only an all-portfolios
-reference-data configure grant allows it — a grant scoped to specific portfolios, however many,
-does not. Everyone who is signed in can see the list itself, but it only shows the portfolios
+Renaming a portfolio and archiving/restoring one require configure rights on reference data —
+either for that specific portfolio or for all portfolios — because whether a portfolio exists at
+all is fleet-level bookkeeping. Editing its CACEIS code is different: that is the portfolio's own
+configuration, and it requires configure rights on **portfolio settings** for that portfolio.
+Creating a portfolio is stricter than either: since the new portfolio does not exist yet, only an
+all-portfolios reference-data configure grant allows it — a grant scoped to specific portfolios,
+however many, does not. Everyone who is signed in can see the list itself, but it only shows the portfolios
 their own permissions actually cover; a portfolio entirely outside your scope does not appear at
 all. See [Access rights](access-rights.md).
 
@@ -276,8 +278,8 @@ selected portfolio, most recent first:
 | Rows | A comma-separated summary of what was stored (for example "nav_rows: 1, positions: 84"). |
 
 This is a read-only log — there is nothing to edit or delete here, and it is unaffected by a
-portfolio being archived (history stays inspectable). Viewing it requires the same reference-data
-viewing right as the reference data editor below.
+portfolio being archived (history stays inspectable). Viewing it requires portfolio-settings
+viewing rights on the portfolio.
 
 ## Weekly CTD companion file
 
@@ -567,8 +569,9 @@ always takes priority over this asset-type default.
 
 ### Access rights
 
-Viewing this card requires reference-data viewing rights on the portfolio; saving changes requires
-reference-data configure rights on the portfolio. See [Access rights](access-rights.md).
+Viewing this card requires portfolio-settings viewing rights on the portfolio; saving changes
+requires portfolio-settings configure rights on the portfolio. These are a separate domain from
+the shared reference data edited further down the page — see [Access rights](access-rights.md).
 
 ## Shareholder register
 

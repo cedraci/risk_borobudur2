@@ -1,4 +1,4 @@
-use db::auth::marker::{Configure, Reference, View};
+use db::auth::marker::{Configure, Reference, Settings, View};
 use db::auth::AuthCtx;
 
 #[tokio::test]
@@ -14,8 +14,8 @@ async fn codes_roundtrip_and_uniqueness() {
     let global_configure = scoped.authorize_global::<Reference, Configure>().unwrap();
     let p2 = scoped.portfolio_create(&global_configure, "Mandat A", "mandate").await.unwrap();
 
-    let configure1 = scoped.authorize::<Reference, Configure>(1).unwrap();
-    let view1 = scoped.authorize::<Reference, View>(1).unwrap();
+    let configure1 = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view1 = scoped.authorize::<Settings, View>(1).unwrap();
 
     scoped.portfolio_codes_replace(&configure1, &[("caceis".into(), "165878".into())]).await.unwrap();
     assert_eq!(scoped.portfolio_by_code("caceis", "165878").await.unwrap(), Some(1));
@@ -29,7 +29,7 @@ async fn codes_roundtrip_and_uniqueness() {
     assert_eq!(codes[0].code, "111111");
 
     // A code claimed by portfolio 1 cannot also be claimed by portfolio 2.
-    let configure2 = scoped.authorize::<Reference, Configure>(p2.id).unwrap();
+    let configure2 = scoped.authorize::<Settings, Configure>(p2.id).unwrap();
     let err = scoped.portfolio_codes_replace(&configure2, &[("caceis".into(), "111111".into())]).await;
     assert!(err.is_err(), "duplicate (source, code) across portfolios must fail");
 

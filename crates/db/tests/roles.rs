@@ -7,7 +7,8 @@ fn set_for(role: Role, scope: Option<i64>) -> GrantSet {
 #[test]
 fn risk_analyst_reads_and_exports_but_never_sees_shareholders() {
     let s = set_for(Role::RiskAnalyst, Some(7));
-    for d in [Domain::Positions, Domain::Nav, Domain::Transactions, Domain::MarketData, Domain::Reference] {
+    for d in [Domain::Positions, Domain::Nav, Domain::Transactions, Domain::MarketData,
+              Domain::Reference, Domain::Settings] {
         assert!(s.allows(d, Action::View, Some(7)), "{d:?} view");
         assert!(s.allows(d, Action::Export, Some(7)), "{d:?} export");
         assert!(!s.allows(d, Action::Configure, Some(7)), "{d:?} must not configure");
@@ -17,15 +18,31 @@ fn risk_analyst_reads_and_exports_but_never_sees_shareholders() {
 }
 
 #[test]
-fn head_of_risk_configures_reference_only() {
+fn head_of_risk_configures_reference_and_the_funds_own_settings() {
     let s = set_for(Role::HeadOfRisk, Some(7));
     assert!(s.allows(Domain::Shareholders, Action::View, Some(7)));
     assert!(s.allows(Domain::Shareholders, Action::Export, Some(7)));
     assert!(s.allows(Domain::Reference, Action::Configure, Some(7)));
-    for d in Domain::ALL.into_iter().filter(|d| *d != Domain::Reference) {
+    // Setting the fund's own VaR limit and redemption stress is this role's
+    // job; it moved to its own domain in the P10 split and the bundle has to
+    // follow, or applying the role would silently stop granting it.
+    assert!(s.allows(Domain::Settings, Action::Configure, Some(7)));
+    for d in Domain::ALL.into_iter().filter(|d| *d != Domain::Reference && *d != Domain::Settings) {
         assert!(!s.allows(d, Action::Configure, Some(7)),
-            "configure is only meaningful on reference, not {d:?}");
+            "configure is only meaningful on reference and settings, not {d:?}");
     }
+}
+
+/// The split must not quietly widen anyone: `Settings` covers one portfolio's
+/// own configuration, and no role gains configure rights over the shared
+/// instrument tables that did not already have them.
+#[test]
+fn operations_sees_the_funds_settings_but_configures_nothing() {
+    let s = set_for(Role::Operations, Some(7));
+    assert!(s.allows(Domain::Settings, Action::View, Some(7)),
+        "loading files needs to see the depositary code mapping");
+    assert!(!s.allows(Domain::Settings, Action::Configure, Some(7)));
+    assert!(!s.allows(Domain::Reference, Action::Configure, Some(7)));
 }
 
 #[test]

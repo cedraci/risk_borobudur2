@@ -2,7 +2,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
-use db::auth::marker::{Configure, Import, Reference, Shareholders, View};
+use db::auth::marker::{Configure, Import, Reference, Settings, Shareholders, View};
 use db::auth::{AuthCtx, Domain};
 
 #[derive(serde::Deserialize)]
@@ -101,7 +101,7 @@ pub struct CodeBody {
 
 pub async fn codes_list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
     let scoped = st.db.scope(&ctx);
-    let a = scoped.authorize::<Reference, View>(pid)?;
+    let a = scoped.authorize::<Settings, View>(pid)?;
     ensure(&scoped, pid, false).await?;
     Ok(Json(scoped.portfolio_codes_for(&a).await?))
 }
@@ -110,7 +110,7 @@ pub async fn codes_list(State(st): State<AppState>, Extension(ctx): Extension<Au
 /// are 422; a code already claimed by another portfolio is 422 too.
 pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>, Json(body): Json<Vec<CodeBody>>) -> Result<Json<Vec<db::repo::PortfolioCode>>, AppError> {
     let scoped = st.db.scope(&ctx);
-    let a = scoped.authorize::<Reference, Configure>(pid)?;
+    let a = scoped.authorize::<Settings, Configure>(pid)?;
     ensure(&scoped, pid, true).await?;
     let mut codes: Vec<(String, String)> = Vec::with_capacity(body.len());
     for c in &body {
@@ -125,7 +125,7 @@ pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<Aut
     // authorize cannot fail for a principal who reached this handler. Taken
     // before the write (not just after) so the same token can also read the
     // pre-replace set, for the audit trail below.
-    let view = scoped.authorize::<Reference, View>(pid)?;
+    let view = scoped.authorize::<Settings, View>(pid)?;
     let before = scoped.portfolio_codes_for(&view).await?;
     scoped.portfolio_codes_replace(&a, &codes).await.map_err(|e| {
         let is_unique = e.downcast_ref::<sqlx::Error>()
@@ -141,7 +141,7 @@ pub async fn codes_put(State(st): State<AppState>, Extension(ctx): Extension<Aut
     // Fired only once the whole request — write and both reads — has
     // succeeded, so a DB failure downstream never leaves an audit row for a
     // request that ultimately failed.
-    crate::audit::record(&st, &ctx, "configure", Some(Domain::Reference), Some(pid),
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Settings), Some(pid),
         serde_json::json!({"kind": "portfolio_codes", "before": before, "after": after})).await;
     Ok(Json(after))
 }

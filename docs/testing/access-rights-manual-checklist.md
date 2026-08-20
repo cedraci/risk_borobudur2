@@ -79,7 +79,9 @@ minutes.
 - [ ] The four roles' bundles match the documentation
       (docs/user-guide/access-rights.md): Auditor is view-only everywhere;
       Risk Analyst has no shareholder register access; Operations has
-      import but no export; Head of Risk adds reference/configure.
+      import but no export; Head of Risk adds reference/configure and
+      settings/configure. The matrix lists seven domains, with
+      **Portfolio settings** distinct from **Reference data**.
 
 ## 4. Denial wording on populated data (~5 min)
 

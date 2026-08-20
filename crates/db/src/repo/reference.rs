@@ -1,4 +1,4 @@
-use crate::auth::marker::{Configure, Reference, View};
+use crate::auth::marker::{Configure, Reference, Settings, View};
 use crate::auth::{Access, GlobalAccess};
 use crate::scoped::Scoped;
 use chrono::NaiveDate;
@@ -189,7 +189,7 @@ impl<'a> Scoped<'a> {
         Ok(n)
     }
 
-    pub async fn emir_kpis_all(&self, a: &Access<Reference, View>) -> anyhow::Result<Vec<EmirKpi>> {
+    pub async fn emir_kpis_all(&self, a: &Access<Settings, View>) -> anyhow::Result<Vec<EmirKpi>> {
         Ok(sqlx::query_as::<_, EmirKpi>(
             "SELECT month, unconfirmed_over_5d, reconciliation, disputes, note
              FROM emir_kpis WHERE portfolio_id = $1 ORDER BY month DESC",
@@ -200,7 +200,7 @@ impl<'a> Scoped<'a> {
     }
 
     /// Full-row replace, like `contracts_upsert`: every field is written as given.
-    pub async fn emir_kpi_upsert(&self, a: &Access<Reference, Configure>, k: &EmirKpi) -> anyhow::Result<()> {
+    pub async fn emir_kpi_upsert(&self, a: &Access<Settings, Configure>, k: &EmirKpi) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO emir_kpis (portfolio_id, month, unconfirmed_over_5d, reconciliation, disputes, note)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -265,7 +265,7 @@ impl<'a> Scoped<'a> {
         self.portfolio_row(id).await
     }
 
-    pub async fn portfolio_codes_for(&self, a: &Access<Reference, View>) -> anyhow::Result<Vec<PortfolioCode>> {
+    pub async fn portfolio_codes_for(&self, a: &Access<Settings, View>) -> anyhow::Result<Vec<PortfolioCode>> {
         Ok(sqlx::query_as("SELECT portfolio_id, source, code FROM portfolio_codes WHERE portfolio_id = $1 ORDER BY source, code")
             .bind(a.portfolio_id()).fetch_all(self.pool).await?)
     }
@@ -273,7 +273,7 @@ impl<'a> Scoped<'a> {
     /// Replace the full code set for one portfolio. A `(source, code)` already
     /// claimed by ANOTHER portfolio surfaces as a unique violation the caller
     /// maps to 422.
-    pub async fn portfolio_codes_replace(&self, a: &Access<Reference, Configure>, codes: &[(String, String)]) -> anyhow::Result<()> {
+    pub async fn portfolio_codes_replace(&self, a: &Access<Settings, Configure>, codes: &[(String, String)]) -> anyhow::Result<()> {
         let portfolio_id = a.portfolio_id();
         let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM portfolio_codes WHERE portfolio_id = $1")
