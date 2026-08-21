@@ -137,8 +137,11 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/futures-analytics", get(handlers::futures::list_ctd), Domain::MarketData, Action::View)
         .protected("/api/portfolios/{id}/futures-analytics", axum::routing::post(handlers::futures::upload_ctd), Domain::MarketData, Action::Import)
         .protected("/api/portfolios/{id}/limit-runs", get(handlers::breaches::runs_list), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/limit-runs", axum::routing::post(handlers::breaches::rerun), Domain::Settings, Action::Configure)
         .protected("/api/portfolios/{id}/breaches", get(handlers::breaches::register_list), Domain::Settings, Action::View)
         .protected("/api/portfolios/{id}/breaches/{bid}", get(handlers::breaches::episode_get), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/breaches/{bid}/acknowledge", axum::routing::post(handlers::breaches::acknowledge), Domain::Settings, Action::Configure)
+        .protected("/api/portfolios/{id}/breaches/{bid}/resolve", axum::routing::post(handlers::breaches::resolve), Domain::Settings, Action::Configure)
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .fallback(crate::static_assets::static_handler);
     // Only mounted in server mode: desktop mode has no accounts, so there is

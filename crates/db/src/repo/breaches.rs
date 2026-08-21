@@ -366,4 +366,76 @@ impl Scoped<'_> {
                 detail: r.get("detail"),
             }).collect())
     }
+
+    /// Acknowledgement is where a proposal becomes a decision. Refuses an
+    /// episode that is already acknowledged or resolved: re-deciding
+    /// something that was signed off is a new episode's business, not an
+    /// overwrite of the record.
+    #[allow(clippy::too_many_arguments)] // the task-8 brief's interface, verbatim
+    pub async fn breach_acknowledge(
+        &self, a: &Access<Settings, Configure>, breach_id: i64,
+        classification: &str, note: &str, deadline: Option<NaiveDate>,
+        actor_user_id: Option<i64>, actor_label: &str,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let n = sqlx::query(
+            "UPDATE limit_breaches
+             SET state = 'acknowledged', classification = $3, acknowledgement_note = $4,
+                 deadline_date = $5, acknowledged_by = $6, acknowledged_at = now()
+             WHERE id = $1 AND portfolio_id = $2 AND state = 'open'")
+            .bind(breach_id).bind(a.portfolio_id()).bind(classification).bind(note)
+            .bind(deadline).bind(actor_user_id)
+            .execute(&mut *tx).await?.rows_affected();
+        if n == 0 { tx.rollback().await?; return Ok(false); }
+        sqlx::query(
+            "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
+             VALUES ($1,$2,$3,'acknowledged',$4)")
+            .bind(breach_id).bind(actor_user_id).bind(actor_label)
+            .bind(serde_json::json!({
+                "classification": classification, "note": note, "deadline_date": deadline,
+            }))
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Only from `acknowledged`. Resolving something nobody classified is the
+    /// gap this whole feature exists to close.
+    pub async fn breach_resolve(
+        &self, a: &Access<Settings, Configure>, breach_id: i64, note: &str,
+        actor_user_id: Option<i64>, actor_label: &str,
+    ) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let n = sqlx::query(
+            "UPDATE limit_breaches
+             SET state = 'resolved', resolution_note = $3, resolved_by = $4, resolved_at = now()
+             WHERE id = $1 AND portfolio_id = $2 AND state = 'acknowledged'")
+            .bind(breach_id).bind(a.portfolio_id()).bind(note).bind(actor_user_id)
+            .execute(&mut *tx).await?.rows_affected();
+        if n == 0 { tx.rollback().await?; return Ok(false); }
+        sqlx::query(
+            "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
+             VALUES ($1,$2,$3,'resolved',$4)")
+            .bind(breach_id).bind(actor_user_id).bind(actor_label)
+            .bind(serde_json::json!({"note": note}))
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// The latest snapshot date on file — what a manual re-run defaults to
+    /// when no date is given. Mirrors `position_dates_before`'s
+    /// token-mismatch guard: `pid` travelling separately from the token must
+    /// not silently name a different portfolio.
+    pub async fn latest_position_date(
+        &self, a: &Access<Settings, View>, pid: i64,
+    ) -> anyhow::Result<Option<NaiveDate>> {
+        anyhow::ensure!(pid == a.portfolio_id(),
+            "latest_position_date: pid {pid} does not match the token's portfolio {}",
+            a.portfolio_id());
+        Ok(sqlx::query_scalar(
+            "SELECT MAX(nav_date) FROM position_snapshots WHERE portfolio_id = $1")
+            .bind(a.portfolio_id())
+            .fetch_one(self.pool).await?)
+    }
 }

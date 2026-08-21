@@ -208,3 +208,163 @@ async fn episode_route_authorization() {
     pool.close().await;
     edb.stop().await;
 }
+
+/// The state machine's own refusals: resolving an episode nobody classified,
+/// classifying with a nonsense value, and acknowledging with a blank note.
+/// Each must be rejected AND must leave the episode's state untouched — a
+/// test that only checked the status code would still pass if the handler
+/// mutated the row before returning the error.
+#[tokio::test]
+async fn an_episode_must_be_classified_before_it_can_be_resolved() {
+    let (desktop, pool, dbh, edb) = app().await;
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Sample.xlsx stays under every limit (see api_breach_recorder.rs), so no
+    // import opens an episode here either. Insert one directly through the
+    // repository, pinned to a real run row, exactly as
+    // `episode_route_authorization` does — the state machine is what is
+    // under test, not the fixture's holdings.
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let (run, _results) = &scoped.runs_for(&view, 1).await.unwrap()[0];
+
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_breaches
+             (portfolio_id, check_key, subject, opened_run_id, opened_nav_date, opened_value, peak_value, peak_nav_date)
+         VALUES (1, 'issuer_10', 'TEST ISSUER', $1, $2, 0.15, 0.15, $2)
+         RETURNING id")
+        .bind(run.id).bind(run.nav_date)
+        .fetch_one(&pool).await.unwrap();
+
+    // Resolving straight from `open` is refused.
+    let res = desktop.clone().oneshot(
+        Request::post(format!("/api/portfolios/1/breaches/{bid}/resolve"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"note":"looks fine"}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "resolving something nobody classified is the gap this feature closes");
+
+    // Acknowledging without a classification is refused.
+    let res = desktop.clone().oneshot(
+        Request::post(format!("/api/portfolios/1/breaches/{bid}/acknowledge"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"classification":"unclassified","note":"x"}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Acknowledging with an empty note is refused.
+    let res = desktop.clone().oneshot(
+        Request::post(format!("/api/portfolios/1/breaches/{bid}/acknowledge"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"classification":"passive","note":"  "}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // None of the three refusals above may have moved the episode: still
+    // `open`, still unclassified.
+    let still_open = scoped.breach_get(&view, bid).await.unwrap().unwrap();
+    assert_eq!(still_open.state, "open", "a refused acknowledge/resolve must not change state");
+    assert_eq!(still_open.classification, "unclassified");
+
+    // Acknowledge properly, then resolve.
+    let res = desktop.clone().oneshot(
+        Request::post(format!("/api/portfolios/1/breaches/{bid}/acknowledge"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"classification":"passive","note":"market move, no purchase","deadline_date":"2026-09-30"}"#
+            )).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let acknowledged = scoped.breach_get(&view, bid).await.unwrap().unwrap();
+    assert_eq!(acknowledged.state, "acknowledged");
+    assert_eq!(acknowledged.classification, "passive");
+
+    let res = desktop.clone().oneshot(
+        Request::post(format!("/api/portfolios/1/breaches/{bid}/resolve"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"note":"position trimmed on 21 Aug"}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The timeline carries both acts, in order.
+    let res = desktop.clone().oneshot(
+        Request::get(format!("/api/portfolios/1/breaches/{bid}")).body(Body::empty()).unwrap()).await.unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["breach"]["state"], "resolved");
+    assert_eq!(body["breach"]["classification"], "passive");
+    let kinds: Vec<&str> = body["events"].as_array().unwrap().iter()
+        .map(|e| e["event"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"acknowledged") && kinds.contains(&"resolved"), "{kinds:?}");
+
+    // Re-acknowledging or re-resolving a resolved episode is refused, not a
+    // silent overwrite of the closed record.
+    let res = desktop.clone().oneshot(
+        Request::post(format!("/api/portfolios/1/breaches/{bid}/resolve"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"note":"again"}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "a resolved episode must not be resolvable a second time");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// A manual re-run records a second run row for the same date and, when the
+/// episode it re-checks is still breaching, must not open a duplicate — the
+/// live-episode uniqueness constraint is only as good as the transition
+/// logic that respects it.
+#[tokio::test]
+async fn a_manual_rerun_records_a_second_run_for_the_same_date() {
+    let (desktop, pool, dbh, edb) = app().await;
+
+    // Force a breach that will still be open at the manual re-run: a VaR
+    // limit low enough that the sample workbook's real historical VaR
+    // exceeds it, regardless of the workbook's own holdings (which otherwise
+    // stay under every limit — see api_breach_recorder.rs).
+    let res = desktop.clone().oneshot(
+        Request::get("/api/portfolios/1/settings").body(Body::empty()).unwrap()).await.unwrap();
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    settings["var_limit"] = serde_json::json!(0.0000001);
+    let res = desktop.clone().oneshot(
+        Request::put("/api/portfolios/1/settings")
+            .header("content-type", "application/json")
+            .body(Body::from(settings.to_string())).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let runs = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(runs.len(), 1, "the import records exactly one run");
+
+    let open = scoped.breaches_for(&view, Some("open")).await.unwrap();
+    assert_eq!(open.len(), 1, "the lowered var limit must open exactly one episode: {open:?}");
+    assert_eq!(open[0].check_key, "var_limit");
+
+    let res = desktop.clone().oneshot(
+        Request::post("/api/portfolios/1/limit-runs")
+            .header("content-type", "application/json")
+            .body(Body::from("{}")).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let runs_after = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(runs_after.len(), 2, "the manual re-run must record a second run: {runs_after:?}");
+    assert_eq!(runs_after[0].0.triggered_by, "manual", "the newer run is the manual one");
+    assert_eq!(runs_after[1].0.triggered_by, "import");
+    assert_eq!(runs_after[0].0.nav_date, runs_after[1].0.nav_date,
+        "the manual re-run defaults to the same, latest, snapshot date");
+
+    let open_after = scoped.breaches_for(&view, Some("open")).await.unwrap();
+    assert_eq!(open_after.len(), 1,
+        "a re-run of a still-breaching check must not open a duplicate episode: {open_after:?}");
+    assert_eq!(open_after[0].id, open[0].id, "the same episode, not a new one");
+
+    pool.close().await;
+    edb.stop().await;
+}

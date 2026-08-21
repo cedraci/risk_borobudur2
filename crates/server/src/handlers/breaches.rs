@@ -15,10 +15,11 @@ use crate::state::AppState;
 use analytics::breach::{Finding, SubjectHolding};
 use analytics::{concentration, default_issuer_group, CheckStatus, ConPosition};
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::{Extension, Json};
 use chrono::NaiveDate;
-use db::auth::marker::{Nav, Positions, Reference, Settings, Shareholders, View};
-use db::auth::{Access, AuthCtx};
+use db::auth::marker::{Configure, Nav, Positions, Reference, Settings, Shareholders, View};
+use db::auth::{Access, AuthCtx, Domain};
 use db::repo::CheckResultRow;
 use db::scoped::Scoped;
 use std::collections::HashMap;
@@ -427,4 +428,107 @@ pub async fn episode_get(
         .ok_or_else(|| AppError::NotFound(format!("no breach {bid}")))?;
     let events = scoped.breach_events(&a, bid).await?;
     Ok(Json(serde_json::json!({ "breach": breach, "events": events })))
+}
+
+// ---- The workflow: manual re-run, acknowledge, resolve. ------------------
+
+#[derive(serde::Deserialize)]
+pub struct AcknowledgeBody {
+    pub classification: String,
+    pub note: String,
+    #[serde(default)]
+    pub deadline_date: Option<NaiveDate>,
+}
+
+/// Where a proposal becomes a decision. Requires a real classification and a
+/// non-blank note — acknowledging is the compliance act this whole register
+/// exists to force, not a rubber stamp.
+pub async fn acknowledge(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path((pid, bid)): Path<(i64, i64)>, Json(b): Json<AcknowledgeBody>,
+) -> Result<StatusCode, AppError> {
+    if !matches!(b.classification.as_str(), "active" | "passive") {
+        return Err(AppError::Unprocessable(
+            "classification must be 'active' or 'passive' — acknowledging is where the proposal becomes a decision".into()));
+    }
+    let note = b.note.trim();
+    if note.is_empty() {
+        return Err(AppError::Unprocessable("a note is required to acknowledge a breach".into()));
+    }
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Settings, Configure>(pid)?;
+    super::portfolios::ensure(&scoped, pid, true).await?;
+    let actor = (ctx.principal_id != 0).then_some(ctx.principal_id);
+    let ok = scoped.breach_acknowledge(
+        &a, bid, &b.classification, note, b.deadline_date, actor, &ctx.display_name).await?;
+    if !ok {
+        return Err(AppError::Unprocessable(
+            "no open breach with that id — it may already be acknowledged or resolved".into()));
+    }
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Settings), Some(pid),
+        serde_json::json!({"kind": "breach_acknowledged", "breach_id": bid,
+                           "classification": b.classification})).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct ResolveBody { pub note: String }
+
+/// Only from `acknowledged`. Resolving something nobody classified is the
+/// gap this whole feature exists to close.
+pub async fn resolve(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path((pid, bid)): Path<(i64, i64)>, Json(b): Json<ResolveBody>,
+) -> Result<StatusCode, AppError> {
+    let note = b.note.trim();
+    if note.is_empty() {
+        return Err(AppError::Unprocessable("a note is required to resolve a breach".into()));
+    }
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Settings, Configure>(pid)?;
+    super::portfolios::ensure(&scoped, pid, true).await?;
+    let actor = (ctx.principal_id != 0).then_some(ctx.principal_id);
+    let ok = scoped.breach_resolve(&a, bid, note, actor, &ctx.display_name).await?;
+    if !ok {
+        return Err(AppError::Unprocessable(
+            "only an acknowledged breach can be resolved — classify it first".into()));
+    }
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Settings), Some(pid),
+        serde_json::json!({"kind": "breach_resolved", "breach_id": bid})).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct RerunBody {
+    /// Defaults to the latest snapshot date.
+    #[serde(default)]
+    pub date: Option<NaiveDate>,
+}
+
+/// A manual re-run of the recorder, for a fund whose data or settings
+/// changed without a fresh import — e.g. a limit was tightened and someone
+/// wants to know today's verdict without waiting for tomorrow's file.
+pub async fn rerun(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path(pid): Path<i64>, Json(b): Json<RerunBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    // The Configure token is the authorization gate for a manual re-run,
+    // even though the run itself then executes under the system context
+    // below (`recorder::record` authorizes for itself via `AuthCtx::system`).
+    let _configure = scoped.authorize::<Settings, Configure>(pid)?;
+    super::portfolios::ensure(&scoped, pid, true).await?;
+    let view = scoped.authorize::<Settings, View>(pid)?;
+    let date = match b.date {
+        Some(d) => d,
+        None => scoped.latest_position_date(&view, pid).await?
+            .ok_or_else(|| AppError::Unprocessable("no snapshot imported yet".into()))?,
+    };
+    let run_id = crate::recorder::record(&st, pid, date, crate::recorder::Trigger::Manual {
+        actor_user_id: (ctx.principal_id != 0).then_some(ctx.principal_id),
+        actor_label: ctx.display_name.clone(),
+    }).await?;
+    crate::audit::record(&st, &ctx, "configure", Some(Domain::Settings), Some(pid),
+        serde_json::json!({"kind": "limit_check_rerun", "run_id": run_id, "nav_date": date})).await;
+    Ok(Json(serde_json::json!({"run_id": run_id, "nav_date": date})))
 }
