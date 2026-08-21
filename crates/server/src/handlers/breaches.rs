@@ -15,10 +15,11 @@ use crate::state::AppState;
 use analytics::breach::{Finding, SubjectHolding};
 use analytics::{concentration, default_issuer_group, CheckStatus, ConPosition};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use chrono::NaiveDate;
-use db::auth::marker::{Configure, Nav, Positions, Reference, Settings, Shareholders, View};
+use db::auth::marker::{Configure, Export, Nav, Positions, Reference, Settings, Shareholders, View};
 use db::auth::{Access, AuthCtx, Domain};
 use db::repo::CheckResultRow;
 use db::scoped::Scoped;
@@ -373,6 +374,24 @@ pub struct RunsQuery {
     pub limit: Option<i64>,
 }
 
+/// The recorded check runs as JSON, newest first, each with its per-check
+/// results — the one construction shared by `runs_list` and the evidence
+/// export, so the two never drift into serving different shapes of the same
+/// data.
+async fn runs_json(
+    scoped: &Scoped<'_>, a: &Access<Settings, View>, limit: i64,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    Ok(scoped.runs_for(a, limit).await?
+        .into_iter()
+        .map(|(run, results)| serde_json::json!({
+            "id": run.id, "nav_date": run.nav_date, "run_at": run.run_at,
+            "triggered_by": run.triggered_by, "import_id": run.import_id,
+            "inputs_complete": run.inputs_complete, "input_notes": run.input_notes,
+            "results": results,
+        }))
+        .collect())
+}
+
 /// The recorded check runs, newest first, each with its per-check results.
 pub async fn runs_list(
     State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
@@ -382,21 +401,28 @@ pub async fn runs_list(
     let a = scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
     let limit = q.limit.unwrap_or(52).clamp(1, 500);
-    let runs: Vec<serde_json::Value> = scoped.runs_for(&a, limit).await?
-        .into_iter()
-        .map(|(run, results)| serde_json::json!({
-            "id": run.id, "nav_date": run.nav_date, "run_at": run.run_at,
-            "triggered_by": run.triggered_by, "import_id": run.import_id,
-            "inputs_complete": run.inputs_complete, "input_notes": run.input_notes,
-            "results": results,
-        }))
-        .collect();
+    let runs = runs_json(&scoped, &a, limit).await?;
     Ok(Json(serde_json::json!({ "runs": runs })))
 }
 
 #[derive(serde::Deserialize)]
 pub struct RegisterQuery {
     pub state: Option<String>,
+}
+
+/// The breach register as JSON, optionally filtered to one `state` — the one
+/// construction shared by `register_list` and the evidence export.
+async fn register_json(
+    scoped: &Scoped<'_>, a: &Access<Settings, View>, state: Option<&str>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    if let Some(s) = state
+        && !matches!(s, "open" | "acknowledged" | "resolved") {
+        return Err(AppError::BadRequest(format!("unknown state: {s}")));
+    }
+    Ok(scoped.breaches_for(a, state).await?
+        .into_iter()
+        .map(|b| serde_json::to_value(b).expect("BreachRow always serializes"))
+        .collect())
 }
 
 /// The breach register itself: every episode, optionally filtered to one
@@ -408,12 +434,36 @@ pub async fn register_list(
     let scoped = st.db.scope(&ctx);
     let a = scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
-    if let Some(s) = q.state.as_deref()
-        && !matches!(s, "open" | "acknowledged" | "resolved") {
-        return Err(AppError::BadRequest(format!("unknown state: {s}")));
-    }
-    let rows = scoped.breaches_for(&a, q.state.as_deref()).await?;
-    Ok(Json(serde_json::json!({ "breaches": rows })))
+    let breaches = register_json(&scoped, &a, q.state.as_deref()).await?;
+    Ok(Json(serde_json::json!({ "breaches": breaches })))
+}
+
+/// The xlsx evidence export — the artefact a fund hands a regulator or
+/// auditor: every recorded run plus the full breach register, one file. See
+/// `ingest::breach_evidence::build`.
+pub async fn export(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>, Path(pid): Path<i64>,
+) -> Result<impl IntoResponse, AppError> {
+    let scoped = st.db.scope(&ctx);
+    // `Export` is the gate on this route (routes.rs); the reads below still
+    // need their own `View` token, same as `handlers::emir::export`.
+    let _export = scoped.authorize::<Settings, Export>(pid)?;
+    let a = scoped.authorize::<Settings, View>(pid)?;
+    let portfolio = super::portfolios::ensure(&scoped, pid, false).await?;
+    let runs = runs_json(&scoped, &a, 500).await?;
+    let breaches = register_json(&scoped, &a, None).await?;
+    let bytes = ingest::breach_evidence::build(&portfolio.name, &runs, &breaches)
+        .map_err(AppError::Internal)?;
+    crate::audit::record(&st, &ctx, "export", Some(Domain::Settings), Some(pid),
+        serde_json::json!({"kind": "breach_register"})).await;
+    let filename = format!("Breach register - {} - {}.xlsx", portfolio.name, chrono::Utc::now().date_naive());
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+    h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
+        &format!("attachment; filename=\"{filename}\""))
+        .map_err(anyhow::Error::from)?);
+    Ok((StatusCode::OK, h, bytes))
 }
 
 /// One breach episode with its full event timeline.

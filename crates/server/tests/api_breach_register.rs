@@ -362,6 +362,31 @@ async fn an_episode_must_be_classified_before_it_can_be_resolved() {
     edb.stop().await;
 }
 
+/// `GET /api/portfolios/{pid}/breaches/export`. Pinned mainly for the route-
+/// ordering hazard: `routes.rs` must declare `/breaches/export` before
+/// `/breaches/{bid}`, or axum matches `export` as a `{bid}` path parameter
+/// and the handler 400s trying to parse it as an `i64`.
+#[tokio::test]
+async fn the_evidence_export_returns_an_xlsx() {
+    let (desktop, pool, _dbh, edb) = app().await;
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = desktop.clone().oneshot(
+        Request::get("/api/portfolios/1/breaches/export").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "export must not 400 by matching {{bid}} instead of the literal path");
+    assert_eq!(
+        res.headers().get("content-type").unwrap(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[0..2], b"PK", "xlsx files are zip archives");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
 /// A manual re-run records a second run row for the same date and, when the
 /// episode it re-checks is still breaching, must not open a duplicate — the
 /// live-episode uniqueness constraint is only as good as the transition

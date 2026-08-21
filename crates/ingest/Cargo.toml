@@ -11,4 +11,5 @@ csv = "1"
 regex = "1"
 rust_xlsxwriter = "0.97"
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }

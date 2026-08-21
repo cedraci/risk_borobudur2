@@ -120,6 +120,7 @@ const CASES: &[Case] = &[
     r("/api/portfolios/{pid}/futures-analytics", Domain::MarketData, Action::View),
     r("/api/portfolios/{pid}/limit-runs", Domain::Settings, Action::View),
     r("/api/portfolios/{pid}/breaches", Domain::Settings, Action::View),
+    r("/api/portfolios/{pid}/breaches/export", Domain::Settings, Action::Export),
     // `GET /api/portfolios/{pid}/breaches/{bid}` is NOT in this table. The
     // exact-grant case below (`the_exact_grant_never_401s_403s_or_404s`)
     // asserts that a 404 never comes back, but this file's `app()` seeds no

@@ -1178,6 +1178,7 @@ dependencies = [
  "regex",
  "rust_xlsxwriter",
  "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 
