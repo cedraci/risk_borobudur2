@@ -1,7 +1,7 @@
 /** The register's three states have to be visually distinct, and a denial
  * must never look like an empty register. */
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import BreachesPage from "./BreachesPage";
 import { renderPage, stubFetch, stubFetchStatus, TEST_PORTFOLIO } from "../test/harness";
 import { eur } from "../fmt";
@@ -257,9 +257,14 @@ describe("breach register", () => {
   it("re-run posts the literal empty body and reloads", async () => {
     const p = TEST_PORTFOLIO.id;
     let rerunBody: string | null = null;
+    let posted = false;
+    let getsAfterPost = 0;
+    const getsAfterRerun = () => getsAfterPost;
     const fetchMock = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
+      if (init?.method !== "POST" && posted) getsAfterPost++;
       if (url.includes(`/api/portfolios/${p}/limit-runs`) && init?.method === "POST") {
+        posted = true;
         rerunBody = init.body as string;
         return new Response(JSON.stringify({ run_id: 2, nav_date: "2026-08-07" }), {
           status: 200, headers: { "content-type": "application/json" },
@@ -281,5 +286,89 @@ describe("breach register", () => {
     fireEvent.click(screen.getByRole("button", { name: "Re-run checks now" }));
 
     await waitFor(() => expect(rerunBody).toBe("{}"));
+    // The reload half of this test's name: without it, deleting `reloadAll()`
+    // from `doRerun` left the test green while the page showed a stale
+    // register after a successful re-run. Both GETs must fire again.
+    await waitFor(() => expect(getsAfterRerun()).toBeGreaterThanOrEqual(2));
+  });
+
+  // A 403 is a denial, not a finding. The project's rule is that a denial
+  // renders in the neutral `unavailable` treatment and never in the red used
+  // for a breach — `components/Unavailable.tsx`'s doc comment names a caught
+  // 403 `ApiError` as one of the two behaviours it exists to unify.
+  it("renders a refused acknowledge as a denial, not in the breach red", async () => {
+    const p = TEST_PORTFOLIO.id;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes(`/api/portfolios/${p}/breaches/9/acknowledge`)) {
+        return new Response(JSON.stringify({ detail: "not permitted: settings" }), {
+          status: 403, headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes(`/api/portfolios/${p}/limit-runs`)) {
+        return new Response(JSON.stringify(RUNS), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.includes(`/api/portfolios/${p}/breaches`)) {
+        return new Response(JSON.stringify({ breaches: [episode({})] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`no stub for ${url}`);
+    });
+
+    const { container } = renderPage(<BreachesPage />);
+    await waitFor(() => screen.getByPlaceholderText("Note (required)"));
+    fireEvent.click(screen.getByLabelText(/Passive — market movement/));
+    fireEvent.change(screen.getByPlaceholderText("Note (required)"), { target: { value: "n" } });
+    fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
+
+    const denial = await waitFor(() => {
+      const el = container.querySelector("p.unavailable");
+      if (!el?.textContent?.includes("not permitted")) throw new Error("no denial yet");
+      return el;
+    });
+    // The whole point: it is in the unavailable treatment, and there is no
+    // `.neg` (breach red) anywhere carrying the same message.
+    expect(denial.className).toContain("unavailable");
+    const reds = [...container.querySelectorAll("p.neg")].map((e) => e.textContent ?? "");
+    expect(reds.some((t) => t.includes("not permitted"))).toBe(false);
+  });
+
+  it("renders a refused re-run as a denial, not in the breach red", async () => {
+    const p = TEST_PORTFOLIO.id;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes(`/api/portfolios/${p}/limit-runs`) && init?.method === "POST") {
+        return new Response(JSON.stringify({ detail: "not permitted: settings" }), {
+          status: 403, headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes(`/api/portfolios/${p}/limit-runs`)) {
+        return new Response(JSON.stringify(RUNS), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.includes(`/api/portfolios/${p}/breaches`)) {
+        return new Response(JSON.stringify({ breaches: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`no stub for ${url}`);
+    });
+
+    const { container } = renderPage(<BreachesPage />);
+    await waitFor(() => screen.getByText("2026-08-07"));
+    fireEvent.click(screen.getByRole("button", { name: "Re-run checks now" }));
+
+    await waitFor(() => {
+      const el = container.querySelector("p.unavailable");
+      if (!el?.textContent?.includes("not permitted")) throw new Error("no denial yet");
+    });
+    const reds = [...container.querySelectorAll("p.neg")].map((e) => e.textContent ?? "");
+    expect(reds.some((t) => t.includes("not permitted"))).toBe(false);
+  });
+
+  // `Chip`'s `kind` is wire data. A state the server adds before the frontend
+  // ships must degrade to one odd-looking chip, never a thrown TypeError that
+  // unmounts the page.
+  it("does not throw on a state it does not recognise", async () => {
+    stub([episode({ state: "escalated" })]);
+    const { container } = renderPage(<BreachesPage />);
+    await waitFor(() => expect(container.textContent).toContain("ACME"));
+    expect(container.textContent).toContain("escalated");
   });
 });

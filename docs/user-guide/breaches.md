@@ -86,7 +86,11 @@ indefinitely if you want the episode acknowledged — it simply means nobody has
 yet.
 
 Alongside Unclassified, the card shows what the tool itself thinks happened, from comparing the
-subject's holdings between the previous snapshot and this one:
+subject's holdings across the two snapshots either side of the moment the episode **opened**. Read
+that literally: the proposal is computed once, when the episode first appears, and is never
+recomputed afterwards. A six-week-old episode still shows the proposal drawn from week one, so it
+describes how the breach *started*, not what has happened since. Later purchases do not change it —
+which is another reason it is a proposal and not a decision:
 
 - **Proposed: Active** — the fund bought more of the subject since the last snapshot, so the breach
   is (at least in part) a deliberate trading decision.
@@ -134,8 +138,8 @@ A resolved episode still appears here; only its state chip and its position furt
 say it is no longer live.
 
 **Run history** is a table of every recorded run, one column per run (newest first, each headed
-with that run's NAV date) and one row per check, with the check's status (OK/WATCH/BREACH) in each cell — a grey **N/A** where a
-check could not be evaluated for that run because an input was genuinely missing (for example, no
+with that run's NAV date) and one row per check, with the check's status (OK/WATCH/BREACH) in each cell — a grey **N/A** wherever
+that run has no result for the check. Usually that means an input was genuinely missing (for example, no
 shareholder register loaded, so the two "Top 5 holders" liquidity scenarios could not run). Hover
 a column with an "incomplete" flag to see which inputs were missing and why. **Re-run checks now**
 sits above this table and triggers a fresh run, described above. The on-page table shows the most

@@ -25,7 +25,11 @@ const CHIP: Record<string, { label: string; bg: string; fg: string; border: stri
 };
 
 function Chip({ kind }: { kind: keyof typeof CHIP }) {
-  const c = CHIP[kind];
+  // `kind` is wire data, not a closed set: a state or classification added
+  // server-side before the frontend ships would otherwise throw on `c.bg` and
+  // unmount the whole page — a blank screen instead of one odd-looking chip.
+  // Same defensive lookup as `DerivativesPage`'s `VERDICT_LABEL[v] ?? v`.
+  const c = CHIP[kind] ?? { label: kind, bg: "#eceff1", fg: "#455a64", border: "#cfd8dc" };
   return (
     <span style={{
       display: "inline-block", background: c.bg, color: c.fg, border: `1px solid ${c.border}`,
@@ -79,9 +83,15 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
   // acted) — the same red text for both reads as one generic failure.
   const [formErr, setFormErr] = useState<string | null>(null);
   const [serverErr, setServerErr] = useState<string | null>(null);
+  // A 403 is a denial, not a finding: it must never take the red used for a
+  // breach. `Unavailable`'s own contract names this case — see its doc
+  // comment — so it is tracked apart from `serverErr` rather than styled
+  // differently at the call site.
+  const [denied, setDenied] = useState<string | null>(null);
 
   async function submit() {
     setServerErr(null);
+    setDenied(null);
     if (classification === "" || note.trim() === "") {
       setFormErr("Choose a classification and add a note before acknowledging.");
       return;
@@ -96,7 +106,8 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
       onDone();
     } catch (e) {
       const ae = e as ApiError;
-      setServerErr(ae.detail ?? ae.message);
+      if (ae.status === 403) setDenied(ae.detail ?? ae.message);
+      else setServerErr(ae.detail ?? ae.message);
     } finally {
       setBusy(false);
     }
@@ -124,6 +135,7 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
         <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
       </label>
       {formErr && <p className="warn-badge">{formErr}</p>}
+      {denied && <Unavailable reason={denied} />}
       {serverErr && <p className="neg">{serverErr}</p>}
       <button type="button" disabled={busy} onClick={() => void submit()}>Acknowledge</button>
     </div>
@@ -135,9 +147,11 @@ function ResolveForm({ pid, bid, onDone }: { pid: number; bid: number; onDone: (
   const [busy, setBusy] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
   const [serverErr, setServerErr] = useState<string | null>(null);
+  const [denied, setDenied] = useState<string | null>(null);
 
   async function submit() {
     setServerErr(null);
+    setDenied(null);
     if (note.trim() === "") {
       setFormErr("A note is required to resolve.");
       return;
@@ -149,7 +163,8 @@ function ResolveForm({ pid, bid, onDone }: { pid: number; bid: number; onDone: (
       onDone();
     } catch (e) {
       const ae = e as ApiError;
-      setServerErr(ae.detail ?? ae.message);
+      if (ae.status === 403) setDenied(ae.detail ?? ae.message);
+      else setServerErr(ae.detail ?? ae.message);
     } finally {
       setBusy(false);
     }
@@ -162,6 +177,7 @@ function ResolveForm({ pid, bid, onDone }: { pid: number; bid: number; onDone: (
         onChange={(e) => setNote(e.target.value)} style={{ width: "100%" }}
       />
       {formErr && <p className="warn-badge">{formErr}</p>}
+      {denied && <Unavailable reason={denied} />}
       {serverErr && <p className="neg">{serverErr}</p>}
       <button type="button" disabled={busy} onClick={() => void submit()}>Resolve</button>
     </div>
@@ -293,6 +309,7 @@ export default function BreachesPage() {
   const breaches = useFetch(() => getBreaches(portfolio.id), [portfolio.id]);
   const [rerunBusy, setRerunBusy] = useState(false);
   const [rerunErr, setRerunErr] = useState<string | null>(null);
+  const [rerunDenied, setRerunDenied] = useState<string | null>(null);
 
   function reloadAll() {
     runs.reload();
@@ -302,12 +319,14 @@ export default function BreachesPage() {
   async function doRerun() {
     setRerunBusy(true);
     setRerunErr(null);
+    setRerunDenied(null);
     try {
       await rerunLimitChecks(portfolio.id);
       reloadAll();
     } catch (e) {
       const ae = e as ApiError;
-      setRerunErr(ae.detail ?? ae.message);
+      if (ae.status === 403) setRerunDenied(ae.detail ?? ae.message);
+      else setRerunErr(ae.detail ?? ae.message);
     } finally {
       setRerunBusy(false);
     }
@@ -347,6 +366,7 @@ export default function BreachesPage() {
         </button>
         <a href={breachExportUrl(portfolio.id)} download>Export evidence workbook</a>
       </div>
+      {rerunDenied && <Unavailable reason={rerunDenied} />}
       {rerunErr && <p className="neg">{rerunErr}</p>}
       {runs.forbidden ? <Unavailable reason={runs.forbidden} /> : runs.error && <p className="neg">{runs.error}</p>}
       {!runs.forbidden && !runs.error && <RunHistory runs={runRows} />}
