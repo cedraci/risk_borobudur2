@@ -4,19 +4,37 @@ import {
   type BreachEpisode, type CheckResult, type LimitRun,
 } from "../api";
 import Unavailable from "../components/Unavailable";
-import { pct } from "../fmt";
+import { eur, pct } from "../fmt";
 import { useFetch } from "../hooks";
 import { usePortfolio } from "../PortfolioContext";
 
-const STATE_LABEL: Record<BreachEpisode["state"], string> = {
-  open: "Open", acknowledged: "Acknowledged", resolved: "Resolved",
+/** One label + colour set per state/classification value, rendered as the
+ * same bordered pill for all six — so "Open" (urgent, unaddressed) doesn't
+ * read as a bare red word next to "Acknowledged"'s boxed amber pill while
+ * "Resolved" is a bare green word. `active` gets its own colour rather than
+ * sharing green with `resolved`/`passive`: it is the manager's own decision,
+ * not a cleared item, and painting it pass-green invited exactly that
+ * misreading on a scan. */
+const CHIP: Record<string, { label: string; bg: string; fg: string; border: string }> = {
+  open: { label: "Open", bg: "#fdeaea", fg: "#c62828", border: "#f0b4b4" },
+  acknowledged: { label: "Acknowledged", bg: "#fff4e0", fg: "#925b06", border: "#f0c36d" },
+  resolved: { label: "Resolved", bg: "#e8f5ec", fg: "#0a7d33", border: "#a9d9b8" },
+  unclassified: { label: "Unclassified", bg: "#fff4e0", fg: "#925b06", border: "#f0c36d" },
+  active: { label: "Active", bg: "#e8f0fb", fg: "#1d4ea3", border: "#b7cff0" },
+  passive: { label: "Passive", bg: "#e8f5ec", fg: "#0a7d33", border: "#a9d9b8" },
 };
-const STATE_CLASS: Record<BreachEpisode["state"], string> = {
-  open: "neg", acknowledged: "warn-badge", resolved: "pos",
-};
-const CLASS_LABEL: Record<BreachEpisode["classification"], string> = {
-  unclassified: "Unclassified", active: "Active", passive: "Passive",
-};
+
+function Chip({ kind }: { kind: keyof typeof CHIP }) {
+  const c = CHIP[kind];
+  return (
+    <span style={{
+      display: "inline-block", background: c.bg, color: c.fg, border: `1px solid ${c.border}`,
+      borderRadius: 4, padding: "2px 8px", fontSize: 12, marginLeft: 6,
+    }}>
+      {c.label}
+    </span>
+  );
+}
 
 function daysBetween(from: string, to: string): number {
   const ms = new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime();
@@ -28,6 +46,16 @@ function daysBetween(from: string, to: string): number {
  * only what it observed. */
 function latestResultFor(runs: LimitRun[], checkKey: string): CheckResult | undefined {
   return runs[0]?.results.find((r) => r.check_key === checkKey);
+}
+
+/** EMIR checks (`emir_*`) record a euro notional against a euro threshold
+ * (`handlers/breaches.rs`'s `threshold_eur`/`avg_otc_eur`); every other check
+ * family (concentration, liquidity, VaR) records a ratio to NAV or to the
+ * configured limit fraction. Formatting an EMIR episode with `pct` would
+ * print a nine-figure euro amount as a percentage — exactly the class of
+ * episode a regulator asks about first. */
+function valueFmt(checkKey: string): (x: number | null | undefined) => string {
+  return checkKey.startsWith("emir_") ? eur : pct;
 }
 
 /** Sorted `open` first, then everything else by `opened_nav_date` ascending —
@@ -46,15 +74,20 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
   const [note, setNote] = useState("");
   const [deadline, setDeadline] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  // Kept apart from `serverErr` so the user can tell "you left the form
+  // incomplete" from "the server refused this" (e.g. someone else already
+  // acted) — the same red text for both reads as one generic failure.
+  const [formErr, setFormErr] = useState<string | null>(null);
+  const [serverErr, setServerErr] = useState<string | null>(null);
 
   async function submit() {
+    setServerErr(null);
     if (classification === "" || note.trim() === "") {
-      setErr("A classification and a note are both required to acknowledge.");
+      setFormErr("Choose a classification and add a note before acknowledging.");
       return;
     }
+    setFormErr(null);
     setBusy(true);
-    setErr(null);
     try {
       await acknowledgeBreach(pid, bid, {
         classification, note: note.trim(),
@@ -63,7 +96,7 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
       onDone();
     } catch (e) {
       const ae = e as ApiError;
-      setErr(ae.detail ?? ae.message);
+      setServerErr(ae.detail ?? ae.message);
     } finally {
       setBusy(false);
     }
@@ -90,7 +123,8 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
       <label>Deadline (optional):{" "}
         <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
       </label>
-      {err && <p className="neg">{err}</p>}
+      {formErr && <p className="warn-badge">{formErr}</p>}
+      {serverErr && <p className="neg">{serverErr}</p>}
       <button type="button" disabled={busy} onClick={() => void submit()}>Acknowledge</button>
     </div>
   );
@@ -99,21 +133,23 @@ function AcknowledgeForm({ pid, bid, onDone }: { pid: number; bid: number; onDon
 function ResolveForm({ pid, bid, onDone }: { pid: number; bid: number; onDone: () => void }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [formErr, setFormErr] = useState<string | null>(null);
+  const [serverErr, setServerErr] = useState<string | null>(null);
 
   async function submit() {
+    setServerErr(null);
     if (note.trim() === "") {
-      setErr("A note is required to resolve.");
+      setFormErr("A note is required to resolve.");
       return;
     }
+    setFormErr(null);
     setBusy(true);
-    setErr(null);
     try {
       await resolveBreach(pid, bid, note.trim());
       onDone();
     } catch (e) {
       const ae = e as ApiError;
-      setErr(ae.detail ?? ae.message);
+      setServerErr(ae.detail ?? ae.message);
     } finally {
       setBusy(false);
     }
@@ -125,31 +161,38 @@ function ResolveForm({ pid, bid, onDone }: { pid: number; bid: number; onDone: (
         placeholder="Resolution note (required)" value={note} rows={2}
         onChange={(e) => setNote(e.target.value)} style={{ width: "100%" }}
       />
-      {err && <p className="neg">{err}</p>}
+      {formErr && <p className="warn-badge">{formErr}</p>}
+      {serverErr && <p className="neg">{serverErr}</p>}
       <button type="button" disabled={busy} onClick={() => void submit()}>Resolve</button>
     </div>
   );
 }
 
 function EpisodeCard({
-  pid, ep, runs, onChanged,
-}: { pid: number; ep: BreachEpisode; runs: LimitRun[]; onChanged: () => void }) {
+  pid, ep, runs, runsUnavailable, onChanged,
+}: { pid: number; ep: BreachEpisode; runs: LimitRun[]; runsUnavailable?: string; onChanged: () => void }) {
   const result = latestResultFor(runs, ep.check_key);
+  const fmt = valueFmt(ep.check_key);
   const today = new Date().toISOString().slice(0, 10);
   const days = daysBetween(ep.opened_nav_date, ep.closed_nav_date ?? today);
 
   return (
     <div className="card">
       <h4>
-        {result?.scope_label ?? ep.check_key} — {ep.subject}{" "}
-        <span className={STATE_CLASS[ep.state]}>{STATE_LABEL[ep.state]}</span>{" "}
-        <span className={ep.classification === "unclassified" ? "warn-badge" : "pos"}>
-          {CLASS_LABEL[ep.classification]}
-        </span>
+        {result?.scope_label ?? ep.check_key} — {ep.subject}
+        <Chip kind={ep.state} />
+        <Chip kind={ep.classification} />
       </h4>
+      {/* Without the run history, the check's own scope label and limit are
+          unknown — the card still shows what it can (the raw check key, the
+          episode's own observed/peak figures) but says why the rest is
+          missing, rather than leaving a bare "vs limit –" unexplained. */}
+      {runsUnavailable && (
+        <p className="unavailable">Check details (scope label, limit) unavailable — {runsUnavailable}.</p>
+      )}
       <p className="kpi-sub">
         Open since {ep.opened_nav_date} ({days} day{days === 1 ? "" : "s"}) ·{" "}
-        {pct(ep.opened_value)} &rarr; peak {pct(ep.peak_value)} vs limit {pct(result?.limit_value ?? null)}
+        {fmt(ep.opened_value)} &rarr; peak {fmt(ep.peak_value)} vs limit {fmt(result?.limit_value ?? null)}
       </p>
       {/* The server closes an episode as soon as the numbers clear, but that
           is not the same as a human signing off on it — this line is the one
@@ -158,10 +201,20 @@ function EpisodeCard({
         <p className="warn-badge">cleared on the data since {ep.closed_nav_date} — awaiting sign-off</p>
       )}
       {/* Never a decision — labelled "Proposed:" and kept in one text run
-          (no nested element) so it stays a single, unambiguous sentence. */}
+          (no nested element) so it stays a single, unambiguous sentence.
+          `proposed_classification` is `null` in three real cases (first
+          snapshot, no holdings, or a quantity missing at one of the two
+          snapshots — see `analytics::breach::propose`), each still carrying
+          a `proposal_reason`. Falling through to "Passive" there would
+          manufacture a guess the engine explicitly declined to make, right
+          next to the sentence explaining why it couldn't — worse than
+          presenting a real proposal as a decision, so it is called out on
+          its own rather than folded into the active/passive wording. */}
       {ep.proposal_reason && (
         <p className="kpi-sub">
-          Proposed: {ep.proposed_classification === "active" ? "Active" : "Passive"} — {ep.proposal_reason}
+          {ep.proposed_classification === null
+            ? `No proposal — ${ep.proposal_reason}`
+            : `Proposed: ${ep.proposed_classification === "active" ? "Active" : "Passive"} — ${ep.proposal_reason}`}
         </p>
       )}
       {ep.acknowledged_at && (
@@ -193,34 +246,44 @@ function RunHistory({ runs }: { runs: LimitRun[] }) {
   if (runs.length === 0) return <p className="kpi-sub">No runs recorded yet.</p>;
 
   return (
-    <table className="tbl">
-      <thead>
-        <tr>
-          <th>Check</th>
-          {runs.map((r) => (
-            <th
-              key={r.id}
-              title={r.inputs_complete ? undefined : Object.values(r.input_notes).join("; ")}
-            >
-              {r.nav_date}{" "}
-              {!r.inputs_complete && <span className="warn-badge">incomplete</span>}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {checkKeys.map((key) => (
-          <tr key={key}>
-            <td>{labelFor(key)}</td>
-            {runs.map((r) => {
-              const res = r.results.find((x) => x.check_key === key);
-              const cls = !res ? "unavailable" : res.status === "ok" ? "pos" : res.status === "watch" ? "warn-badge" : "neg";
-              return <td key={r.id}><span className={cls}>{res ? res.status.toUpperCase() : "N/A"}</span></td>;
-            })}
+    // 52 runs (the default `getLimitRuns` page size) means 52 columns —
+    // wide enough to break the page layout without its own scroll container.
+    <div style={{ overflowX: "auto" }}>
+      <table className="tbl">
+        <thead>
+          <tr>
+            <th>Check</th>
+            {runs.map((r) => (
+              <th
+                key={r.id}
+                // Each note is keyed by the check it belongs to
+                // (`input_notes` in `handlers/breaches.rs`) — dropping the
+                // key here would leave "no register loaded" without saying
+                // which check went unevaluated.
+                title={r.inputs_complete
+                  ? undefined
+                  : Object.entries(r.input_notes).map(([k, v]) => `${k}: ${v}`).join("; ")}
+              >
+                {r.nav_date}{" "}
+                {!r.inputs_complete && <span className="warn-badge">incomplete</span>}
+              </th>
+            ))}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {checkKeys.map((key) => (
+            <tr key={key}>
+              <td>{labelFor(key)}</td>
+              {runs.map((r) => {
+                const res = r.results.find((x) => x.check_key === key);
+                const cls = !res ? "unavailable" : res.status === "ok" ? "pos" : res.status === "watch" ? "warn-badge" : "neg";
+                return <td key={r.id}><span className={cls}>{res ? res.status.toUpperCase() : "N/A"}</span></td>;
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -257,16 +320,23 @@ export default function BreachesPage() {
     <div>
       <h2>Breaches</h2>
 
-      <h3>Open episodes</h3>
+      {/* Titled for what it sorts by, not what it holds: every episode is
+          listed here (open first, then by opened date), so a resolved one
+          still shows up — only its own state chip and the sort position say
+          it is no longer live. */}
+      <h3>Breach episodes</h3>
       {breaches.forbidden ? (
         <Unavailable reason={breaches.forbidden} />
       ) : breaches.error ? (
         <p className="neg">{breaches.error}</p>
-      ) : episodes.length === 0 ? (
+      ) : breaches.data === null ? null : episodes.length === 0 ? (
         <p className="kpi-sub">No breaches in the register.</p>
       ) : (
         episodes.map((ep) => (
-          <EpisodeCard key={ep.id} pid={portfolio.id} ep={ep} runs={runRows} onChanged={reloadAll} />
+          <EpisodeCard
+            key={ep.id} pid={portfolio.id} ep={ep} runs={runRows}
+            runsUnavailable={runs.forbidden} onChanged={reloadAll}
+          />
         ))
       )}
 

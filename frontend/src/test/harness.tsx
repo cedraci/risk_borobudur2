@@ -20,21 +20,30 @@ export const TEST_PORTFOLIO: Portfolio = {
   latest_nav_date: "2026-08-07",
 };
 
-/** Answers each request from `routes`, matched by URL substring. A request no
- * route matches fails the test loudly rather than resolving to `undefined` —
- * a silent 404 would look like an empty page and hide a wrong URL. */
-export function stubFetch(routes: Record<string, unknown>) {
-  const fetchStub = async (input: RequestInfo | URL): Promise<Response> => {
+/** Answers each request with a chosen status code, matched by URL substring.
+ * A request no route matches fails the test loudly rather than resolving to
+ * `undefined` — a silent 404 would look like an empty page and hide a wrong
+ * URL. The one matcher both `stubFetchStatus` and `stubFetch` share, so a
+ * page's handling of a non-200 (e.g. a 403) can be tested without
+ * hand-rolling a `Response`. */
+export function stubFetchStatus(routes: Record<string, { status: number; body: unknown }>) {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString();
     const hit = Object.keys(routes).find((k) => url.includes(k));
     if (!hit) throw new Error(`no stub for ${url}`);
-    const body = routes[hit];
+    const { status, body } = routes[hit];
     return new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { "content-type": "application/json" },
+      status, headers: { "content-type": "application/json" },
     });
-  };
-  vi.stubGlobal("fetch", fetchStub);
+  });
+}
+
+/** `stubFetchStatus` with every route pinned to 200 — the common case, where
+ * the payload shape is what's under test and the status code isn't. */
+export function stubFetch(routes: Record<string, unknown>) {
+  stubFetchStatus(
+    Object.fromEntries(Object.entries(routes).map(([k, body]) => [k, { status: 200, body }])),
+  );
 }
 
 /** Renders a page as the router would: inside its portfolio context. */
@@ -49,17 +58,3 @@ export function renderPage(ui: ReactElement) {
 /** The wire shape of a denied secondary domain, as `db::auth::Denied::reason`
  * renders it (`crates/db/src/auth/access.rs`). */
 export const denied = (label: string) => ({ status: "unavailable", reason: `not permitted: ${label}` });
-
-/** Like `stubFetch`, but each route may name a status code, so a page's
- * handling of a 403 can be tested without hand-rolling a Response. */
-export function stubFetchStatus(routes: Record<string, { status: number; body: unknown }>) {
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL): Promise<Response> => {
-    const url = typeof input === "string" ? input : input.toString();
-    const hit = Object.keys(routes).find((k) => url.includes(k));
-    if (!hit) throw new Error(`no stub for ${url}`);
-    const { status, body } = routes[hit];
-    return new Response(JSON.stringify(body), {
-      status, headers: { "content-type": "application/json" },
-    });
-  });
-}
