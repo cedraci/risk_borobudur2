@@ -139,9 +139,11 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/limit-runs", get(handlers::breaches::runs_list), Domain::Settings, Action::View)
         .protected("/api/portfolios/{id}/limit-runs", axum::routing::post(handlers::breaches::rerun), Domain::Settings, Action::Configure)
         .protected("/api/portfolios/{id}/breaches", get(handlers::breaches::register_list), Domain::Settings, Action::View)
-        // Must precede `/breaches/{bid}` below: axum matches routes in
-        // declaration order, and `{bid}` would otherwise swallow `export` as
-        // a path parameter the handler then fails to parse as an `i64`.
+        // Declared before `/breaches/{bid}` on principle, matching the task
+        // brief's route-ordering note — matchit (axum's router) is verified
+        // (`api_breach_register.rs::the_evidence_export_returns_an_xlsx`) to
+        // prefer this literal segment over the `{bid}` parameter either way,
+        // but nothing is lost by keeping the more specific route first.
         .protected("/api/portfolios/{id}/breaches/export", get(handlers::breaches::export), Domain::Settings, Action::Export)
         .protected("/api/portfolios/{id}/breaches/{bid}", get(handlers::breaches::episode_get), Domain::Settings, Action::View)
         .protected("/api/portfolios/{id}/breaches/{bid}/acknowledge", axum::routing::post(handlers::breaches::acknowledge), Domain::Settings, Action::Configure)
