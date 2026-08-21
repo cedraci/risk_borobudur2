@@ -475,3 +475,188 @@ async fn a_manual_rerun_records_a_second_run_for_the_same_date() {
     pool.close().await;
     edb.stop().await;
 }
+
+// ---- C1: the payload gate -------------------------------------------------
+
+/// One authenticated GET against portfolio 1's recorded runs.
+async fn runs_get(app: &axum::Router, cookie: &str) -> (StatusCode, serde_json::Value) {
+    let res = app.clone().oneshot(
+        Request::get("/api/portfolios/1/limit-runs")
+            .header("cookie", cookie).body(Body::empty()).unwrap()
+    ).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// The newest run's result for one check key. Panics rather than returning an
+/// `Option`: every key this test asks for must be present, and a silently
+/// missing row would turn a disclosure assertion into a vacuous one.
+fn result_for<'a>(runs: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
+    runs["runs"][0]["results"].as_array()
+        .unwrap_or_else(|| panic!("no results on the newest run: {runs}"))
+        .iter().find(|r| r["check_key"] == key)
+        .unwrap_or_else(|| panic!("no {key} row on the newest run: {runs}"))
+}
+
+/// Every cell of the evidence workbook's `Register` sheet, row by row, as
+/// strings — enough to assert that a value the JSON reads withhold does not
+/// reappear in the downloadable artefact.
+async fn export_register_sheet(app: &axum::Router, cookie: &str) -> Vec<Vec<String>> {
+    let res = app.clone().oneshot(
+        Request::get("/api/portfolios/1/breaches/export")
+            .header("cookie", cookie).body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "the export must succeed for this principal");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    use calamine::Reader as _;
+    let mut wb: calamine::Xlsx<_> =
+        calamine::Xlsx::new(std::io::Cursor::new(bytes)).expect("valid xlsx");
+    let range = calamine::Reader::worksheet_range(&mut wb, "Register").unwrap();
+    range.rows().map(|r| r.iter().map(|c| match c {
+        calamine::Data::String(s) => s.clone(),
+        calamine::Data::Float(f) => f.to_string(),
+        calamine::Data::Empty => String::new(),
+        other => format!("{other:?}"),
+    }).collect()).collect()
+}
+
+/// C1 (whole-branch review): `Settings/View` is a grant on the *register*, not
+/// a grant on the four domains a recorded run's payload is made of.
+///
+/// A run is computed under the system context, so each `detail` blob is the
+/// verbatim analytics of some other domain — and for `liq_top5` that includes
+/// `required_pct`, the combined share of NAV held by the fund's five largest
+/// investors. `GET /limits/liquidity` deliberately refuses exactly that figure
+/// to a principal without `Shareholders/View`, marking the scenario
+/// `unavailable`. Both shipped roles that hold `Settings` (`Operations`,
+/// `RiskAnalyst`) hold no `Shareholders` grant at all, so without a second
+/// gate on the read path the register hands over the number the live page
+/// exists to withhold.
+///
+/// Every assertion here has a positive control from the same fixture read
+/// under full grants, so none of them can pass because the figure was never
+/// computed in the first place.
+#[tokio::test]
+async fn a_settings_only_reader_cannot_read_the_payload_behind_a_recorded_run() {
+    let (desktop, pool, dbh, edb) = app().await;
+    let server_app = server::routes::router(server::state::AppState::server(dbh.clone()));
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A shareholder register, so `liq_top5` is a real recorded row rather than
+    // an absent input the recorder skips: without this the test would prove
+    // nothing about disclosure.
+    for (label, pct) in [("Investor A", 12.0), ("Investor B", 11.0), ("Investor C", 10.0),
+                         ("Investor D", 9.0), ("Investor E", 8.0), ("Investor F", 1.0)] {
+        sqlx::query("INSERT INTO shareholders (portfolio_id, label, pct_of_nav, as_of)
+                     VALUES (1, $1, $2, DATE '2026-07-24')")
+            .bind(label).bind(pct).execute(&pool).await.unwrap();
+    }
+    // Re-run so the recorded run is the one that saw the register.
+    let res = desktop.clone().oneshot(
+        Request::post("/api/portfolios/1/limit-runs")
+            .header("content-type", "application/json")
+            .body(Body::from("{}")).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // An episode with a proposal reason naming an ISIN and its quantities —
+    // the other verbatim positions disclosure `register_list` carries.
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let (run, _) = &scoped.runs_for(&view, 1).await.unwrap()[0];
+    const REASON: &str = "quantity of LU0000000001 rose from 100 to 250 since the previous snapshot";
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_breaches
+             (portfolio_id, check_key, subject, opened_run_id, opened_nav_date,
+              opened_value, peak_value, peak_nav_date, proposed_classification, proposal_reason)
+         VALUES (1, 'issuer_10', 'TEST ISSUER', $1, $2, 0.15, 0.151, $2, 'active', $3)
+         RETURNING id")
+        .bind(run.id).bind(run.nav_date).bind(REASON)
+        .fetch_one(&pool).await.unwrap();
+
+    // ---- Positive controls: full grants DO see all of it. ----------------
+    let (status, full) = runs_get(&desktop, "").await;
+    assert_eq!(status, StatusCode::OK);
+    let top5 = result_for(&full, "liq_top5");
+    let required_pct = top5["detail"]["required_pct"].as_f64()
+        .expect("the top-5 scenario must be computed and recorded for this fixture");
+    assert!((required_pct - 0.50).abs() < 1e-9,
+        "the five largest investors hold 50% of NAV in this fixture: {required_pct}");
+    let full_top5_status = top5["status"].clone();
+    assert!(result_for(&full, "issuer_10")["detail"]["rows"].is_array(),
+        "the concentration detail carries the issuer-by-issuer weights");
+    assert!(result_for(&full, "var_limit")["detail"]["historical"].is_object(),
+        "the VaR detail carries the VaR/ES triple");
+
+    let (status, full_reg) = register_get(&desktop, "", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(full_reg["breaches"][0]["proposal_reason"], REASON);
+    assert_eq!(full_reg["breaches"][0]["peak_value"], 0.151);
+
+    // ---- The Settings-only principal. ------------------------------------
+    let admin = db::admin::Admin::new(&pool);
+    let hash = server::auth::local::hash_password("pw").unwrap();
+    let uid = admin.create_user("settingsonly@f.lu", "U", &hash, false).await.unwrap();
+    for action in [Action::View, Action::Export] {
+        admin.grant_add(uid, Grant { domain: Domain::Settings, action, portfolio: Some(1) }, None)
+            .await.unwrap();
+    }
+    admin.session_create(&server::auth::local::token_hash("so-t"), uid, 1).await.unwrap();
+    let cookie = "borobudur_session=so-t";
+
+    let (status, gated) = runs_get(&server_app, cookie).await;
+    assert_eq!(status, StatusCode::OK, "the register itself is still readable on Settings/View");
+    assert!(!gated.to_string().contains("required_pct"),
+        "the top-five-investor share of NAV must not reach a principal with no Shareholders grant");
+
+    let top5 = result_for(&gated, "liq_top5");
+    assert_eq!(top5["detail"], serde_json::json!(
+        {"status": "unavailable", "reason": "not permitted: shareholder register"}),
+        "a withheld payload is marked, not silently dropped and not fabricated");
+    assert_eq!(top5["status"], full_top5_status,
+        "the verdict itself stays on Settings/View — that is what the register is for");
+    assert_eq!(result_for(&gated, "var_limit")["detail"],
+        serde_json::json!({"status": "unavailable", "reason": "not permitted: NAV history"}));
+    assert_eq!(result_for(&gated, "var_limit")["observed_value"], serde_json::Value::Null,
+        "the observed VaR is the same Nav disclosure as the detail it came from");
+    assert_eq!(result_for(&gated, "issuer_10")["detail"],
+        serde_json::json!({"status": "unavailable", "reason": "not permitted: positions"}));
+    assert_eq!(result_for(&gated, "emir_credit")["detail"],
+        serde_json::json!({"status": "unavailable", "reason": "not permitted: positions"}));
+
+    let (status, gated_reg) = register_get(&server_app, "", cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    let b = &gated_reg["breaches"][0];
+    assert_eq!(b["subject"], "TEST ISSUER", "the episode lifecycle stays on Settings/View");
+    assert_eq!(b["proposed_classification"], "active");
+    assert_eq!(b["proposal_reason"], serde_json::Value::Null);
+    assert_eq!(b["proposal_status"],
+        serde_json::json!({"status": "unavailable", "reason": "not permitted: positions"}));
+    assert_eq!(b["peak_value"], serde_json::Value::Null, "the peak reading is the issuer's weight");
+    assert!(!gated_reg.to_string().contains("LU0000000001"),
+        "the proposal reason names ISINs and quantities: {gated_reg}");
+
+    // The episode route is the third door onto the same numbers.
+    let res = server_app.clone().oneshot(
+        Request::get(format!("/api/portfolios/1/breaches/{bid}"))
+            .header("cookie", cookie).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let one: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(one["breach"]["peak_value"], serde_json::Value::Null);
+    assert!(!one.to_string().contains("LU0000000001"));
+
+    // ---- The export goes through the same path, so it cannot drift. ------
+    let full_sheet = export_register_sheet(&desktop, "").await;
+    assert!(full_sheet.iter().any(|r| r.contains(&"0.151".to_string())),
+        "positive control: the workbook writes the peak reading under full grants: {full_sheet:?}");
+    let gated_sheet = export_register_sheet(&server_app, cookie).await;
+    assert!(!gated_sheet.iter().any(|r| r.contains(&"0.151".to_string())),
+        "the evidence workbook must not carry what the JSON reads withhold: {gated_sheet:?}");
+
+    pool.close().await;
+    edb.stop().await;
+}

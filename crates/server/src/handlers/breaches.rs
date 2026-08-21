@@ -20,7 +20,7 @@ use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use chrono::NaiveDate;
 use db::auth::marker::{Configure, Export, Nav, Positions, Reference, Settings, Shareholders, View};
-use db::auth::{Access, AuthCtx, Domain};
+use db::auth::{Access, Action, AuthCtx, Domain};
 use db::repo::CheckResultRow;
 use db::scoped::Scoped;
 use std::collections::HashMap;
@@ -369,6 +369,177 @@ pub async fn holdings_at(
 // design doc's "Known limitation" section for why the register doesn't get
 // its own dedicated domain.
 
+// ---- The payload gate ----------------------------------------------------
+//
+// A run is COMPUTED under the system context, so every `detail` blob it
+// records is the verbatim analytics of some OTHER domain: the issuer-by-issuer
+// weights behind the concentration checks (Positions), `var_eur` and the
+// liquidity `*_eur` figures (Nav), `avg_otc_eur` (Positions, via EMIR), and —
+// for `liq_top5`/`liq_hybrid_top5` — `required_pct`, the combined share of NAV
+// held by the fund's five largest investors (Shareholders). A `BreachRow`'s
+// `proposal_reason` likewise names ISINs and quantities.
+//
+// `handlers::limits::liquidity_h` deliberately withholds that last figure from
+// a principal without `Shareholders/View`, marking the scenario
+// `{"status":"unavailable","reason":…}` so a denial stays distinguishable from
+// an empty register. Serving the recorded run back on `Settings/View` alone
+// would make the register a side channel around exactly that non-disclosure —
+// and the shipped `Operations` and `RiskAnalyst` roles both hold `Settings`
+// with no `Shareholders` grant at all.
+//
+// So the payload gets a SECOND gate, here on the read path: each field is
+// re-authorized against the domain it came from and replaced with the same
+// marker, carrying the same `Denied::reason()` string, where the reader lacks
+// it. `check_key`, `scope_label`, `status` and the whole episode lifecycle
+// stay on `Settings/View` — knowing that a check breached is what the register
+// is for; the numbers behind it are the other domain's business.
+
+/// The marker `handlers::limits` uses for a component a principal may not
+/// see. Never a fabricated value, never a silent omission.
+fn unavailable(reason: &str) -> serde_json::Value {
+    serde_json::json!({"status": "unavailable", "reason": reason})
+}
+
+fn available() -> serde_json::Value {
+    serde_json::json!({"status": "ok"})
+}
+
+/// One reader's denials on the three secondary domains a recorded run's
+/// payload can carry. Built once per request from `Scoped::denial`, which
+/// asks without taking a token — nothing here reads those domains, it only
+/// decides what may be served back.
+pub(crate) struct DetailGate {
+    positions: Option<String>,
+    nav: Option<String>,
+    shareholders: Option<String>,
+}
+
+impl DetailGate {
+    fn for_reader(scoped: &Scoped<'_>, pid: i64) -> Self {
+        let reason = |d: Domain| scoped.denial(d, Action::View, pid).map(|x| x.reason());
+        DetailGate {
+            positions: reason(Domain::Positions),
+            nav: reason(Domain::Nav),
+            shareholders: reason(Domain::Shareholders),
+        }
+    }
+
+    /// Which domains a check's payload draws from, as
+    /// `(positions, nav, shareholders)`.
+    ///
+    /// An unrecognised key is treated as drawing on ALL THREE. A check added
+    /// later must fail closed: the cost of that is a marker where a number
+    /// could have been served, and the cost of the other default is another
+    /// C1.
+    fn domains_for(check_key: &str) -> (bool, bool, bool) {
+        match check_key {
+            // Concentration: `Check::rows` is the fund's issuer-by-issuer
+            // weights, and `observed_value` is the largest of them.
+            "issuer_10" | "group_20" | "fund_20" | "deposit_20" | "forty" => (true, false, false),
+            // `VarBlock::var_eur` is VaR x AUM.
+            "var_limit" => (false, true, false),
+            // The liquidity waterfall is built from positions and scaled by
+            // NAV; the two top-5 scenarios additionally carry `required_pct`,
+            // which IS the top five investors' combined share of NAV.
+            k if k.starts_with("liq_") => (true, true, k.ends_with("top5")),
+            // `avg_otc_eur` over the fund's own derivative positions.
+            k if k.starts_with("emir_") => (true, false, false),
+            _ => (true, true, true),
+        }
+    }
+
+    /// The reason to show for a check whose payload this reader may not have,
+    /// or `None` when they may. Shareholders first, then Nav, then Positions:
+    /// where several apply, the narrowest grant is the informative one.
+    fn reason_for(&self, check_key: &str) -> Option<&str> {
+        let (pos, nav, sh) = Self::domains_for(check_key);
+        None.or_else(|| if sh { self.shareholders.as_deref() } else { None })
+            .or_else(|| if nav { self.nav.as_deref() } else { None })
+            .or_else(|| if pos { self.positions.as_deref() } else { None })
+    }
+
+    /// One recorded check result. `limit_value` survives a denial — it is the
+    /// fund's own configured limit (or a regulatory threshold), which is
+    /// `Settings` data the reader already holds. `observed_value` does not:
+    /// for `emir_*` it IS `avg_otc_eur`, and for the concentration checks it
+    /// is the largest issuer weight, so it belongs with `detail` rather than
+    /// surviving as a summary of what was withheld.
+    fn result_json(&self, r: &CheckResultRow) -> serde_json::Value {
+        match self.reason_for(&r.check_key) {
+            None => serde_json::json!({
+                "check_key": r.check_key, "scope_label": r.scope_label,
+                "limit_value": r.limit_value, "observed_value": r.observed_value,
+                "status": r.status, "detail": r.detail,
+                "payload_status": available(),
+            }),
+            Some(reason) => serde_json::json!({
+                "check_key": r.check_key, "scope_label": r.scope_label,
+                "limit_value": r.limit_value, "observed_value": serde_json::Value::Null,
+                "status": r.status, "detail": unavailable(reason),
+                "payload_status": unavailable(reason),
+            }),
+        }
+    }
+
+    /// One register episode. `opened_value`/`peak_value` are the observed
+    /// readings — the same disclosure as `observed_value` above — and go
+    /// behind the check's own domains. `proposal_reason` is gated separately
+    /// on Positions, because `analytics::breach::propose` builds it from
+    /// instrument quantities whatever the check is.
+    fn breach_json(&self, b: &db::repo::BreachRow) -> serde_json::Value {
+        let mut v = serde_json::to_value(b).expect("BreachRow always serializes");
+        let values_reason = self.reason_for(&b.check_key);
+        v["values_status"] = match values_reason {
+            None => available(),
+            Some(reason) => {
+                v["opened_value"] = serde_json::Value::Null;
+                v["peak_value"] = serde_json::Value::Null;
+                v["peak_nav_date"] = serde_json::Value::Null;
+                unavailable(reason)
+            }
+        };
+        v["proposal_status"] = match self.positions.as_deref() {
+            None => available(),
+            Some(reason) => {
+                v["proposal_reason"] = serde_json::Value::Null;
+                unavailable(reason)
+            }
+        };
+        v
+    }
+
+    /// One timeline event. The `opened` and `note` events restate the
+    /// observed reading (`value`, `peak_value`) and the proposal's `reason`
+    /// in their own `detail`, so gating only `breach_json` would leave the
+    /// same numbers readable one route over.
+    fn event_json(
+        &self, check_key: &str, e: &db::repo::BreachEventRow,
+    ) -> serde_json::Value {
+        let mut v = serde_json::to_value(e).expect("BreachEventRow always serializes");
+        v["values_status"] = match self.reason_for(check_key) {
+            None => available(),
+            Some(reason) => {
+                for k in ["value", "peak_value"] {
+                    if v["detail"].get(k).is_some() {
+                        v["detail"][k] = serde_json::Value::Null;
+                    }
+                }
+                unavailable(reason)
+            }
+        };
+        v["proposal_status"] = match self.positions.as_deref() {
+            None => available(),
+            Some(reason) => {
+                if v["detail"].get("reason").is_some() {
+                    v["detail"]["reason"] = serde_json::Value::Null;
+                }
+                unavailable(reason)
+            }
+        };
+        v
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct RunsQuery {
     pub limit: Option<i64>,
@@ -377,18 +548,21 @@ pub struct RunsQuery {
 /// The recorded check runs as JSON, newest first, each with its per-check
 /// results — the one construction shared by `runs_list` and the evidence
 /// export, so the two never drift into serving different shapes of the same
-/// data. Takes the already-fetched rows rather than fetching them itself: the
+/// data, and so the `DetailGate` cannot be applied to one and forgotten on the
+/// other. Takes the already-fetched rows rather than fetching them itself: the
 /// two callers fetch differently (`runs_list` pages with a clamped `limit`
 /// via `runs_for`, the export reads everything via `runs_all` — see Ruling 1
 /// in the task-9 review, an export must never silently cap the history it
 /// claims to be complete).
-fn runs_json(rows: Vec<(db::repo::CheckRunRow, Vec<CheckResultRow>)>) -> Vec<serde_json::Value> {
+fn runs_json(
+    rows: Vec<(db::repo::CheckRunRow, Vec<CheckResultRow>)>, gate: &DetailGate,
+) -> Vec<serde_json::Value> {
     rows.into_iter()
         .map(|(run, results)| serde_json::json!({
             "id": run.id, "nav_date": run.nav_date, "run_at": run.run_at,
             "triggered_by": run.triggered_by, "import_id": run.import_id,
             "inputs_complete": run.inputs_complete, "input_notes": run.input_notes,
-            "results": results,
+            "results": results.iter().map(|r| gate.result_json(r)).collect::<Vec<_>>(),
         }))
         .collect()
 }
@@ -402,7 +576,8 @@ pub async fn runs_list(
     let a = scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
     let limit = q.limit.unwrap_or(52).clamp(1, 500);
-    let runs = runs_json(scoped.runs_for(&a, limit).await?);
+    let gate = DetailGate::for_reader(&scoped, pid);
+    let runs = runs_json(scoped.runs_for(&a, limit).await?, &gate);
     Ok(Json(serde_json::json!({ "runs": runs })))
 }
 
@@ -414,15 +589,15 @@ pub struct RegisterQuery {
 /// The breach register as JSON, optionally filtered to one `state` — the one
 /// construction shared by `register_list` and the evidence export.
 async fn register_json(
-    scoped: &Scoped<'_>, a: &Access<Settings, View>, state: Option<&str>,
+    scoped: &Scoped<'_>, a: &Access<Settings, View>, state: Option<&str>, gate: &DetailGate,
 ) -> Result<Vec<serde_json::Value>, AppError> {
     if let Some(s) = state
         && !matches!(s, "open" | "acknowledged" | "resolved") {
         return Err(AppError::BadRequest(format!("unknown state: {s}")));
     }
     Ok(scoped.breaches_for(a, state).await?
-        .into_iter()
-        .map(|b| serde_json::to_value(b).expect("BreachRow always serializes"))
+        .iter()
+        .map(|b| gate.breach_json(b))
         .collect())
 }
 
@@ -435,7 +610,8 @@ pub async fn register_list(
     let scoped = st.db.scope(&ctx);
     let a = scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
-    let breaches = register_json(&scoped, &a, q.state.as_deref()).await?;
+    let gate = DetailGate::for_reader(&scoped, pid);
+    let breaches = register_json(&scoped, &a, q.state.as_deref(), &gate).await?;
     Ok(Json(serde_json::json!({ "breaches": breaches })))
 }
 
@@ -453,8 +629,13 @@ pub async fn export(
     let portfolio = super::portfolios::ensure(&scoped, pid, false).await?;
     // Every run, uncapped: an evidence artefact must not silently omit
     // history the way `runs_list`'s paged UI read is allowed to.
-    let runs = runs_json(scoped.runs_all(&a).await?);
-    let breaches = register_json(&scoped, &a, None).await?;
+    //
+    // Through the SAME `runs_json`/`register_json` the read endpoints use, so
+    // the payload gate cannot be applied to the JSON routes and forgotten
+    // here — an export is a read, and a downloadable one at that.
+    let gate = DetailGate::for_reader(&scoped, pid);
+    let runs = runs_json(scoped.runs_all(&a).await?, &gate);
+    let breaches = register_json(&scoped, &a, None, &gate).await?;
     let bytes = ingest::breach_evidence::build(&portfolio.name, &runs, &breaches)
         .map_err(AppError::Internal)?;
     crate::audit::record(&st, &ctx, "export", Some(Domain::Settings), Some(pid),
@@ -480,7 +661,12 @@ pub async fn episode_get(
     let breach = scoped.breach_get(&a, bid).await?
         .ok_or_else(|| AppError::NotFound(format!("no breach {bid}")))?;
     let events = scoped.breach_events(&a, bid).await?;
-    Ok(Json(serde_json::json!({ "breach": breach, "events": events })))
+    let gate = DetailGate::for_reader(&scoped, pid);
+    // The timeline's `opened`/`note` events carry the same observed readings
+    // in their `detail` — the third door into the same numbers.
+    let events: Vec<serde_json::Value> = events.iter()
+        .map(|e| gate.event_json(&breach.check_key, e)).collect();
+    Ok(Json(serde_json::json!({ "breach": gate.breach_json(&breach), "events": events })))
 }
 
 // ---- The workflow: manual re-run, acknowledge, resolve. ------------------
