@@ -638,15 +638,16 @@ pub async fn export(
     let breaches = register_json(&scoped, &a, None, &gate).await?;
     let bytes = ingest::breach_evidence::build(&portfolio.name, &runs, &breaches)
         .map_err(AppError::Internal)?;
-    crate::audit::record(&st, &ctx, "export", Some(Domain::Settings), Some(pid),
-        serde_json::json!({"kind": "breach_register"})).await;
     let filename = format!("Breach register - {} - {}.xlsx", portfolio.name, chrono::Utc::now().date_naive());
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
-    h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
-        &format!("attachment; filename=\"{filename}\""))
-        .map_err(anyhow::Error::from)?);
+    h.insert(header::CONTENT_DISPOSITION, super::download::attachment(&filename));
+    // Audited AFTER the response is fully built (M8). It used to run before
+    // the header construction that could fail, so a 500 that delivered nothing
+    // was recorded in the audit log as a completed export.
+    crate::audit::record(&st, &ctx, "export", Some(Domain::Settings), Some(pid),
+        serde_json::json!({"kind": "breach_register"})).await;
     Ok((StatusCode::OK, h, bytes))
 }
 

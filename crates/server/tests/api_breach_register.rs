@@ -660,3 +660,83 @@ async fn a_settings_only_reader_cannot_read_the_payload_behind_a_recorded_run() 
     pool.close().await;
     edb.stop().await;
 }
+
+/// I1/M7 (whole-branch review): a fund whose name is not plain ASCII must get
+/// a correctly encoded filename, and a fund whose name carries a control
+/// character must not 500.
+///
+/// Both evidence exports interpolated the portfolio name into a bare
+/// `filename="…"`. Measured, not assumed: an accented name did NOT 500 (the
+/// review's prediction there is wrong — `http`'s `HeaderValue::is_valid`
+/// admits obs-text), it produced a header carrying raw UTF-8 in a field HTTP
+/// defines as ISO-8859-1, so browsers saved
+/// `Borobudur Actions EuropÃ©ennes.xlsx`. A quote in the name closed the
+/// quoted-string early. A control character — `valid_name` only trims and
+/// rejects empty — did fail `from_str` and became a 500 naming no cause.
+///
+/// No fixture in either suite had a non-ASCII name, which is why this shipped;
+/// this one does, and covers BOTH exports because they had the same defect in
+/// the same shape.
+#[tokio::test]
+async fn a_non_ascii_fund_name_does_not_break_the_evidence_exports() {
+    let (desktop, pool, _dbh, edb) = app().await;
+
+    let res = desktop.clone().oneshot(
+        Request::post("/api/portfolios")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Borobudur Actions Européennes \"Alpha\"","kind":"ucits"}"#))
+            .unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let created: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let pid = created["id"].as_i64().unwrap();
+
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(
+        upload_req(&format!("/api/portfolios/{pid}/imports"), &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    for path in [format!("/api/portfolios/{pid}/breaches/export"),
+                 format!("/api/portfolios/{pid}/emir/export")] {
+        let res = desktop.clone().oneshot(
+            Request::get(&path).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path} must not fail on an accented fund name");
+        let raw = res.headers().get("content-disposition").unwrap().as_bytes().to_vec();
+        assert!(raw.is_ascii(),
+            "{path}: raw UTF-8 in a header HTTP reads as ISO-8859-1 gives the user a mojibake \
+             filename: {}", String::from_utf8_lossy(&raw));
+        let cd = String::from_utf8(raw).unwrap();
+        // The accented name travels in the RFC 5987 form...
+        assert!(cd.contains("filename*=UTF-8''"), "{path}: {cd}");
+        assert!(cd.contains("Europ%C3%A9ennes"), "{path}: {cd}");
+        // ...and the ASCII fallback is a well-formed quoted-string: the fund's
+        // own quotes must not close it early (M7).
+        let quoted = cd.strip_prefix("attachment; filename=\"").expect(&cd);
+        let (inside, _) = quoted.split_once('"').expect(&cd);
+        assert!(inside.ends_with(".xlsx"),
+            "{path}: the quoted-string is truncated by the name's own quotes: {cd}");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[0..2], b"PK", "{path}: xlsx files are zip archives");
+    }
+
+    // A control character in the name is the case that really did 500:
+    // `valid_name` accepts it, and `HeaderValue::from_str` rejects it.
+    let res = desktop.clone().oneshot(
+        Request::post("/api/portfolios")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Fonds\nInjection","kind":"ucits"}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "the name endpoint accepts it, so the export must cope");
+    let created: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let odd = created["id"].as_i64().unwrap();
+    let res = desktop.clone().oneshot(
+        Request::get(format!("/api/portfolios/{odd}/breaches/export"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK,
+        "a newline in the fund's name must not make its evidence unreachable");
+    let cd = res.headers().get("content-disposition").unwrap().to_str().unwrap();
+    assert!(!cd.contains('\n') && cd.contains("Fonds_Injection"), "{cd}");
+
+    pool.close().await;
+    edb.stop().await;
+}
