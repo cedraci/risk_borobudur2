@@ -168,6 +168,18 @@ pub(crate) struct LiquidityAssembly {
 /// on must be the same whether a person is looking at the live page or the
 /// register is recording it — a transcribed copy that drifts would make the
 /// register disagree with the live page it is supposed to evidence.
+///
+/// What this does NOT make identical is which NAV the two feed it (M2).
+/// `liquidity_h` uses `aum_for(date)`, an exact match, and returns the empty
+/// shape with `nav_status: "no NAV data"` and no scenarios when there is none.
+/// `compute` takes the latest NAV at or before `nav_date`, so a routine
+/// one-business-day depositary lag does not blank out every scenario on every
+/// run, and stamps `nav_basis_date` into each recorded `detail`. On a date
+/// with a position snapshot but no NAV row the two therefore disagree: the
+/// register asserts a liquidity verdict the live page declines to give. The
+/// register's `nav_basis_date` is what makes that legible rather than
+/// mysterious; closing the gap properly means deciding whether the live page
+/// should carry the same fallback, which is a product call, not a refactor.
 pub(crate) fn liquidity_assembly(i: &LiquidityScenarioInputs) -> LiquidityAssembly {
     let horizon = i.settings.liquidity_horizon_days;
     let positions = build_positions(i.rows, i.by, i.settings, i.asof);

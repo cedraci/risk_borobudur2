@@ -24,6 +24,25 @@ fn f(v: &serde_json::Value, key: &str) -> Option<f64> {
     v.get(key).and_then(|x| x.as_f64())
 }
 
+/// `input_notes` — the map naming each check that could NOT be evaluated and
+/// why — flattened into one cell. Sorted by key so the same run always renders
+/// the same string. An absent or non-object value renders blank, matching `s`.
+///
+/// Before M4 this never reached the workbook at all: a check skipped because
+/// an input was missing produced a blank status cell, indistinguishable from a
+/// check key that did not exist for that run. The whole point of `input_notes`
+/// is that "a check that could not run must never appear as one that passed" —
+/// and the artefact the auditor actually receives is this file.
+fn notes(v: &serde_json::Value) -> String {
+    let Some(map) = v.get("input_notes").and_then(|x| x.as_object()) else { return String::new() };
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|k| format!("{k}: {}", map[k].as_str().unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Builds the evidence workbook: `Register` (one row per breach episode) and
 /// `Run history` (one row per recorded run, one column per check key, the
 /// status in the cell). `runs`/`breaches` are exactly the JSON the register's
@@ -50,6 +69,7 @@ pub fn build(
     reg.set_column_width(10, 22)?; // Resolved at
     reg.set_column_width(11, 20)?; // Resolved by
     reg.set_column_width(12, 34)?; // Resolution note
+    reg.set_column_width(14, 40)?; // Proposal reason
     reg.write_string_with_format(0, 0, format!("Limit breach register — {portfolio_name}"), &bold)?;
     reg.write_string(1, 0, format!("Generated: {generated}"))?;
 
@@ -58,6 +78,10 @@ pub fn build(
         "Check", "Subject", "Opened", "Peak value", "Cleared", "State", "Classification",
         "Acknowledged at", "Acknowledged by", "Acknowledgement note",
         "Resolved at", "Resolved by", "Resolution note",
+        // M4: the machine's proposal and the remediation deadline the human's
+        // decision was made against. Without them the workbook showed the
+        // decision with nothing to judge it by.
+        "Proposed", "Proposal reason", "Deadline",
     ];
     for (c, h) in headers.iter().enumerate() {
         reg.write_string_with_format(row, c as u16, *h, &bold)?;
@@ -86,6 +110,9 @@ pub fn build(
         reg.write_string(row, 10, s(b, "resolved_at"))?;
         reg.write_string(row, 11, s(b, "resolved_by_label"))?;
         reg.write_string(row, 12, s(b, "resolution_note"))?;
+        reg.write_string(row, 13, s(b, "proposed_classification"))?;
+        reg.write_string(row, 14, s(b, "proposal_reason"))?;
+        reg.write_string(row, 15, s(b, "deadline_date"))?;
         row += 1;
     }
 
@@ -95,6 +122,8 @@ pub fn build(
     rh.set_column_width(0, 14)?;
     rh.set_column_width(1, 22)?;
     rh.set_column_width(2, 14)?;
+    rh.set_column_width(3, 15)?;
+    rh.set_column_width(4, 52)?;
     rh.write_string_with_format(0, 0, format!("Run history — {portfolio_name}"), &bold)?;
     rh.write_string(1, 0, format!("Generated: {generated}"))?;
 
@@ -115,7 +144,11 @@ pub fn build(
     let keys: Vec<&str> = keys.into_iter().collect();
 
     let mut row: u32 = 3;
-    let fixed_headers = ["NAV date", "Run at", "Triggered by"];
+    // `Inputs complete` and `Input notes` sit with the run's own metadata,
+    // before the per-check columns: an auditor reading a blank status cell has
+    // to be able to tell "this check could not run, and here is why" from
+    // "this check did not exist for this run" without leaving the row (M4).
+    let fixed_headers = ["NAV date", "Run at", "Triggered by", "Inputs complete", "Input notes"];
     for (c, h) in fixed_headers.iter().enumerate() {
         rh.write_string_with_format(row, c as u16, *h, &bold)?;
     }
@@ -131,6 +164,15 @@ pub fn build(
         rh.write_string(row, 0, s(run, "nav_date"))?;
         rh.write_string(row, 1, s(run, "run_at"))?;
         rh.write_string(row, 2, s(run, "triggered_by"))?;
+        // Spelled out rather than TRUE/FALSE: this is a document a person
+        // reads, and a bare FALSE beside a row of "ok" cells is exactly the
+        // thing that gets skimmed past.
+        rh.write_string(row, 3, match run.get("inputs_complete").and_then(|x| x.as_bool()) {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "",
+        })?;
+        rh.write_string(row, 4, notes(run))?;
         let mut status_by_check = HashMap::new();
         if let Some(results) = run.get("results").and_then(|x| x.as_array()) {
             for r in results {

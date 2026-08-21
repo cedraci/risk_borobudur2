@@ -138,7 +138,16 @@ const LIQUIDITY_LABELS: [(&str, &str); 4] = [
 ];
 
 /// Computes the checks for one portfolio at one date, as rows to record.
-pub async fn compute(
+///
+/// `pub(crate)`, not `pub` (M3): `snapshot_grouped` turns every `Denied` into
+/// `anyhow!("system context refused: …")`, which `From<anyhow::Error> for
+/// AppError` renders as a 500. That is correct for `recorder`, its only
+/// caller, which runs under `AuthCtx::system()` where a denial really is a
+/// bug — but a future handler calling this with a USER context would turn a
+/// genuine `NotGranted`/`OutOfScope` into a 500 instead of the 403-vs-404
+/// split this codebase enforces everywhere else. Crate-private makes that
+/// assumption the compiler's business rather than a doc comment's.
+pub(crate) async fn compute(
     scoped: &Scoped<'_>, pid: i64, nav_date: NaiveDate,
 ) -> anyhow::Result<ComputedRun> {
     let (pos_access, rows, refs) = snapshot_grouped(scoped, pid, nav_date).await?;
@@ -149,7 +158,18 @@ pub async fn compute(
     let mut results = Vec::with_capacity(checks.len());
     let mut findings = Vec::new();
     let mut input_notes = serde_json::Map::new();
-    for c in &checks {
+    if rows.is_empty() {
+        // M6: `concentration(&[])` returns all five checks with empty `rows`
+        // and `status: Ok` (`rows.iter().max_by_key(..).unwrap_or(Ok)`), so
+        // recording them here wrote five passes for checks that had no data —
+        // the exact failure mode this module exists to prevent, and the one
+        // place in `compute` that did it. The liquidity and VaR blocks handle
+        // their absent input by omitting the row and naming it; so does this.
+        for c in &checks {
+            input_notes.insert(c.check.clone(), "no position snapshot for this date".into());
+        }
+    }
+    for c in checks.iter().filter(|_| !rows.is_empty()) {
         // Rows come sorted descending by weight, but take the max explicitly:
         // the register must not depend on a presentation ordering.
         let observed = c.rows.iter().map(|r| r.weight)
@@ -185,13 +205,22 @@ pub async fn compute(
 
     let nav_access = scoped.authorize::<Nav, View>(pid)
         .map_err(|d| anyhow::anyhow!("system context refused: {d}"))?;
-    let nav_rows = scoped.nav_rows(&nav_access).await?;
+    // M1: a run recorded AGAINST `nav_date` must be computed from data known
+    // AT `nav_date`. `nav_rows` is the whole series, ascending, and the VaR
+    // block below took `nav_rows.last()` for its AUM and the whole series for
+    // its returns — so a back-dated run (C2's late depositary file) recorded a
+    // `var_limit` verdict for, say, 2026-07-15 computed from returns through
+    // 2026-08-20 and scaled by August's AUM. The liquidity, concentration and
+    // EMIR blocks all anchor on `nav_date`; this makes VaR do the same, once,
+    // for every reader of `nav_rows` below.
+    let nav_rows: Vec<_> = scoped.nav_rows(&nav_access).await?
+        .into_iter().filter(|r| r.date <= nav_date).collect();
     // The position snapshot's own date does not always have a matching NAV
     // row (the depositary's NAV history can lag a snapshot by a business
     // day) — the register uses the latest NAV known at or before the
     // snapshot date rather than requiring an exact match, so a routine
     // one-day lag does not blank out every liquidity scenario on every run.
-    let liquidity_nav = nav_rows.iter().rev().find(|r| r.date <= nav_date).map(|r| (r.date, r.aum));
+    let liquidity_nav = nav_rows.last().map(|r| (r.date, r.aum));
 
     match liquidity_nav {
         Some((nav_basis_date, nav)) => {
@@ -348,8 +377,9 @@ pub async fn compute(
 }
 
 /// Just the groupings for one date — no checks. Used for the previous
-/// snapshot, where only the quantities and weights matter.
-pub async fn holdings_at(
+/// snapshot, where only the quantities and weights matter. `pub(crate)` for
+/// the same reason as `compute` (M3).
+pub(crate) async fn holdings_at(
     scoped: &Scoped<'_>, pid: i64, date: NaiveDate,
 ) -> anyhow::Result<(
     HashMap<String, Vec<SubjectHolding>>,

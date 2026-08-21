@@ -317,3 +317,108 @@ async fn a_back_dated_import_records_its_run_and_leaves_the_episodes_alone() {
     pool.close().await;
     edb.stop().await;
 }
+
+/// M6: a run for a date with no positions must not record five concentration
+/// passes.
+///
+/// `concentration(&[])` returns all five checks with empty `rows` and
+/// `status: Ok` (`rows.iter().max_by_key(..).unwrap_or(Ok)`), so `compute`
+/// used to write five `ok` rows for checks that had no data — the one place in
+/// the module that recorded a pass for a check that never ran, which is the
+/// exact failure mode the whole feature exists to prevent. No HTTP route can
+/// reach this (`rerun` only ever names a date with a snapshot, and an import
+/// only ever names its own), so it is driven through `recorder::record`
+/// directly.
+#[tokio::test]
+async fn a_run_for_a_date_with_no_positions_records_no_concentration_pass() {
+    let (desktop, pool, dbh, edb) = app().await;
+    let st = server::state::AppState::desktop(dbh.clone());
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A date AFTER every snapshot, so the back-date guard is not what is
+    // being observed here.
+    let empty_day = chrono::NaiveDate::from_ymd_opt(2030, 1, 2).unwrap();
+    let run_id = server::recorder::record(&st, 1, empty_day, server::recorder::Trigger::Manual {
+        actor_user_id: None, actor_label: "test".into(),
+    }).await.unwrap();
+
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let (run, results) = scoped.runs_for(&view, 50).await.unwrap()
+        .into_iter().find(|(r, _)| r.id == run_id).expect("the run just recorded");
+
+    for key in ["issuer_10", "forty", "group_20", "fund_20", "deposit_20"] {
+        assert!(!results.iter().any(|r| r.check_key == key),
+            "a check with no data must be omitted, not recorded as a pass: {:?}",
+            results.iter().map(|r| (&r.check_key, &r.status)).collect::<Vec<_>>());
+        assert!(run.input_notes[key].is_string(),
+            "...and it must say why it was omitted: {}", run.input_notes);
+    }
+    assert!(!run.inputs_complete);
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+/// M1: a run recorded against a NAV date must be computed from data known at
+/// that date. `compute` passed the WHOLE NAV series to the VaR block and took
+/// `nav_rows.last()` for its AUM, so a back-dated run (reachable via a late
+/// depositary file — see the C2 test above) recorded a `var_limit` verdict
+/// computed from returns that had not happened yet and scaled by a later
+/// day's AUM. Liquidity, concentration and EMIR all anchored on `nav_date`
+/// already; VaR was the one that did not.
+#[tokio::test]
+async fn a_back_dated_run_computes_its_var_from_data_known_at_that_date() {
+    let (desktop, pool, dbh, edb) = app().await;
+    let st = server::state::AppState::desktop(dbh.clone());
+    let bytes = std::fs::read(SAMPLE).unwrap();
+    let res = desktop.clone().oneshot(upload_req("/api/portfolios/1/imports", &bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let latest = scoped.runs_for(&view, 1).await.unwrap()[0].0.nav_date;
+
+    // A date well inside the fixture's NAV history (which runs 2025-02-28 to
+    // 2026-07-23), so both runs have plenty of returns to work with and the
+    // only difference between them is where the series is cut.
+    let earlier = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+    assert!(earlier < latest);
+    let run_id = server::recorder::record(&st, 1, earlier, server::recorder::Trigger::Manual {
+        actor_user_id: None, actor_label: "test".into(),
+    }).await.unwrap();
+
+    let all = scoped.runs_for(&view, 50).await.unwrap();
+    let var_of = |id: i64| -> serde_json::Value {
+        all.iter().find(|(r, _)| r.id == id).expect("run")
+            .1.iter().find(|r| r.check_key == "var_limit").expect("a var_limit row").detail.clone()
+    };
+    let back = var_of(run_id);
+    let now = var_of(all.iter().find(|(r, _)| r.nav_date == latest).unwrap().0.id);
+
+    // `var_eur` is VaR x AUM, and the two runs sit six months apart in a
+    // fixture whose NAV moves, so they cannot honestly be equal.
+    let back_eur = back["historical"]["var_eur"].as_f64()
+        .or_else(|| back["var_eur"].as_f64());
+    let now_eur = now["historical"]["var_eur"].as_f64()
+        .or_else(|| now["var_eur"].as_f64());
+    assert!(back_eur.is_some() && now_eur.is_some(), "both runs must record a VaR: {back} / {now}");
+    assert_ne!(back_eur, now_eur,
+        "a back-dated run scaled by the LATEST AUM is the whole defect: {back} / {now}");
+
+    // And the observed VaR itself differs, because the return series is cut at
+    // the run's own date rather than running through today.
+    let back_var = all.iter().find(|(r, _)| r.id == run_id).unwrap()
+        .1.iter().find(|r| r.check_key == "var_limit").unwrap().observed_value;
+    let now_var = all.iter().find(|(r, _)| r.nav_date == latest).unwrap()
+        .1.iter().find(|r| r.check_key == "var_limit").unwrap().observed_value;
+    assert_ne!(back_var, now_var,
+        "the back-dated run's VaR must come from its own window, not from today's");
+
+    pool.close().await;
+    edb.stop().await;
+}

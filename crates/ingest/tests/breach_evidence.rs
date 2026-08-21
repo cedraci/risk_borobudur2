@@ -43,6 +43,9 @@ fn the_register_sheet_writes_each_breach_field_to_its_own_column() {
         "resolved_at": "2026-08-05T09:00:00Z",
         "resolved_by_label": "M. Martin",
         "resolution_note": "position trimmed on 21 Aug",
+        "proposed_classification": "active",
+        "proposal_reason": "quantity of FR0000120271 rose from 100 to 250",
+        "deadline_date": "2026-09-30",
     });
     let bytes = build("Borobudur", &[], &[breach]).unwrap();
     let mut wb = open(bytes);
@@ -54,7 +57,7 @@ fn the_register_sheet_writes_each_breach_field_to_its_own_column() {
     let r = wb.worksheet_range("Register").unwrap();
     // Row 3 (0-based) is the header row; row 4 is the one data row.
     assert_eq!(cell(&r, 3, 0), "Check");
-    assert_eq!(cell(&r, 3, 12), "Resolution note", "header row must have all 13 columns");
+    assert_eq!(cell(&r, 3, 15), "Deadline", "header row must have all 16 columns");
     assert_eq!(cell(&r, 4, 0), "issuer_10", "check_key");
     assert_eq!(cell(&r, 4, 1), "ACME CORP", "subject");
     assert_eq!(cell(&r, 4, 2), "2026-08-01", "opened_nav_date");
@@ -68,6 +71,11 @@ fn the_register_sheet_writes_each_breach_field_to_its_own_column() {
     assert_eq!(cell(&r, 4, 10), "2026-08-05T09:00:00Z", "resolved_at");
     assert_eq!(cell(&r, 4, 11), "M. Martin", "resolved_by_label");
     assert_eq!(cell(&r, 4, 12), "position trimmed on 21 Aug", "resolution_note");
+    // M4: the workbook used to show the human's decision with no sight of the
+    // machine's proposal or the deadline it was made against.
+    assert_eq!(cell(&r, 4, 13), "active", "proposed_classification");
+    assert_eq!(cell(&r, 4, 14), "quantity of FR0000120271 rose from 100 to 250", "proposal_reason");
+    assert_eq!(cell(&r, 4, 15), "2026-09-30", "deadline_date");
 }
 
 #[test]
@@ -91,10 +99,13 @@ fn the_run_history_sheet_unions_check_keys_in_a_stable_order_and_leaves_gaps_bla
     // slip through undetected if the names were reversed.
     let run_a = serde_json::json!({
         "nav_date": "2026-08-01", "run_at": "2026-08-01T09:00:00Z", "triggered_by": "import",
+        "inputs_complete": false,
+        "input_notes": {"zzz_check": "no shareholder register", "aaa_note": "second key"},
         "results": [{"check_key": "aaa_check", "scope_label": "A", "status": "ok"}],
     });
     let run_b = serde_json::json!({
         "nav_date": "2026-08-02", "run_at": "2026-08-02T09:00:00Z", "triggered_by": "manual",
+        "inputs_complete": true, "input_notes": {},
         "results": [{"check_key": "zzz_check", "scope_label": "Z", "status": "breach"}],
     });
     let bytes = build("Borobudur", &[run_a, run_b], &[]).unwrap();
@@ -105,8 +116,10 @@ fn the_run_history_sheet_unions_check_keys_in_a_stable_order_and_leaves_gaps_bla
     // "aaa_check" before "zzz_check" regardless of which run introduced
     // which key, or which order the runs were supplied in.
     assert_eq!(cell(&r, 3, 0), "NAV date");
-    assert_eq!(cell(&r, 3, 3), "aaa_check", "the union's first column");
-    assert_eq!(cell(&r, 3, 4), "zzz_check", "the union's second column");
+    assert_eq!(cell(&r, 3, 3), "Inputs complete");
+    assert_eq!(cell(&r, 3, 4), "Input notes");
+    assert_eq!(cell(&r, 3, 5), "aaa_check", "the union's first column");
+    assert_eq!(cell(&r, 3, 6), "zzz_check", "the union's second column");
 
     // Run A's row: its own check has a status; the OTHER run's check-only
     // column is blank. A bug that unioned only the first run's keys would
@@ -114,13 +127,21 @@ fn the_run_history_sheet_unions_check_keys_in_a_stable_order_and_leaves_gaps_bla
     // blank cell) — `cell` at 3,4 above already guards that; this guards the
     // per-row fill.
     assert_eq!(cell(&r, 4, 0), "2026-08-01");
-    assert_eq!(cell(&r, 4, 3), "ok", "run A's own check");
-    assert_eq!(cell(&r, 4, 4), "", "run A never ran zzz_check");
+    assert_eq!(cell(&r, 4, 5), "ok", "run A's own check");
+    assert_eq!(cell(&r, 4, 6), "", "run A never ran zzz_check");
+    // M4: and the blank cell above is now explained IN THE ROW. Without this
+    // an auditor cannot tell "could not be evaluated" from "this check did not
+    // exist for this run" — the distinction the whole `input_notes` mechanism
+    // exists to preserve. Keys are sorted, so the rendering is stable.
+    assert_eq!(cell(&r, 4, 3), "no", "run A's inputs were incomplete");
+    assert_eq!(cell(&r, 4, 4), "aaa_note: second key; zzz_check: no shareholder register");
 
     // Run B's row: the reverse.
     assert_eq!(cell(&r, 5, 0), "2026-08-02");
-    assert_eq!(cell(&r, 5, 3), "", "run B never ran aaa_check");
-    assert_eq!(cell(&r, 5, 4), "breach", "run B's own check");
+    assert_eq!(cell(&r, 5, 5), "", "run B never ran aaa_check");
+    assert_eq!(cell(&r, 5, 6), "breach", "run B's own check");
+    assert_eq!(cell(&r, 5, 3), "yes", "run B had everything it needed");
+    assert_eq!(cell(&r, 5, 4), "", "and so has nothing to note");
 }
 
 #[test]
