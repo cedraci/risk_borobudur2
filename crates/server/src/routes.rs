@@ -136,6 +136,9 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/emir/export", get(handlers::emir::export), Domain::Positions, Action::Export)
         .protected("/api/portfolios/{id}/futures-analytics", get(handlers::futures::list_ctd), Domain::MarketData, Action::View)
         .protected("/api/portfolios/{id}/futures-analytics", axum::routing::post(handlers::futures::upload_ctd), Domain::MarketData, Action::Import)
+        .protected("/api/portfolios/{id}/limit-runs", get(handlers::breaches::runs_list), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/breaches", get(handlers::breaches::register_list), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/breaches/{bid}", get(handlers::breaches::episode_get), Domain::Settings, Action::View)
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .fallback(crate::static_assets::static_handler);
     // Only mounted in server mode: desktop mode has no accounts, so there is

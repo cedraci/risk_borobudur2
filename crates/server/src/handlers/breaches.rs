@@ -11,11 +11,14 @@
 //! `compute`.
 
 use crate::error::AppError;
+use crate::state::AppState;
 use analytics::breach::{Finding, SubjectHolding};
 use analytics::{concentration, default_issuer_group, CheckStatus, ConPosition};
+use axum::extract::{Path, Query, State};
+use axum::{Extension, Json};
 use chrono::NaiveDate;
-use db::auth::marker::{Nav, Positions, Reference, Shareholders, View};
-use db::auth::Access;
+use db::auth::marker::{Nav, Positions, Reference, Settings, Shareholders, View};
+use db::auth::{Access, AuthCtx};
 use db::repo::CheckResultRow;
 use db::scoped::Scoped;
 use std::collections::HashMap;
@@ -354,4 +357,74 @@ pub async fn holdings_at(
     let (_pos_access, rows, refs) = snapshot_grouped(scoped, pid, date).await?;
     let by = super::limits::ref_map(&refs);
     Ok(group_holdings(&rows, &by))
+}
+
+// ---- Read endpoints: the register's HTTP surface. ------------------------
+//
+// All three are gated on `Domain::Settings`/`Action::View` — the same domain
+// the write side (Task 5/6's recorder) uses under the system context, and the
+// same domain `imports::list` already uses for the import ledger. See the
+// design doc's "Known limitation" section for why the register doesn't get
+// its own dedicated domain.
+
+#[derive(serde::Deserialize)]
+pub struct RunsQuery {
+    pub limit: Option<i64>,
+}
+
+/// The recorded check runs, newest first, each with its per-check results.
+pub async fn runs_list(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path(pid): Path<i64>, Query(q): Query<RunsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Settings, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let limit = q.limit.unwrap_or(52).clamp(1, 500);
+    let runs: Vec<serde_json::Value> = scoped.runs_for(&a, limit).await?
+        .into_iter()
+        .map(|(run, results)| serde_json::json!({
+            "id": run.id, "nav_date": run.nav_date, "run_at": run.run_at,
+            "triggered_by": run.triggered_by, "import_id": run.import_id,
+            "inputs_complete": run.inputs_complete, "input_notes": run.input_notes,
+            "results": results,
+        }))
+        .collect();
+    Ok(Json(serde_json::json!({ "runs": runs })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct RegisterQuery {
+    pub state: Option<String>,
+}
+
+/// The breach register itself: every episode, optionally filtered to one
+/// `state` (open/acknowledged/resolved).
+pub async fn register_list(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path(pid): Path<i64>, Query(q): Query<RegisterQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Settings, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    if let Some(s) = q.state.as_deref()
+        && !matches!(s, "open" | "acknowledged" | "resolved") {
+        return Err(AppError::BadRequest(format!("unknown state: {s}")));
+    }
+    let rows = scoped.breaches_for(&a, q.state.as_deref()).await?;
+    Ok(Json(serde_json::json!({ "breaches": rows })))
+}
+
+/// One breach episode with its full event timeline.
+pub async fn episode_get(
+    State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>,
+    Path((pid, bid)): Path<(i64, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let scoped = st.db.scope(&ctx);
+    let a = scoped.authorize::<Settings, View>(pid)?;
+    super::portfolios::ensure(&scoped, pid, false).await?;
+    let breach = scoped.breach_get(&a, bid).await?
+        .ok_or_else(|| AppError::NotFound(format!("no breach {bid}")))?;
+    let events = scoped.breach_events(&a, bid).await?;
+    Ok(Json(serde_json::json!({ "breach": breach, "events": events })))
 }
