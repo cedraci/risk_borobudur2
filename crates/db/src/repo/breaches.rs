@@ -100,12 +100,31 @@ impl Scoped<'_> {
     pub async fn runs_for(
         &self, a: &Access<Settings, View>, limit: i64,
     ) -> anyhow::Result<Vec<(CheckRunRow, Vec<CheckResultRow>)>> {
+        self.runs_with_results(a.portfolio_id(), Some(limit)).await
+    }
+
+    /// Every recorded run, no cap — the evidence export's need, distinct from
+    /// `runs_for`'s paged UI read. An export that silently dropped runs past
+    /// some limit would misstate the very history it exists to attest to.
+    pub async fn runs_all(
+        &self, a: &Access<Settings, View>,
+    ) -> anyhow::Result<Vec<(CheckRunRow, Vec<CheckResultRow>)>> {
+        self.runs_with_results(a.portfolio_id(), None).await
+    }
+
+    /// Shared by `runs_for` and `runs_all`: `limit = None` binds SQL `NULL`,
+    /// which PostgreSQL's own `LIMIT` treats as "no limit" (the same as
+    /// omitting the clause) — so the two callers share one query rather than
+    /// one duplicating the other's text with the clause stripped out.
+    async fn runs_with_results(
+        &self, portfolio_id: i64, limit: Option<i64>,
+    ) -> anyhow::Result<Vec<(CheckRunRow, Vec<CheckResultRow>)>> {
         let runs = sqlx::query(
             "SELECT id, nav_date, run_at, triggered_by, import_id, actor_user_id,
                     inputs_complete, input_notes
              FROM limit_check_runs WHERE portfolio_id = $1
              ORDER BY nav_date DESC, run_at DESC LIMIT $2")
-            .bind(a.portfolio_id()).bind(limit)
+            .bind(portfolio_id).bind(limit)
             .fetch_all(self.pool).await?;
         let run_rows: Vec<CheckRunRow> = runs
             .iter()
@@ -170,9 +189,18 @@ pub struct BreachRow {
     pub proposed_classification: Option<String>,
     pub proposal_reason: Option<String>,
     pub acknowledged_at: Option<DateTime<Utc>>,
+    /// `limit_breach_events.actor_label` of the most recent `acknowledged`
+    /// event, not a join to `users` on `limit_breaches.acknowledged_by`: a
+    /// deleted user (`ON DELETE SET NULL`) must not erase who acted from an
+    /// audit artefact whose whole point is recording that. The event's label
+    /// is captured at the moment of the act and is immutable.
+    pub acknowledged_by_label: Option<String>,
     pub acknowledgement_note: Option<String>,
     pub deadline_date: Option<NaiveDate>,
     pub resolved_at: Option<DateTime<Utc>>,
+    /// Same reasoning as `acknowledged_by_label`, sourced from the most
+    /// recent `resolved` event.
+    pub resolved_by_label: Option<String>,
     pub resolution_note: Option<String>,
 }
 
@@ -196,9 +224,20 @@ pub struct RunContext<'a> {
 }
 
 const BREACH_COLUMNS: &str =
-    "id, check_key, subject, opened_nav_date, opened_value, peak_value, peak_nav_date, \
-     closed_nav_date, state, classification, proposed_classification, proposal_reason, \
-     acknowledged_at, acknowledgement_note, deadline_date, resolved_at, resolution_note";
+    "b.id, b.check_key, b.subject, b.opened_nav_date, b.opened_value, b.peak_value, b.peak_nav_date, \
+     b.closed_nav_date, b.state, b.classification, b.proposed_classification, b.proposal_reason, \
+     b.acknowledged_at, b.acknowledgement_note, b.deadline_date, b.resolved_at, b.resolution_note";
+
+/// The two "who" columns, each a correlated subquery onto its event's own
+/// `actor_label` — see `BreachRow::acknowledged_by_label`'s doc for why this
+/// reads `limit_breach_events` rather than joining `users`.
+const BREACH_ACTOR_COLUMNS: &str =
+    "(SELECT e.actor_label FROM limit_breach_events e \
+      WHERE e.breach_id = b.id AND e.event = 'acknowledged' \
+      ORDER BY e.at DESC LIMIT 1) AS acknowledged_by_label, \
+     (SELECT e.actor_label FROM limit_breach_events e \
+      WHERE e.breach_id = b.id AND e.event = 'resolved' \
+      ORDER BY e.at DESC LIMIT 1) AS resolved_by_label";
 
 fn breach_from_row(r: &sqlx::postgres::PgRow) -> BreachRow {
     BreachRow {
@@ -215,9 +254,11 @@ fn breach_from_row(r: &sqlx::postgres::PgRow) -> BreachRow {
         proposed_classification: r.get("proposed_classification"),
         proposal_reason: r.get("proposal_reason"),
         acknowledged_at: r.get("acknowledged_at"),
+        acknowledged_by_label: r.get("acknowledged_by_label"),
         acknowledgement_note: r.get("acknowledgement_note"),
         deadline_date: r.get("deadline_date"),
         resolved_at: r.get("resolved_at"),
+        resolved_by_label: r.get("resolved_by_label"),
         resolution_note: r.get("resolution_note"),
     }
 }
@@ -327,9 +368,9 @@ impl Scoped<'_> {
         &self, a: &Access<Settings, View>, state: Option<&str>,
     ) -> anyhow::Result<Vec<BreachRow>> {
         let sql = format!(
-            "SELECT {BREACH_COLUMNS} FROM limit_breaches
-             WHERE portfolio_id = $1 AND ($2::text IS NULL OR state = $2)
-             ORDER BY opened_nav_date DESC, id DESC");
+            "SELECT {BREACH_COLUMNS}, {BREACH_ACTOR_COLUMNS} FROM limit_breaches b
+             WHERE b.portfolio_id = $1 AND ($2::text IS NULL OR b.state = $2)
+             ORDER BY b.opened_nav_date DESC, b.id DESC");
         Ok(sqlx::query(&sql).bind(a.portfolio_id()).bind(state)
             .fetch_all(self.pool).await?
             .iter().map(breach_from_row).collect())
@@ -342,7 +383,8 @@ impl Scoped<'_> {
         &self, a: &Access<Settings, View>, breach_id: i64,
     ) -> anyhow::Result<Option<BreachRow>> {
         let sql = format!(
-            "SELECT {BREACH_COLUMNS} FROM limit_breaches WHERE id = $1 AND portfolio_id = $2");
+            "SELECT {BREACH_COLUMNS}, {BREACH_ACTOR_COLUMNS} FROM limit_breaches b
+             WHERE b.id = $1 AND b.portfolio_id = $2");
         Ok(sqlx::query(&sql).bind(breach_id).bind(a.portfolio_id())
             .fetch_optional(self.pool).await?
             .as_ref().map(breach_from_row))

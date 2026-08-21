@@ -377,19 +377,20 @@ pub struct RunsQuery {
 /// The recorded check runs as JSON, newest first, each with its per-check
 /// results — the one construction shared by `runs_list` and the evidence
 /// export, so the two never drift into serving different shapes of the same
-/// data.
-async fn runs_json(
-    scoped: &Scoped<'_>, a: &Access<Settings, View>, limit: i64,
-) -> Result<Vec<serde_json::Value>, AppError> {
-    Ok(scoped.runs_for(a, limit).await?
-        .into_iter()
+/// data. Takes the already-fetched rows rather than fetching them itself: the
+/// two callers fetch differently (`runs_list` pages with a clamped `limit`
+/// via `runs_for`, the export reads everything via `runs_all` — see Ruling 1
+/// in the task-9 review, an export must never silently cap the history it
+/// claims to be complete).
+fn runs_json(rows: Vec<(db::repo::CheckRunRow, Vec<CheckResultRow>)>) -> Vec<serde_json::Value> {
+    rows.into_iter()
         .map(|(run, results)| serde_json::json!({
             "id": run.id, "nav_date": run.nav_date, "run_at": run.run_at,
             "triggered_by": run.triggered_by, "import_id": run.import_id,
             "inputs_complete": run.inputs_complete, "input_notes": run.input_notes,
             "results": results,
         }))
-        .collect())
+        .collect()
 }
 
 /// The recorded check runs, newest first, each with its per-check results.
@@ -401,7 +402,7 @@ pub async fn runs_list(
     let a = scoped.authorize::<Settings, View>(pid)?;
     super::portfolios::ensure(&scoped, pid, false).await?;
     let limit = q.limit.unwrap_or(52).clamp(1, 500);
-    let runs = runs_json(&scoped, &a, limit).await?;
+    let runs = runs_json(scoped.runs_for(&a, limit).await?);
     Ok(Json(serde_json::json!({ "runs": runs })))
 }
 
@@ -450,7 +451,9 @@ pub async fn export(
     let _export = scoped.authorize::<Settings, Export>(pid)?;
     let a = scoped.authorize::<Settings, View>(pid)?;
     let portfolio = super::portfolios::ensure(&scoped, pid, false).await?;
-    let runs = runs_json(&scoped, &a, 500).await?;
+    // Every run, uncapped: an evidence artefact must not silently omit
+    // history the way `runs_list`'s paged UI read is allowed to.
+    let runs = runs_json(scoped.runs_all(&a).await?);
     let breaches = register_json(&scoped, &a, None).await?;
     let bytes = ingest::breach_evidence::build(&portfolio.name, &runs, &breaches)
         .map_err(AppError::Internal)?;

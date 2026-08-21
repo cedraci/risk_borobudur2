@@ -10,10 +10,12 @@ use chrono::Utc;
 use rust_xlsxwriter::{Format, Workbook};
 use std::collections::{BTreeSet, HashMap};
 
-/// Reads a string field, falling back to `""` rather than `"null"` — the
-/// handler passes JSON built from possibly-`None` columns (e.g.
-/// `closed_nav_date` on a still-open episode), and a blank cell reads better
-/// in an evidence document than the literal word "null".
+/// Reads a string field, falling back to `""` — the handler passes JSON
+/// built from possibly-`None` columns (e.g. `resolved_at` on a still-open
+/// episode), which `serde_json::to_value` emits as a present key holding
+/// `null`, not an absent key; `.as_str()` returns `None` for that `null`
+/// either way, and a blank cell reads better in an evidence document than
+/// the literal word "null".
 fn s<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("")
 }
@@ -26,7 +28,10 @@ fn f(v: &serde_json::Value, key: &str) -> Option<f64> {
 /// `Run history` (one row per recorded run, one column per check key, the
 /// status in the cell). `runs`/`breaches` are exactly the JSON the register's
 /// read endpoints already serve — see `handlers::breaches::runs_list` and
-/// `register_list`.
+/// `register_list`. The caller is responsible for `runs` being the FULL
+/// history (`runs_all`, not the paged `runs_for`): this function has no way
+/// to tell a genuinely short history from one truncated upstream, so it
+/// writes whatever it is given as if it were complete.
 pub fn build(
     portfolio_name: &str, runs: &[serde_json::Value], breaches: &[serde_json::Value],
 ) -> anyhow::Result<Vec<u8>> {
@@ -37,19 +42,22 @@ pub fn build(
     // ---- Register ----
     let reg = wb.add_worksheet();
     reg.set_name("Register")?;
-    reg.set_column_width(0, 14)?;
-    reg.set_column_width(1, 24)?;
-    reg.set_column_width(7, 22)?;
-    reg.set_column_width(9, 22)?;
-    reg.set_column_width(8, 34)?;
-    reg.set_column_width(10, 34)?;
+    reg.set_column_width(0, 14)?; // Check
+    reg.set_column_width(1, 24)?; // Subject
+    reg.set_column_width(7, 22)?; // Acknowledged at
+    reg.set_column_width(8, 20)?; // Acknowledged by
+    reg.set_column_width(9, 34)?; // Acknowledgement note
+    reg.set_column_width(10, 22)?; // Resolved at
+    reg.set_column_width(11, 20)?; // Resolved by
+    reg.set_column_width(12, 34)?; // Resolution note
     reg.write_string_with_format(0, 0, format!("Limit breach register — {portfolio_name}"), &bold)?;
     reg.write_string(1, 0, format!("Generated: {generated}"))?;
 
     let mut row: u32 = 3;
     let headers = [
         "Check", "Subject", "Opened", "Peak value", "Cleared", "State", "Classification",
-        "Acknowledged at", "Acknowledgement note", "Resolved at", "Resolution note",
+        "Acknowledged at", "Acknowledged by", "Acknowledgement note",
+        "Resolved at", "Resolved by", "Resolution note",
     ];
     for (c, h) in headers.iter().enumerate() {
         reg.write_string_with_format(row, c as u16, *h, &bold)?;
@@ -65,15 +73,19 @@ pub fn build(
         if let Some(v) = f(b, "peak_value") {
             reg.write_number(row, 3, v)?;
         }
-        // A still-open episode has no `closed_nav_date` at all.
+        // A still-open episode's `closed_nav_date` is JSON `null` (see `s`'s
+        // doc comment) — `.as_str()` returns `None` for that, the same as it
+        // would for an absent key, so this falls through to "open" either way.
         let cleared = b.get("closed_nav_date").and_then(|x| x.as_str()).unwrap_or("open");
         reg.write_string(row, 4, cleared)?;
         reg.write_string(row, 5, s(b, "state"))?;
         reg.write_string(row, 6, s(b, "classification"))?;
         reg.write_string(row, 7, s(b, "acknowledged_at"))?;
-        reg.write_string(row, 8, s(b, "acknowledgement_note"))?;
-        reg.write_string(row, 9, s(b, "resolved_at"))?;
-        reg.write_string(row, 10, s(b, "resolution_note"))?;
+        reg.write_string(row, 8, s(b, "acknowledged_by_label"))?;
+        reg.write_string(row, 9, s(b, "acknowledgement_note"))?;
+        reg.write_string(row, 10, s(b, "resolved_at"))?;
+        reg.write_string(row, 11, s(b, "resolved_by_label"))?;
+        reg.write_string(row, 12, s(b, "resolution_note"))?;
         row += 1;
     }
 
@@ -126,6 +138,11 @@ pub fn build(
                     r.get("check_key").and_then(|x| x.as_str()),
                     r.get("status").and_then(|x| x.as_str()),
                 ) {
+                    // Last-wins on a repeated `check_key` within one run.
+                    // `limit_check_results` has a unique index on
+                    // `(run_id, check_key)`, so `runs_for`/`runs_all` can
+                    // never actually hand this a run with a duplicate key —
+                    // documented here as the assumption, not left implicit.
                     status_by_check.insert(k, status);
                 }
             }
