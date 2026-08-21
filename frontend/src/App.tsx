@@ -14,6 +14,7 @@ import PnlPage from "./pages/PnlPage";
 import Risk from "./pages/Risk";
 import VarPage from "./pages/VarPage";
 import LimitsPage from "./pages/LimitsPage";
+import BreachesPage from "./pages/BreachesPage";
 import DerivativesPage from "./pages/DerivativesPage";
 import DataPage from "./pages/DataPage";
 import AdminPage from "./pages/AdminPage";
@@ -115,6 +116,7 @@ function PortfolioLayout({ portfolios }: { portfolios: Portfolio[] }) {
             <Route path="risk" element={<Risk />} />
             <Route path="var" element={<VarPage />} />
             <Route path="limits" element={<LimitsPage />} />
+            <Route path="breaches" element={<BreachesPage />} />
             <Route path="derivatives" element={<DerivativesPage />} />
             <Route path="data" element={<DataPage />} />
           </Routes>

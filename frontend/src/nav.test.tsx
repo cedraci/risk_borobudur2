@@ -60,4 +60,9 @@ describe("sidebar gating after the settings split", () => {
     const me = principal(["settings", "view", PID]);
     expect(labels(me)).toContain("Data");
   });
+
+  it("offers Breaches to a principal holding the fund's settings", () => {
+    const me = principal(["settings", "view", PID]);
+    expect(labels(me)).toContain("Breaches");
+  });
 });

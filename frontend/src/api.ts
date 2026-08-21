@@ -539,6 +539,65 @@ export const ADMIN_ROLES: { value: string; label: string }[] = [
   { value: "auditor", label: "Auditor" },
 ];
 
+// ---- Breach register (crates/server/src/handlers/breaches.rs, `/api/portfolios/{id}/{limit-runs,breaches}`) ----
+
+export interface CheckResult {
+  check_key: string; scope_label: string;
+  limit_value: number | null; observed_value: number | null;
+  status: "ok" | "watch" | "breach";
+  detail: unknown;
+}
+export interface LimitRun {
+  id: number; nav_date: string; run_at: string;
+  triggered_by: "import" | "manual"; import_id: number | null;
+  inputs_complete: boolean; input_notes: Record<string, string>;
+  results: CheckResult[];
+}
+export interface BreachEpisode {
+  id: number; check_key: string; subject: string;
+  opened_nav_date: string; opened_value: number | null;
+  peak_value: number | null; peak_nav_date: string | null;
+  closed_nav_date: string | null;
+  state: "open" | "acknowledged" | "resolved";
+  classification: "unclassified" | "active" | "passive";
+  proposed_classification: "active" | "passive" | null;
+  proposal_reason: string | null;
+  acknowledged_at: string | null; acknowledgement_note: string | null;
+  // Who acted, captured on the event at the moment of the act (not a live
+  // join to `users`, so a later account deletion never erases who decided).
+  acknowledged_by_label: string | null;
+  deadline_date: string | null;
+  resolved_at: string | null; resolution_note: string | null;
+  resolved_by_label: string | null;
+}
+export interface BreachEvent {
+  at: string; actor_label: string; event: string; detail: unknown;
+}
+
+export const getLimitRuns = (pid: number, limit = 52) =>
+  req<{ runs: LimitRun[] }>(`/api/portfolios/${pid}/limit-runs?limit=${limit}`);
+export const getBreaches = (pid: number, state?: string) =>
+  req<{ breaches: BreachEpisode[] }>(`/api/portfolios/${pid}/breaches${state ? `?state=${state}` : ""}`);
+export const getBreach = (pid: number, bid: number) =>
+  req<{ breach: BreachEpisode; events: BreachEvent[] }>(`/api/portfolios/${pid}/breaches/${bid}`);
+export const acknowledgeBreach = (
+  pid: number, bid: number, body: { classification: string; note: string; deadline_date?: string },
+) => req<void>(`/api/portfolios/${pid}/breaches/${bid}/acknowledge`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+});
+export const resolveBreach = (pid: number, bid: number, note: string) =>
+  req<void>(`/api/portfolios/${pid}/breaches/${bid}/resolve`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ note }),
+  });
+// The server resolves the latest snapshot itself and 422s any other date (a
+// back-dated run would close live episodes that never cleared) — this never
+// sends a date, always the literal empty body.
+export const rerunLimitChecks = (pid: number) =>
+  req<{ run_id: number; nav_date: string }>(`/api/portfolios/${pid}/limit-runs`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+export const breachExportUrl = (pid: number) => `/api/portfolios/${pid}/breaches/export`;
+
 export interface AuditRow {
   id: number; at: string; actor_label: string; action: string;
   domain: string | null; portfolio_id: number | null; detail: unknown; source_addr: string | null;

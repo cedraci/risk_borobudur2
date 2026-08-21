@@ -49,3 +49,17 @@ export function renderPage(ui: ReactElement) {
 /** The wire shape of a denied secondary domain, as `db::auth::Denied::reason`
  * renders it (`crates/db/src/auth/access.rs`). */
 export const denied = (label: string) => ({ status: "unavailable", reason: `not permitted: ${label}` });
+
+/** Like `stubFetch`, but each route may name a status code, so a page's
+ * handling of a 403 can be tested without hand-rolling a Response. */
+export function stubFetchStatus(routes: Record<string, { status: number; body: unknown }>) {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL): Promise<Response> => {
+    const url = typeof input === "string" ? input : input.toString();
+    const hit = Object.keys(routes).find((k) => url.includes(k));
+    if (!hit) throw new Error(`no stub for ${url}`);
+    const { status, body } = routes[hit];
+    return new Response(JSON.stringify(body), {
+      status, headers: { "content-type": "application/json" },
+    });
+  });
+}

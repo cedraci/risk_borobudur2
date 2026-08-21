@@ -18,6 +18,7 @@ export const NAV_LINKS: NavSpec[] = [
   { to: "/risk", label: "Risk", requires: [{ domain: "nav", action: "view" }] },
   { to: "/var", label: "VaR / ES", requires: [{ domain: "nav", action: "view" }] },
   { to: "/limits", label: "Limits", requires: [{ domain: "positions", action: "view" }] },
+  { to: "/breaches", label: "Breaches", requires: [{ domain: "settings", action: "view" }] },
   { to: "/derivatives", label: "Derivatives", requires: [{ domain: "positions", action: "view" }] },
   {
     to: "/data", label: "Data",
