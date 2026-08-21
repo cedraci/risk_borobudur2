@@ -120,10 +120,11 @@ with no grant on A. So, as the **administrator**: grant yourself
 Section 4's NAV Recap upload is a prerequisite — a portfolio with no imported
 snapshot has no runs and no episodes.
 
-> **If the register reads "No breaches recorded." after the import, the three
-> items below cannot be observed.** Record them as *not run* and say so. Do not
-> tick them: an empty register satisfies every one of them vacuously, which is
-> exactly the failure this section exists to catch.
+> **If the register reads "No breaches in the register." after the import,
+> every item below that needs an episode cannot be observed** — that is all of
+> them except the last. Record those as *not run* and say so. Do not tick them:
+> an empty register satisfies every one of them vacuously, which is exactly the
+> failure this section exists to catch.
 
 - [ ] Every open episode's classification chip reads **Unclassified**, and the
       tool's own opinion is worded as a proposal beside it, never as a
@@ -149,10 +150,12 @@ snapshot has no runs and no episodes.
       empty, is refused in the page with a readable message rather than posted
       to the server. After acknowledging, the card names **you** and the time,
       and a **Resolve** control appears.
-- [ ] **Known gap, worth confirming is still true.** Remove your
-      `settings/export` grant (keeping view) and press **Export evidence
-      workbook**. The control is a plain download link rendered unconditionally
-      (`BreachesPage.tsx`), so the denial arrives as a saved file containing a
+- [ ] **Known gap, worth confirming is still true.** This one needs no
+      episode. Holding no `settings/export` grant — which is the state the
+      setup above leaves you in, since it granted only view and configure —
+      press **Export evidence workbook**. The control is a plain download link
+      rendered unconditionally (`BreachesPage.tsx`), so the denial arrives as a
+      saved file containing a
       403 body rather than as an on-screen error — unlike the EMIR export in
       section 4, which surfaces it properly. Record what you actually see.
 

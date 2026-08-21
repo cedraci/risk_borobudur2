@@ -6,9 +6,10 @@ verdict, this page shows the history behind it: every check the tool has ever ru
 portfolio, and every stretch of time a check spent in breach, tracked from the moment it opened to
 the moment someone signs off on it.
 
-It covers every check the tool computes a limit for: the five UCITS concentration checks, the four
-liquidity redemption scenarios, the VaR limit, and the five EMIR clearing-threshold classes — the
-same figures shown on the Limits, VaR/ES and Derivatives pages, but recorded here as a dated,
+It covers every check the tool computes a limit for — the UCITS concentration checks, the liquidity
+redemption scenarios, the VaR limit and the EMIR clearing-threshold classes (fifteen checks as this
+is written, and whatever the tool checks by the time you read it) — the same figures shown on the
+Limits, VaR/ES and Derivatives pages, but recorded here as a dated,
 unchangeable history rather than a point-in-time read.
 
 ## Runs
@@ -144,10 +145,15 @@ includes the full history however far back it goes.
 ## The evidence export
 
 **Export evidence workbook** downloads an `.xlsx` file named
-`Breach register - {portfolio name} - {date}.xlsx`, where `{date}` is the day you downloaded it (in
-UTC), not the snapshot date — unlike the EMIR evidence export, which is named for its anchor date, covering the same two sections as the page —
-the whole register and the whole run history, with no cap on how far back it goes. It has two
-worksheets:
+`Breach register - {portfolio name} - {date}.xlsx`. It covers the same two sections as the page —
+the whole register and the whole run history, with no cap on how far back it goes — in two
+worksheets.
+
+Note that `{date}` is the day you downloaded the file, in UTC, not the snapshot date. The EMIR
+evidence export is named for its anchor date instead, so the two files sort differently; file these
+by the date inside them rather than the one in the name.
+
+The worksheets are:
 
 - **Register** — one row per episode: the check, the subject, when it opened, its peak value,
   whether (and when) it cleared, its state and classification, who acknowledged it and when with
