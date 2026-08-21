@@ -7,6 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use db::auth::marker::{Settings, View};
 use db::auth::{Action, AuthCtx, Domain, Grant};
+use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/sample.xlsx");
@@ -200,6 +201,118 @@ async fn a_run_covers_every_check_that_has_a_limit() {
     // VaR does: the configured limit against the measured utilisation.
     let var = results.iter().find(|r| r.check_key == "var_limit").unwrap();
     assert!(var.limit_value.is_some(), "var_limit stores the configured limit");
+
+    pool.close().await;
+    edb.stop().await;
+}
+
+// ---- C2: a back-dated import must not rewrite episode state ---------------
+
+const HISINV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ingest/tests/fixtures/caceis_hisinv.csv");
+
+fn upload_named(uri: &str, filename: &str, bytes: &[u8]) -> Request<Body> {
+    let mut body = Vec::new();
+    body.extend_from_slice(format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    ).as_bytes());
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    Request::post(uri)
+        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
+        .body(Body::from(body)).unwrap()
+}
+
+/// C2 (whole-branch review): a corrected or late depositary file dated before
+/// the register's current state must not falsify the register.
+///
+/// `analytics::breach::transitions` emits `Close` for every live episode
+/// absent from a run's findings — it cannot tell a back-dated run from a fund
+/// that has cleared. `rerun` refuses a non-latest date outright and explains
+/// why; the import hook had no equivalent guard, so re-issuing a CACEIS file
+/// for an earlier day (an entirely ordinary act) stamped `closed_nav_date`
+/// *before* `opened_nav_date` on every open episode, appended a falsified
+/// `cleared` event, and dropped the episode out of the register's own
+/// "open on the data" view — all behind a 200 and a `tracing::error!`.
+///
+/// The run itself is still recorded: a back-dated file is legitimate history
+/// and the register is meant to be complete. Only the transition phase is
+/// skipped, and the skip is written into `input_notes`.
+#[tokio::test]
+async fn a_back_dated_import_records_its_run_and_leaves_the_episodes_alone() {
+    let (desktop, pool, dbh, edb) = app().await;
+
+    // Map the CACEIS fund code onto portfolio 1 so the CSV lands there.
+    let res = desktop.clone().oneshot(
+        Request::put("/api/portfolios/1/codes")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"[{"source":"caceis","code":"165878"}]"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let latest = std::fs::read(HISINV).unwrap();
+    let res = desktop.clone().oneshot(upload_named(
+        "/api/portfolios/1/imports",
+        "HISINVLUX_165878_20260807_20260810130151.csv", &latest)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    let runs = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(runs.len(), 1, "the first import records one run: {runs:?}");
+    let (run, _) = &runs[0];
+    assert_eq!(run.nav_date, chrono::NaiveDate::from_ymd_opt(2026, 8, 7).unwrap());
+
+    // A live episode, open since the day this file is dated. This fixture's
+    // holdings breach nothing on their own, so the episode is inserted
+    // directly — what is under test is what a LATER, EARLIER-DATED import
+    // does to it, not how it came to exist.
+    let opened = run.nav_date;
+    let bid: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_breaches
+             (portfolio_id, check_key, subject, opened_run_id, opened_nav_date,
+              opened_value, peak_value, peak_nav_date)
+         VALUES (1, 'issuer_10', 'ACME', $1, $2, 0.15, 0.15, $2) RETURNING id")
+        .bind(run.id).bind(opened).fetch_one(&pool).await.unwrap();
+    assert_eq!(scoped.live_episodes(&view).await.unwrap().len(), 1,
+        "the episode must be live before the back-dated import, or this proves nothing");
+
+    // The same depositary file, re-issued for an earlier day: a different
+    // content hash, so not a duplicate import, and the recorder runs for
+    // 2026-07-15 — three weeks before the episode opened.
+    let back = String::from_utf8(latest.clone()).unwrap().replace("20260807;", "20260715;");
+    assert_ne!(back.as_bytes(), &latest[..], "the back-dated file must actually differ");
+    let res = desktop.clone().oneshot(upload_named(
+        "/api/portfolios/1/imports",
+        "HISINVLUX_165878_20260715_20260716130151.csv", back.as_bytes())).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body[0]["error"].is_null(), "the back-dated file must still import: {body}");
+
+    // The run IS recorded — the register is meant to be complete, and a
+    // back-dated file is real history for the date it carries.
+    let runs = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(runs.len(), 2, "the back-dated run must still be recorded: {runs:?}");
+    // ...and the episode lifecycle is untouched.
+    let b = scoped.breach_get(&view, bid).await.unwrap().unwrap();
+    assert_eq!(b.closed_nav_date, None,
+        "a run for a date before the episode opened must not close it");
+    assert_eq!(b.opened_nav_date, opened);
+    let kinds: Vec<String> = scoped.breach_events(&view, bid).await.unwrap()
+        .into_iter().map(|e| e.event).collect();
+    assert!(!kinds.iter().any(|k| k == "cleared"),
+        "no falsified `cleared` event may be appended: {kinds:?}");
+    assert_eq!(scoped.live_episodes(&view).await.unwrap().len(), 1,
+        "the episode must still be live on the data");
+
+    // The skip is stated, never left for a reader to infer.
+    let back_run = runs.iter().map(|(r, _)| r)
+        .find(|r| r.nav_date == chrono::NaiveDate::from_ymd_opt(2026, 7, 15).unwrap())
+        .expect("a run for the back-dated day");
+    let note = back_run.input_notes[db::repo::TRANSITIONS_SKIPPED_NOTE].as_str()
+        .unwrap_or_else(|| panic!("the skip must be recorded, not left to be inferred: {}", back_run.input_notes));
+    assert!(note.contains("2026-07-15") && note.contains("2026-08-07"),
+        "the note must name both dates so a reader can see why: {note}");
 
     pool.close().await;
     edb.stop().await;

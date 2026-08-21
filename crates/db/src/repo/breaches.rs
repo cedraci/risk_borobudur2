@@ -48,23 +48,146 @@ pub struct NewRun {
     pub results: Vec<CheckResultRow>,
 }
 
+/// The `input_notes` key under which a run records that it left the episode
+/// lifecycle alone. Named as a constant so the recorder, the tests and any
+/// future reader agree on it.
+pub const TRANSITIONS_SKIPPED_NOTE: &str = "transitions";
+
+/// High half of this module's advisory-lock keys, so a lock taken here cannot
+/// collide with one a future feature takes on a bare portfolio id. The low
+/// half is the portfolio id.
+const REGISTER_LOCK_TAG: i64 = 0x0B12;
+
+fn register_lock_key(portfolio_id: i64) -> i64 {
+    (REGISTER_LOCK_TAG << 32) | (portfolio_id & 0xFFFF_FFFF)
+}
+
+/// What `record_run_and_transitions` did.
+#[derive(Debug, Clone, Copy)]
+pub struct RunOutcome {
+    pub run_id: i64,
+    /// `Some(latest)` when this run's `nav_date` was older than `latest`, the
+    /// newest `nav_date` already recorded for the portfolio, and the episode
+    /// lifecycle was therefore left untouched. See
+    /// `record_run_and_transitions`.
+    pub transitions_skipped_after: Option<NaiveDate>,
+}
+
 impl Scoped<'_> {
+    /// Records one run AND applies its transitions, in a single transaction
+    /// under a per-portfolio advisory lock. The production entry point;
+    /// `record_run` and `apply_transitions` below are the same two halves,
+    /// exposed separately for tests only.
+    ///
+    /// Three things are load-bearing here and none of them survives splitting
+    /// this into two calls:
+    ///
+    /// 1. **One transaction** (I2). A run whose results say `status =
+    ///    "breach"` while `limit_breaches` holds no episode is a register that
+    ///    contradicts its own run history — which is what a crash, or an
+    ///    `apply_transitions` error, between two separate commits produced.
+    ///    It only partially self-heals: the next run opens the episode with a
+    ///    later `opened_nav_date`, permanently understating how long the fund
+    ///    was in breach.
+    /// 2. **`live_episodes` read inside the lock** (I3). Two concurrent runs
+    ///    on one portfolio both read "no live episode for ACME", both compute
+    ///    `Open`, and the loser hits `idx_breaches_live` and rolls back
+    ///    *every* transition it computed — not just the conflicting one.
+    ///    `pg_advisory_xact_lock` serializes the read against the write; the
+    ///    partial unique index stays as the last-resort integrity net it was
+    ///    designed to be.
+    /// 3. **The back-date guard** (C2). `analytics::breach::transitions`
+    ///    emits `Close` for every live episode absent from a run's findings —
+    ///    it cannot tell a back-dated run from a fund that has cleared. So a
+    ///    late or corrected depositary file dated before the register's
+    ///    current state would stamp `closed_nav_date` *earlier than*
+    ///    `opened_nav_date` on every open episode, plus a falsified `cleared`
+    ///    event. `rerun` refuses such a date outright; an import cannot, and
+    ///    should not — a back-dated file is legitimate history and the
+    ///    register is meant to be complete. So the run and its results are
+    ///    recorded as honest history for that date, and only the transition
+    ///    phase is skipped. The skip is written into `input_notes` under
+    ///    `TRANSITIONS_SKIPPED_NOTE`, never left for a reader to infer.
+    ///
+    /// `proposals_for` is called with the transitions computed inside the
+    /// transaction; it must be pure (it runs while the lock is held).
+    pub async fn record_run_and_transitions(
+        &self, a: &Access<Settings, Configure>, run: &NewRun,
+        findings: &[analytics::breach::Finding],
+        actor_label: &str,
+        proposals_for: &(dyn Fn(&[Transition]) -> HashMap<String, Proposal> + Send + Sync),
+    ) -> anyhow::Result<RunOutcome> {
+        let portfolio_id = a.portfolio_id();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(register_lock_key(portfolio_id))
+            .execute(&mut *tx).await?;
+
+        let latest: Option<NaiveDate> = sqlx::query_scalar(
+            "SELECT MAX(nav_date) FROM limit_check_runs WHERE portfolio_id = $1")
+            .bind(portfolio_id).fetch_one(&mut *tx).await?;
+        let skipped_after = latest.filter(|l| run.nav_date < *l);
+
+        let mut run = run.clone();
+        if let Some(l) = skipped_after {
+            anyhow::ensure!(run.input_notes.is_object(),
+                "input_notes must be a JSON object, got {}", run.input_notes);
+            let notes = run.input_notes.as_object_mut().expect("checked just above");
+            notes.insert(TRANSITIONS_SKIPPED_NOTE.to_string(), serde_json::Value::String(format!(
+                "this run is back-dated ({} is before {l}, the newest run already recorded for \
+                 this portfolio), so its results were recorded but no breach episode was opened, \
+                 raised or closed",
+                run.nav_date)));
+        }
+        let run_id = record_run_in(&mut tx, portfolio_id, &run).await?;
+
+        if skipped_after.is_none() {
+            let live = live_episodes_in(&mut tx, portfolio_id).await?;
+            let transitions = analytics::breach::transitions(&live, findings);
+            let proposals = proposals_for(&transitions);
+            apply_transitions_in(
+                &mut tx, portfolio_id,
+                &RunContext { run_id, nav_date: run.nav_date, actor_label, actor_user_id: run.actor_user_id },
+                &transitions, &proposals,
+            ).await?;
+        }
+
+        tx.commit().await?;
+        Ok(RunOutcome { run_id, transitions_skipped_after: skipped_after })
+    }
+
     /// Writes a run and its results in one transaction: a run with no results
     /// would read as "we checked and found nothing", which is not the same as
     /// "we checked".
+    ///
+    /// Test-only. Production writes a run through
+    /// `record_run_and_transitions`, which does this and the transitions in
+    /// ONE transaction — see finding I2. Compiled out of a release build so
+    /// the split path cannot come back.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn record_run(
         &self, a: &Access<Settings, Configure>, run: &NewRun,
     ) -> anyhow::Result<i64> {
         let mut tx = self.pool.begin().await?;
+        let run_id = record_run_in(&mut tx, a.portfolio_id(), run).await?;
+        tx.commit().await?;
+        Ok(run_id)
+    }
+}
+
+async fn record_run_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, portfolio_id: i64, run: &NewRun,
+) -> anyhow::Result<i64> {
+    {
         let run_id: i64 = sqlx::query_scalar(
             "INSERT INTO limit_check_runs
                  (portfolio_id, nav_date, triggered_by, import_id, actor_user_id,
                   inputs_complete, input_notes)
              VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id")
-            .bind(a.portfolio_id()).bind(run.nav_date).bind(&run.triggered_by)
+            .bind(portfolio_id).bind(run.nav_date).bind(&run.triggered_by)
             .bind(run.import_id).bind(run.actor_user_id)
             .bind(run.inputs_complete).bind(&run.input_notes)
-            .fetch_one(&mut *tx).await?;
+            .fetch_one(&mut **tx).await?;
         for r in &run.results {
             sqlx::query(
                 "INSERT INTO limit_check_results
@@ -72,12 +195,13 @@ impl Scoped<'_> {
                  VALUES ($1,$2,$3,$4,$5,$6,$7)")
                 .bind(run_id).bind(&r.check_key).bind(&r.scope_label)
                 .bind(r.limit_value).bind(r.observed_value).bind(&r.status).bind(&r.detail)
-                .execute(&mut *tx).await?;
+                .execute(&mut **tx).await?;
         }
-        tx.commit().await?;
         Ok(run_id)
     }
+}
 
+impl Scoped<'_> {
     /// The most recent snapshot date strictly before `before`, or `None` —
     /// what a proposal compares this run's holdings against. Mirrors
     /// `import_batch`'s token-mismatch guard: `pid` travelling separately
@@ -269,27 +393,57 @@ impl Scoped<'_> {
     pub async fn live_episodes(
         &self, a: &Access<Settings, View>,
     ) -> anyhow::Result<Vec<LiveEpisode>> {
-        Ok(sqlx::query(
-            "SELECT id, check_key, subject, peak_value FROM limit_breaches
-             WHERE portfolio_id = $1 AND closed_nav_date IS NULL AND state <> 'resolved'
-             ORDER BY id")
+        Ok(sqlx::query(LIVE_EPISODES_SQL)
             .bind(a.portfolio_id()).fetch_all(self.pool).await?
-            .iter().map(|r| LiveEpisode {
-                id: r.get("id"),
-                check_key: r.get("check_key"),
-                subject: r.get("subject"),
-                peak_value: r.get("peak_value"),
-            }).collect())
+            .iter().map(live_from_row).collect())
     }
 
     /// Applies one run's transitions and writes the matching timeline events,
     /// in a single transaction: an episode without its `opened` event would be
     /// a record with no provenance.
+    ///
+    /// Test-only, for the same reason as `record_run` above: production goes
+    /// through `record_run_and_transitions`, which reads `live_episodes` under
+    /// the same lock and in the same transaction as this write (I2, I3).
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn apply_transitions(
         &self, a: &Access<Settings, Configure>, ctx: &RunContext<'_>,
         transitions: &[Transition], proposals: &HashMap<String, Proposal>,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
+        apply_transitions_in(&mut tx, a.portfolio_id(), ctx, transitions, proposals).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+const LIVE_EPISODES_SQL: &str =
+    "SELECT id, check_key, subject, peak_value FROM limit_breaches
+     WHERE portfolio_id = $1 AND closed_nav_date IS NULL AND state <> 'resolved'
+     ORDER BY id";
+
+fn live_from_row(r: &sqlx::postgres::PgRow) -> LiveEpisode {
+    LiveEpisode {
+        id: r.get("id"),
+        check_key: r.get("check_key"),
+        subject: r.get("subject"),
+        peak_value: r.get("peak_value"),
+    }
+}
+
+async fn live_episodes_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, portfolio_id: i64,
+) -> anyhow::Result<Vec<LiveEpisode>> {
+    Ok(sqlx::query(LIVE_EPISODES_SQL)
+        .bind(portfolio_id).fetch_all(&mut **tx).await?
+        .iter().map(live_from_row).collect())
+}
+
+async fn apply_transitions_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, portfolio_id: i64,
+    ctx: &RunContext<'_>, transitions: &[Transition], proposals: &HashMap<String, Proposal>,
+) -> anyhow::Result<()> {
+    {
         for t in transitions {
             match t {
                 Transition::Open { check_key, subject, value } => {
@@ -300,11 +454,11 @@ impl Scoped<'_> {
                               opened_value, peak_value, peak_nav_date,
                               proposed_classification, proposal_reason)
                          VALUES ($1,$2,$3,$4,$5,$6,$6,$5,$7,$8) RETURNING id")
-                        .bind(a.portfolio_id()).bind(check_key).bind(subject)
+                        .bind(portfolio_id).bind(check_key).bind(subject)
                         .bind(ctx.run_id).bind(ctx.nav_date).bind(value)
                         .bind(p.and_then(|p| p.classification))
                         .bind(p.map(|p| p.reason.as_str()))
-                        .fetch_one(&mut *tx).await?;
+                        .fetch_one(&mut **tx).await?;
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'opened',$4)")
@@ -314,7 +468,7 @@ impl Scoped<'_> {
                             "proposed": p.and_then(|p| p.classification),
                             "reason": p.map(|p| p.reason.clone()),
                         }))
-                        .execute(&mut *tx).await?;
+                        .execute(&mut **tx).await?;
                 }
                 Transition::RaisePeak { id, value } => {
                     // The id in a transition is data, not a grant: without this
@@ -325,44 +479,63 @@ impl Scoped<'_> {
                     let hit: Option<i64> = sqlx::query_scalar(
                         "UPDATE limit_breaches SET peak_value = $2, peak_nav_date = $3
                          WHERE id = $1 AND portfolio_id = $4 RETURNING id")
-                        .bind(id).bind(value).bind(ctx.nav_date).bind(a.portfolio_id())
-                        .fetch_optional(&mut *tx).await?;
+                        .bind(id).bind(value).bind(ctx.nav_date).bind(portfolio_id)
+                        .fetch_optional(&mut **tx).await?;
                     if hit.is_none() {
                         anyhow::bail!(
                             "transition names breach {id}, which is not in portfolio {}",
-                            a.portfolio_id());
+                            portfolio_id);
                     }
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'note',$4)")
                         .bind(id).bind(ctx.actor_user_id).bind(ctx.actor_label)
                         .bind(serde_json::json!({"peak_value": value, "nav_date": ctx.nav_date}))
-                        .execute(&mut *tx).await?;
+                        .execute(&mut **tx).await?;
                 }
                 Transition::Close { id } => {
+                    // `AND closed_nav_date IS NULL` (M5) makes this the
+                    // conditional-update idiom every other state transition in
+                    // this file uses. Without it a second application of the
+                    // same `Close` silently overwrote `closed_run_id` /
+                    // `closed_nav_date` and appended a SECOND `cleared` event
+                    // to a timeline whose whole value is being exact. With it,
+                    // a re-application is a no-op rather than a falsified
+                    // record — so `bail!` below must not fire for an episode
+                    // that is simply already closed, only for one that is not
+                    // this portfolio's.
                     let hit: Option<i64> = sqlx::query_scalar(
                         "UPDATE limit_breaches SET closed_run_id = $2, closed_nav_date = $3
-                         WHERE id = $1 AND portfolio_id = $4 RETURNING id")
-                        .bind(id).bind(ctx.run_id).bind(ctx.nav_date).bind(a.portfolio_id())
-                        .fetch_optional(&mut *tx).await?;
+                         WHERE id = $1 AND portfolio_id = $4 AND closed_nav_date IS NULL
+                         RETURNING id")
+                        .bind(id).bind(ctx.run_id).bind(ctx.nav_date).bind(portfolio_id)
+                        .fetch_optional(&mut **tx).await?;
                     if hit.is_none() {
-                        anyhow::bail!(
-                            "transition names breach {id}, which is not in portfolio {}",
-                            a.portfolio_id());
+                        let mine: Option<i64> = sqlx::query_scalar(
+                            "SELECT id FROM limit_breaches WHERE id = $1 AND portfolio_id = $2")
+                            .bind(id).bind(portfolio_id)
+                            .fetch_optional(&mut **tx).await?;
+                        anyhow::ensure!(mine.is_some(),
+                            "transition names breach {id}, which is not in portfolio {portfolio_id}");
+                        // Already closed: nothing to write, and nothing to
+                        // report — the register is already in the state this
+                        // transition asks for.
+                        continue;
                     }
                     sqlx::query(
                         "INSERT INTO limit_breach_events (breach_id, actor_user_id, actor_label, event, detail)
                          VALUES ($1,$2,$3,'cleared',$4)")
                         .bind(id).bind(ctx.actor_user_id).bind(ctx.actor_label)
                         .bind(serde_json::json!({"nav_date": ctx.nav_date}))
-                        .execute(&mut *tx).await?;
+                        .execute(&mut **tx).await?;
                 }
             }
         }
-        tx.commit().await?;
         Ok(())
     }
+}
 
+impl Scoped<'_> {
     /// The register. `state` filters; `None` returns everything, newest first.
     pub async fn breaches_for(
         &self, a: &Access<Settings, View>, state: Option<&str>,

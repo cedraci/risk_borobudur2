@@ -1,4 +1,4 @@
-use analytics::breach::{LiveEpisode, Proposal, Transition};
+use analytics::breach::{Finding, LiveEpisode, Proposal, Transition};
 use chrono::NaiveDate;
 use db::auth::marker::{Configure, Settings, View};
 use db::auth::AuthCtx;
@@ -259,6 +259,177 @@ async fn a_cleared_but_unsigned_episode_does_not_block_a_new_one() {
     let still_open: Vec<i64> = all.iter().filter(|b| b.closed_nav_date.is_none()).map(|b| b.id).collect();
     assert_eq!(still_open.len(), 1, "exactly one episode is live");
     assert_ne!(still_open[0], first, "the live one is the new episode, not the cleared one");
+
+    edb.stop().await;
+}
+
+// ---- The one-transaction entry point (I2, I3, C2, M5) --------------------
+
+fn finding() -> Finding {
+    Finding { check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106) }
+}
+
+fn no_proposals(_: &[Transition]) -> HashMap<String, Proposal> { HashMap::new() }
+
+/// I2: `record_run` and `apply_transitions` used to be two transactions with
+/// three awaits between them. A failure in the second left a committed run
+/// whose results say `status = "breach"` beside a register holding no episode
+/// — the register contradicting its own run history, and permanently
+/// understating how long the fund was in breach once a later run finally
+/// opened the episode.
+///
+/// The failure is induced through the `proposed_classification` CHECK
+/// constraint (only `active`/`passive`), which is a real constraint on a real
+/// column rather than a fault injected into the plumbing.
+#[tokio::test]
+async fn a_failing_transition_rolls_back_the_run_that_produced_it() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+
+    let bad = |ts: &[Transition]| {
+        let mut m = HashMap::new();
+        for t in ts {
+            if let Transition::Open { check_key, subject, .. } = t {
+                m.insert(format!("{check_key}\u{1f}{subject}"), Proposal {
+                    classification: Some("neither"), reason: "violates the CHECK".into(),
+                });
+            }
+        }
+        m
+    };
+    let out = scoped.record_run_and_transitions(
+        &configure, &run_on(7), &[finding()], "system", &bad).await;
+    assert!(out.is_err(), "the transition must fail, or this test proves nothing");
+
+    assert!(scoped.runs_for(&view, 50).await.unwrap().is_empty(),
+        "a run whose transitions failed must not be committed on its own — that is a \
+         register that contradicts its own run history");
+    assert!(scoped.breaches_for(&view, None).await.unwrap().is_empty());
+
+    edb.stop().await;
+}
+
+/// I3: two runs for one portfolio at the same moment (two operators, or one
+/// operator and two tabs). Both used to read `live_episodes` on the pool, both
+/// computed `Open`, and the loser hit `idx_breaches_live` and rolled back
+/// EVERY transition it had computed plus — after I2 — its whole run. With the
+/// read and the write inside one transaction under
+/// `pg_advisory_xact_lock`, the second run sees the episode the first opened
+/// and simply records no transition for it.
+#[tokio::test]
+async fn two_concurrent_runs_on_one_portfolio_do_not_lose_a_run() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+
+    let one = async {
+        let scoped = dbh.scope(&ctx);
+        let c = scoped.authorize::<Settings, Configure>(1).unwrap();
+        scoped.record_run_and_transitions(&c, &run_on(7), &[finding()], "system", &no_proposals).await
+    };
+    let two = async {
+        let scoped = dbh.scope(&ctx);
+        let c = scoped.authorize::<Settings, Configure>(1).unwrap();
+        scoped.record_run_and_transitions(&c, &run_on(7), &[finding()], "system", &no_proposals).await
+    };
+    let (a, b) = tokio::join!(one, two);
+    a.expect("the first run must commit");
+    b.expect("the second run must commit too — a lost run is a lost audit record");
+
+    let scoped = dbh.scope(&ctx);
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+    assert_eq!(scoped.runs_for(&view, 50).await.unwrap().len(), 2,
+        "both runs are real history and both must be recorded");
+    let all = scoped.breaches_for(&view, None).await.unwrap();
+    assert_eq!(all.len(), 1, "the same subject breaching is ONE episode, not two: {all:?}");
+
+    edb.stop().await;
+}
+
+/// C2, at the layer that enforces it: a run older than the newest already
+/// recorded records its results and leaves the episode lifecycle alone, and
+/// says so in `input_notes`.
+#[tokio::test]
+async fn a_back_dated_run_records_its_results_and_skips_the_transitions() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+
+    scoped.record_run_and_transitions(&configure, &run_on(14), &[finding()], "system", &no_proposals)
+        .await.unwrap();
+    let live = scoped.live_episodes(&view).await.unwrap();
+    assert_eq!(live.len(), 1, "day 14 opens the episode");
+
+    // Day 7 arrives late, and finds nothing: without the guard, `transitions`
+    // would emit `Close` for the day-14 episode and stamp it cleared a week
+    // before it opened.
+    let out = scoped.record_run_and_transitions(&configure, &run_on(7), &[], "system", &no_proposals)
+        .await.unwrap();
+    assert_eq!(out.transitions_skipped_after, NaiveDate::from_ymd_opt(2026, 8, 14));
+
+    let all = scoped.breaches_for(&view, None).await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].closed_nav_date, None, "the episode must not be closed by a back-dated run");
+    assert_eq!(scoped.breach_events(&view, all[0].id).await.unwrap().len(), 1,
+        "only the `opened` event — no falsified `cleared`");
+
+    let runs = scoped.runs_for(&view, 50).await.unwrap();
+    assert_eq!(runs.len(), 2, "the back-dated run is still recorded: the register is complete");
+    let (back, back_results) = runs.iter()
+        .find(|(r, _)| r.nav_date == NaiveDate::from_ymd_opt(2026, 8, 7).unwrap()).unwrap();
+    assert_eq!(back_results.len(), 1,
+        "the back-dated run's RESULTS are honest history for that date and are kept");
+    assert!(back.input_notes[db::repo::TRANSITIONS_SKIPPED_NOTE].is_string(),
+        "the skip must be stated, never left for a reader to infer: {}", back.input_notes);
+
+    edb.stop().await;
+}
+
+/// M5: `Transition::Close` was the one state transition in this module with no
+/// guard on the episode's current state, so applying it twice overwrote the
+/// close and appended a SECOND `cleared` event to a timeline whose entire
+/// value is being exact. A re-application must be a no-op.
+#[tokio::test]
+async fn closing_an_already_closed_episode_is_a_no_op() {
+    let (dbh, edb) = fresh().await;
+    let ctx = AuthCtx::desktop();
+    let scoped = dbh.scope(&ctx);
+    let configure = scoped.authorize::<Settings, Configure>(1).unwrap();
+    let view = scoped.authorize::<Settings, View>(1).unwrap();
+
+    let run1 = scoped.record_run(&configure, &run_on(7)).await.unwrap();
+    scoped.apply_transitions(&configure,
+        &RunContext { run_id: run1, nav_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+                      actor_label: "system", actor_user_id: None },
+        &[Transition::Open { check_key: "issuer_10".into(), subject: "ACME".into(), value: Some(0.106) }],
+        &HashMap::new()).await.unwrap();
+    let id = scoped.breaches_for(&view, None).await.unwrap()[0].id;
+
+    let run2 = scoped.record_run(&configure, &run_on(14)).await.unwrap();
+    scoped.apply_transitions(&configure,
+        &RunContext { run_id: run2, nav_date: NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
+                      actor_label: "system", actor_user_id: None },
+        &[Transition::Close { id }], &HashMap::new()).await.unwrap();
+
+    // The same close again, from a later run. It must not move the close date
+    // and must not append a second `cleared`.
+    let run3 = scoped.record_run(&configure, &run_on(21)).await.unwrap();
+    scoped.apply_transitions(&configure,
+        &RunContext { run_id: run3, nav_date: NaiveDate::from_ymd_opt(2026, 8, 21).unwrap(),
+                      actor_label: "system", actor_user_id: None },
+        &[Transition::Close { id }], &HashMap::new()).await.unwrap();
+
+    let row = &scoped.breaches_for(&view, None).await.unwrap()[0];
+    assert_eq!(row.closed_nav_date, NaiveDate::from_ymd_opt(2026, 8, 14),
+        "the original close date must stand");
+    let kinds: Vec<String> = scoped.breach_events(&view, id).await.unwrap()
+        .into_iter().map(|e| e.event).collect();
+    assert_eq!(kinds, vec!["opened", "cleared"],
+        "an episode cleared twice in its own timeline is a falsified record: {kinds:?}");
 
     edb.stop().await;
 }
