@@ -121,7 +121,7 @@ const CASES: &[Case] = &[
     r("/api/portfolios/{pid}/limit-runs", Domain::Settings, Action::View),
     r("/api/portfolios/{pid}/breaches", Domain::Settings, Action::View),
     // `GET /api/portfolios/{pid}/breaches/{bid}` is NOT in this table. The
-    // exact-grant case above (`the_exact_grant_never_401s_403s_or_404s`)
+    // exact-grant case below (`the_exact_grant_never_401s_403s_or_404s`)
     // asserts that a 404 never comes back, but this file's `app()` seeds no
     // breach episodes at all — any concrete `bid` here would 404 for the
     // right reason (no such episode) and fail that assertion for the wrong
@@ -129,6 +129,7 @@ const CASES: &[Case] = &[
     // portfolio / exact grant) is pinned instead in
     // `api_breach_register.rs::episode_route_authorization`, against a
     // real episode.
+
     // Writes. Every mutating portfolio-scoped route in `routes.rs` — the
     // half the matrix used to skip. A mis-declared write is both likelier
     // (they arrive one at a time) and more expensive than a mis-declared

@@ -36,6 +36,24 @@ fn upload_req(uri: &str, bytes: &[u8]) -> Request<Body> {
         .body(Body::from(body)).unwrap()
 }
 
+/// One authenticated GET against portfolio 1's register, returning the status
+/// and the decoded body. The `state` filter needs three of these in a row and
+/// each is six lines otherwise.
+async fn register_get(app: &axum::Router, query: &str, cookie: &str) -> (StatusCode, serde_json::Value) {
+    let res = app.clone().oneshot(
+        Request::get(format!("/api/portfolios/1/breaches{query}"))
+            .header("cookie", cookie).body(Body::empty()).unwrap()
+    ).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, body)
+}
+
 #[tokio::test]
 async fn the_register_lists_runs_and_open_episodes() {
     let (desktop, pool, _dbh, edb) = app().await;
@@ -70,12 +88,7 @@ async fn the_register_lists_runs_and_open_episodes() {
 /// correct grant) directly against a real episode instead.
 #[tokio::test]
 async fn episode_route_authorization() {
-    let dir = tempfile::tempdir().unwrap();
-    let edb = db::embedded::start(dir.path(), true).await.unwrap();
-    let dbh = db::Db::connect(&edb.url).await.unwrap();
-    let pool = dbh.test_pool().clone();
-    std::mem::forget(dir);
-    let desktop = server::routes::router(server::state::AppState::desktop(dbh.clone()));
+    let (desktop, pool, dbh, edb) = app().await;
     let server_app = server::routes::router(server::state::AppState::server(dbh.clone()));
 
     // Portfolio 1 exists from the seed migration; a second portfolio to prove
@@ -147,7 +160,50 @@ async fn episode_route_authorization() {
     let body: serde_json::Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["breach"]["id"], bid);
-    assert!(body["events"].as_array().is_some());
+    // A hand-inserted episode has no events; asserting the count states that
+    // fact, where `is_some()` would hold for any serialized `Vec` at all.
+    assert_eq!(body["events"].as_array().unwrap().len(), 0);
+
+    // 5. An episode belonging to another fund is not readable through this
+    // fund's grant. Cases 1-4 are all settled by the middleware and by
+    // `authorize(pid)`; this is the only one that reaches `breach_get`'s own
+    // `portfolio_id = $2` predicate, so without it that predicate could be
+    // deleted with every assertion above still passing.
+    let other_run: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_check_runs (portfolio_id, nav_date, triggered_by)
+         VALUES ($1, $2, 'import') RETURNING id")
+        .bind(other_pid).bind(run.nav_date)
+        .fetch_one(&pool).await.unwrap();
+    let other_bid: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_breaches
+             (portfolio_id, check_key, subject, opened_run_id, opened_nav_date)
+         VALUES ($1, 'issuer_10', 'OTHER FUND ISSUER', $2, $3)
+         RETURNING id")
+        .bind(other_pid).bind(other_run).bind(run.nav_date)
+        .fetch_one(&pool).await.unwrap();
+    let res = server_app.clone().oneshot(
+        Request::get(format!("/api/portfolios/1/breaches/{other_bid}"))
+            .header("cookie", "borobudur_session=ok-t").body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND,
+        "another fund's episode must not be readable through portfolio 1's grant");
+
+    // 6. The register's `state` filter. Without these three, the whitelist
+    // could be deleted and `breaches_for` could be called with `None`, and
+    // the suite would stay green: the list test only asserts a 200.
+    let (status, _) = register_get(&server_app, "?state=bogus", "borobudur_session=ok-t").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST,
+        "an unknown state is a bad request, not a silently unfiltered list");
+    let (status, body) = register_get(&server_app, "?state=open", "borobudur_session=ok-t").await;
+    assert_eq!(status, StatusCode::OK);
+    let open: Vec<i64> = body["breaches"].as_array().unwrap()
+        .iter().map(|b| b["id"].as_i64().unwrap()).collect();
+    assert_eq!(open, vec![bid],
+        "the open filter must return this fund's open episode and nothing else");
+    let (status, body) = register_get(&server_app, "?state=resolved", "borobudur_session=ok-t").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["breaches"].as_array().unwrap().is_empty(),
+        "no episode is resolved, so this must come back empty — which is what proves it filters");
 
     pool.close().await;
     edb.stop().await;
