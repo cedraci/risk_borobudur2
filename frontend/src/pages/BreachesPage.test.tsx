@@ -4,6 +4,7 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import BreachesPage from "./BreachesPage";
 import { renderPage, stubFetch, stubFetchStatus, TEST_PORTFOLIO } from "../test/harness";
+import { eur } from "../fmt";
 
 const RUNS = {
   runs: [{
@@ -97,6 +98,32 @@ describe("breach register", () => {
     expect(signedOffCard.textContent).toMatch(/Resolved/);
     expect(signedOffCard.textContent).not.toMatch(/awaiting sign-off/i);
     expect(signedOffCard.textContent).toContain("M. Martin");
+  });
+
+  // EMIR checks (`emir_*`) record a euro notional against a euro threshold
+  // (`handlers/breaches.rs`'s `threshold_eur`/`avg_otc_eur`), unlike every
+  // other check family here (a ratio to NAV) — formatting one with `pct`
+  // would print a nine-figure euro amount as a percentage.
+  it("formats an EMIR episode's figures in euros, not a percentage", async () => {
+    const p = TEST_PORTFOLIO.id;
+    stubFetch({
+      [`/api/portfolios/${p}/limit-runs`]: { runs: [{
+        ...RUNS.runs[0],
+        results: [{ check_key: "emir_class1", scope_label: "EMIR Class 1",
+                    limit_value: 1_000_000_000, observed_value: 1_200_000_000, status: "breach", detail: {} }],
+      }] },
+      [`/api/portfolios/${p}/breaches`]: { breaches: [episode({
+        check_key: "emir_class1", subject: "OTC notional",
+        opened_value: 1_200_000_000, peak_value: 1_500_000_000,
+      })] },
+    });
+    const { container } = renderPage(<BreachesPage />);
+    await waitFor(() => expect(container.textContent).toContain("OTC notional"));
+    const card = screen.getByText(/OTC notional/).closest(".card") as HTMLElement;
+    expect(card.textContent).toContain(eur(1_200_000_000));
+    expect(card.textContent).toContain(eur(1_500_000_000));
+    expect(card.textContent).toContain(eur(1_000_000_000));
+    expect(card.textContent).not.toContain("%");
   });
 
   it("renders a denial rather than an empty register", async () => {
