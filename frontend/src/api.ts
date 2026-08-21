@@ -257,6 +257,11 @@ export interface Backtest {
 export interface RefRow {
   code: string; name: string; asset_type: string;
   effective_issuer_group: string; issuer_group_override: string | null;
+  // True when an override is set on a row the concentration checks never
+  // apply it to (a `Fonds` row: `fund_20` is a per-target-fund limit, so the
+  // group is deliberately ignored there). The editor shows the typed value
+  // either way, so without this an inert override looks like it took.
+  issuer_group_override_inert?: boolean;
   effective_days: number; days_override: number | null;
   adv_30d: number | null; adv_asof: string | null; adv_eligible: boolean | null;
   market_place_name: string | null;

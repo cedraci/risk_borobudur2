@@ -331,6 +331,14 @@ function RefsCard({ rows, forbidden, advMaxAgeDays, onSaved }: { rows: import(".
                     placeholder={r.effective_issuer_group}
                     onChange={(e) => setDraft(r.code, { issuer_group: e.target.value || null })}
                   />
+                  {/* The box shows what was typed, so an override the checks
+                      never apply would otherwise read as having taken effect —
+                      the exact confusion finding I4 was about. */}
+                  {r.issuer_group_override_inert && (
+                    <span className="warn-badge" title={`The concentration checks group ${r.asset_type} rows by their own name, so this override does not affect them.`}>
+                      not applied to {r.asset_type}
+                    </span>
+                  )}
                 </td>
                 <td>
                   <input
