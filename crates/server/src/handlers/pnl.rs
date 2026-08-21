@@ -244,7 +244,17 @@ pub async fn get(
             sector: r.and_then(|r| r.gics_sector.clone()),
             industry: r.and_then(|r| r.gics_industry.clone()),
             currency: ccy,
-            issuer_group: r.and_then(|r| r.issuer_group.clone()),
+            // The ONE rule (`analytics::effective_issuer_group`), so the
+            // attribution dimension names the same groups the concentration
+            // checks and the breach register do. It used to be the raw
+            // override: `None` for anything unconfigured (every such
+            // instrument fell into one "unclassified" bucket), and applied to
+            // `Fonds` rows, which the checks never regroup (finding I4).
+            issuer_group: Some(analytics::effective_issuer_group(
+                &p.asset_type,
+                p.name.as_deref().unwrap_or(isin),
+                r.and_then(|r| r.issuer_group.as_deref()),
+            )),
             decomp,
         });
     }

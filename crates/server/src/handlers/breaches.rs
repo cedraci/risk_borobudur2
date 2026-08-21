@@ -13,7 +13,7 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use analytics::breach::{Finding, SubjectHolding};
-use analytics::{concentration, default_issuer_group, CheckStatus, ConPosition};
+use analytics::{concentration, effective_issuer_group, CheckStatus, ConPosition};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
@@ -42,20 +42,19 @@ pub struct ComputedRun {
     pub input_notes: serde_json::Map<String, serde_json::Value>,
 }
 
-/// THE grouping rule: `issuer_group` override, falling back to
-/// `default_issuer_group`, with `Fonds` never regrouped (fund_20 is per
-/// target fund). The single definition of what a subject is.
+/// What a subject is, for one position row. The rule itself lives in
+/// `analytics::concentration::effective_issuer_group` — the one definition,
+/// shared with `handlers::refs` (what the Reference page displays) and
+/// `handlers::pnl` (the attribution dimension), which each had their own copy
+/// without the `Fonds` carve-out until finding I4.
 fn subject_group(
     p: &db::repo::PositionRecord, by: &HashMap<&str, &db::repo::InstrumentRef>,
 ) -> String {
-    let name = p.name.as_deref().unwrap_or_default();
-    if p.asset_type == "Fonds" {
-        default_issuer_group(&p.asset_type, name)
-    } else {
-        by.get(p.isin.as_str())
-            .and_then(|r| r.issuer_group.clone())
-            .unwrap_or_else(|| default_issuer_group(&p.asset_type, name))
-    }
+    effective_issuer_group(
+        &p.asset_type,
+        p.name.as_deref().unwrap_or_default(),
+        by.get(p.isin.as_str()).and_then(|r| r.issuer_group.as_deref()),
+    )
 }
 
 /// The `ConPosition` assembly lifted out of `limits::concentration_h`, which

@@ -14,6 +14,12 @@ pub struct RefRow {
     pub asset_type: String,
     pub effective_issuer_group: String,
     pub issuer_group_override: Option<String>,
+    /// An `issuer_group` override was set on this instrument and does nothing:
+    /// `fund_20` is a per-target-fund limit, so a `Fonds` row is never
+    /// regrouped (`analytics::effective_issuer_group`). Reported rather than
+    /// silently ignored — the override that looked like it took but did not is
+    /// the part that misleads.
+    pub issuer_group_override_inert: bool,
     pub effective_days: f64,
     pub days_override: Option<f64>,
     pub adv_30d: Option<f64>,
@@ -67,9 +73,20 @@ pub async fn list(State(st): State<AppState>, Extension(ctx): Extension<AuthCtx>
             let days_override = r.and_then(|r| r.liquidity_days);
             rows.push(RefRow {
                 code: p.isin.clone(),
-                effective_issuer_group: issuer_group_override
-                    .clone()
-                    .unwrap_or_else(|| analytics::default_issuer_group(&p.asset_type, &name)),
+                // The ONE rule (`analytics::effective_issuer_group`), not a
+                // second copy of it. This used to apply the override
+                // unconditionally, so a `Fonds` row echoed an override back as
+                // "effective" that `fund_20` and the breach register ignore —
+                // an analyst regrouping two share classes of one target UCITS
+                // got visual confirmation of a merge that never happened
+                // (finding I4).
+                effective_issuer_group: analytics::effective_issuer_group(
+                    &p.asset_type, &name, issuer_group_override.as_deref()),
+                // ...and where the override is inert, say so rather than
+                // leaving the user to notice that the value they typed did not
+                // appear.
+                issuer_group_override_inert: issuer_group_override.is_some()
+                    && analytics::issuer_group_override_is_inert(&p.asset_type),
                 issuer_group_override,
                 effective_days: effective_days(&settings.liquidity_default_days, &p.asset_type, days_override),
                 days_override,

@@ -40,6 +40,38 @@ pub fn default_issuer_group(asset_type: &str, name: &str) -> String {
     }
 }
 
+/// The asset type `fund_20` is written against: a per-TARGET-FUND limit, so a
+/// holding of this type is never regrouped under someone's `issuer_group`
+/// override. Two share classes of the same UCITS are two 20% buckets, and
+/// merging them would silently move a fund from two `ok` verdicts to one
+/// breach — or, as it actually happened, keep it at two `ok`s while the UI
+/// said they had been merged.
+pub const FUND_ASSET_TYPE: &str = "Fonds";
+
+/// THE issuer-group rule: the `issuer_group` override where there is one,
+/// falling back to `default_issuer_group` — except for `Fonds`, which is never
+/// regrouped (see `FUND_ASSET_TYPE`).
+///
+/// One definition, called by the concentration checks, the breach register,
+/// the Reference page's `effective_issuer_group` and the P&L attribution
+/// dimension. Those last two used to compute it independently and both omitted
+/// the `Fonds` carve-out (finding I4), so the value the Reference page labelled
+/// "effective issuer group" was not the group `fund_20` actually used and an
+/// analyst had visual confirmation of a regrouping that never took.
+pub fn effective_issuer_group(asset_type: &str, name: &str, override_: Option<&str>) -> String {
+    match override_ {
+        Some(g) if !issuer_group_override_is_inert(asset_type) => g.to_string(),
+        _ => default_issuer_group(asset_type, name),
+    }
+}
+
+/// Whether an `issuer_group` override on this asset type does anything at all.
+/// The Reference page shows this rather than echoing an inert override back as
+/// "effective".
+pub fn issuer_group_override_is_inert(asset_type: &str) -> bool {
+    asset_type == FUND_ASSET_TYPE
+}
+
 fn status_for(weight: f64, limit: f64) -> CheckStatus {
     if weight > limit { CheckStatus::Breach }
     else if weight >= WATCH_FRAC * limit { CheckStatus::Watch }
@@ -76,7 +108,7 @@ pub fn concentration(positions: &[ConPosition]) -> Vec<Check> {
     let group_rows: Vec<CheckRow> = sec_groups.iter()
         .map(|(g, w)| CheckRow { group: g.clone(), weight: *w, status: status_for(*w, 0.20) })
         .collect();
-    let fund_rows: Vec<CheckRow> = group_sums(positions.iter().filter(|p| p.asset_type == "Fonds"))
+    let fund_rows: Vec<CheckRow> = group_sums(positions.iter().filter(|p| p.asset_type == FUND_ASSET_TYPE))
         .iter()
         .map(|(g, w)| CheckRow { group: g.clone(), weight: *w, status: status_for(*w, 0.20) })
         .collect();
@@ -162,6 +194,24 @@ mod tests {
         assert_eq!(dep.rows[0].group, "CBLU");
         assert!((dep.rows[0].weight - 0.04).abs() < 1e-12);
         assert_eq!(dep.status, CheckStatus::Ok);
+    }
+
+    /// I4: the `Fonds` carve-out is the whole reason this rule cannot be
+    /// re-derived at each call site. `refs.rs` and `pnl.rs` each had their own
+    /// copy without it, so a `Fonds` override showed as "effective" on the
+    /// Reference page while `fund_20` kept the two share classes apart.
+    #[test]
+    fn an_issuer_group_override_is_applied_everywhere_except_on_a_fund() {
+        assert_eq!(effective_issuer_group("Action", "Acme Sa", Some("ACME GROUP")), "ACME GROUP");
+        assert_eq!(effective_issuer_group("Action", "Acme  Sa", None), "ACME SA");
+        // A per-target-fund limit is per target fund: the override is inert,
+        // and the caller is told so rather than shown its own value back.
+        assert_eq!(effective_issuer_group("Fonds", "Target Fund X A", Some("TARGET FUND X")),
+            "TARGET FUND X A");
+        assert!(issuer_group_override_is_inert("Fonds"));
+        assert!(!issuer_group_override_is_inert("Action"));
+        // The cash-account rule still applies underneath.
+        assert_eq!(effective_issuer_group("Cash Acc", "Depositary Bk- CBLU", None), "CBLU");
     }
 
     #[test]
