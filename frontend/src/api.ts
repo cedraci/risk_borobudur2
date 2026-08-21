@@ -541,11 +541,23 @@ export const ADMIN_ROLES: { value: string; label: string }[] = [
 
 // ---- Breach register (crates/server/src/handlers/breaches.rs, `/api/portfolios/{id}/{limit-runs,breaches}`) ----
 
+/** The server re-authorizes each recorded payload against the domain it was
+ * computed from — a run's `detail` is another domain's analytics, not Settings
+ * data (see `DetailGate` in `handlers/breaches.rs`). Where the reader lacks
+ * that grant the figure is withheld and this marker carries the reason, so the
+ * page can say why rather than showing a bare dash. */
+export type PayloadStatus =
+  | { status: "available" }
+  | { status: "unavailable"; reason: string };
+
 export interface CheckResult {
   check_key: string; scope_label: string;
   limit_value: number | null; observed_value: number | null;
   status: "ok" | "watch" | "breach";
   detail: unknown;
+  // `observed_value` and `detail` are withheld together when this is
+  // unavailable; `status` and `limit_value` are Settings data and survive.
+  payload_status?: PayloadStatus;
 }
 export interface LimitRun {
   id: number; nav_date: string; run_at: string;
@@ -562,6 +574,12 @@ export interface BreachEpisode {
   classification: "unclassified" | "active" | "passive";
   proposed_classification: "active" | "passive" | null;
   proposal_reason: string | null;
+  // `opened_value`/`peak_value`/`peak_nav_date` are withheld together when
+  // `values_status` is unavailable; `proposal_reason` when `proposal_status`
+  // is. Optional so an older server (or a fixture predating the gate) still
+  // types — absent means available.
+  values_status?: PayloadStatus;
+  proposal_status?: PayloadStatus;
   acknowledged_at: string | null; acknowledgement_note: string | null;
   // Who acted, captured on the event at the moment of the act (not a live
   // join to `users`, so a later account deletion never erases who decided).

@@ -189,6 +189,8 @@ function EpisodeCard({
 }: { pid: number; ep: BreachEpisode; runs: LimitRun[]; runsUnavailable?: string; onChanged: () => void }) {
   const result = latestResultFor(runs, ep.check_key);
   const fmt = valueFmt(ep.check_key);
+  const valuesDenied = ep.values_status?.status === "unavailable" ? ep.values_status.reason : null;
+  const proposalDenied = ep.proposal_status?.status === "unavailable" ? ep.proposal_status.reason : null;
   const today = new Date().toISOString().slice(0, 10);
   const days = daysBetween(ep.opened_nav_date, ep.closed_nav_date ?? today);
 
@@ -208,8 +210,17 @@ function EpisodeCard({
       )}
       <p className="kpi-sub">
         Open since {ep.opened_nav_date} ({days} day{days === 1 ? "" : "s"}) ·{" "}
-        {fmt(ep.opened_value)} &rarr; peak {fmt(ep.peak_value)} vs limit {fmt(result?.limit_value ?? null)}
+        {valuesDenied
+          ? "figures withheld"
+          : <>{fmt(ep.opened_value)} &rarr; peak {fmt(ep.peak_value)}</>}{" "}
+        vs limit {fmt(result?.limit_value ?? null)}
       </p>
+      {/* A recorded reading is the analytics of the domain it was computed
+          from, not Settings data, so the server withholds it from a reader
+          who lacks that grant (`DetailGate`). Saying so is the whole point:
+          a withheld figure that renders as a bare dash is indistinguishable
+          from one the tool could not compute. */}
+      {valuesDenied && <Unavailable reason={valuesDenied} />}
       {/* The server closes an episode as soon as the numbers clear, but that
           is not the same as a human signing off on it — this line is the one
           place the page says "the data moved, a person still has to look". */}
@@ -226,6 +237,7 @@ function EpisodeCard({
           next to the sentence explaining why it couldn't — worse than
           presenting a real proposal as a decision, so it is called out on
           its own rather than folded into the active/passive wording. */}
+      {proposalDenied && <Unavailable reason={`proposed classification — ${proposalDenied}`} />}
       {ep.proposal_reason && (
         <p className="kpi-sub">
           {ep.proposed_classification === null

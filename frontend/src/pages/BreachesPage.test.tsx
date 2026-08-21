@@ -362,6 +362,25 @@ describe("breach register", () => {
     expect(reds.some((t) => t.includes("not permitted"))).toBe(false);
   });
 
+  // The server withholds a recorded reading from a reader who lacks the
+  // domain it was computed from (`DetailGate`) — e.g. `liq_top5`'s figures
+  // need Shareholders, which the shipped Operations role does not hold. A
+  // withheld figure must say so; rendering a bare dash makes it look like a
+  // number the tool could not compute.
+  it("says why a withheld figure is missing instead of showing a bare dash", async () => {
+    stub([episode({
+      opened_value: null, peak_value: null, peak_nav_date: null,
+      proposal_reason: null,
+      values_status: { status: "unavailable", reason: "not permitted: shareholders" },
+      proposal_status: { status: "unavailable", reason: "not permitted: positions" },
+    })]);
+    const { container } = renderPage(<BreachesPage />);
+    await waitFor(() => expect(container.textContent).toContain("ACME"));
+    const reasons = [...container.querySelectorAll("p.unavailable")].map((e) => e.textContent ?? "");
+    expect(reasons.some((t) => t.includes("not permitted: shareholders"))).toBe(true);
+    expect(reasons.some((t) => t.includes("not permitted: positions"))).toBe(true);
+  });
+
   // `Chip`'s `kind` is wire data. A state the server adds before the frontend
   // ships must degrade to one odd-looking chip, never a thrown TypeError that
   // unmounts the page.
