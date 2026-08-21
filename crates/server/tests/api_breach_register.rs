@@ -362,10 +362,11 @@ async fn an_episode_must_be_classified_before_it_can_be_resolved() {
     edb.stop().await;
 }
 
-/// `GET /api/portfolios/{pid}/breaches/export`. Pinned mainly for the route-
-/// ordering hazard: `routes.rs` must declare `/breaches/export` before
-/// `/breaches/{bid}`, or axum matches `export` as a `{bid}` path parameter
-/// and the handler 400s trying to parse it as an `i64`.
+/// `GET /api/portfolios/{pid}/breaches/export`. Also stands as a regression
+/// pin for the route-ordering hazard `routes.rs` calls out: were `{bid}` ever
+/// declared before `export` (and matchit ever stopped preferring the literal
+/// segment), this 200 with an xlsx content type would instead fail parsing
+/// "export" as an `i64` `bid`.
 #[tokio::test]
 async fn the_evidence_export_returns_an_xlsx() {
     let (desktop, pool, _dbh, edb) = app().await;
