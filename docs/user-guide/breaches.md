@@ -15,7 +15,11 @@ unchangeable history rather than a point-in-time read.
 
 A **run** is one pass of every check against one NAV date, recorded in full — every check's
 status, not just the ones that breached. A run happens automatically every time you import a new
-position snapshot for the portfolio, using that snapshot's own date. You can also trigger one by
+position snapshot for the portfolio, using that snapshot's own date. Re-importing a file the tool
+has already seen records nothing new, and recording a run is deliberately not allowed to fail an
+import: if the register cannot be written the upload still succeeds and the failure is logged
+server-side, so an import that produces no new run here is a reason to check the server log rather
+than to re-import. You can also trigger one by
 hand with the **Re-run checks now** button, for example after tightening a limit and wanting
 today's verdict without waiting for the next import.
 
@@ -45,7 +49,10 @@ An episode remembers:
 
 - **when it opened** — the NAV date of the run that first saw the breach, and the value observed
   then;
-- **its peak** — the worst value seen across every run while it stayed open;
+- **its peak** — the worst value seen across every run while it stayed open. Some checks have no
+  single number to report — the liquidity redemption scenarios are a pass/fail on a whole
+  redemption profile, not one ratio — and those episodes show a dash rather than an invented
+  figure;
 - **when it cleared**, if it has — the NAV date of the first run that no longer found it breaching;
 - its **state** and **classification** (below);
 - who acknowledged it and when, with their note; and who resolved it and when, with theirs.
@@ -91,8 +98,8 @@ subject's holdings between the previous snapshot and this one:
   snapshots, so the tool cannot rule out a purchase having happened. Each of these reads a specific
   reason next to it, so a person can tell at a glance why the engine could not say.
 
-Every one of these is a **proposal**, never a decision — the wording always reads "Proposed:", and
-a proposal (including "no proposal") is not a classification. The classification chip stays
+Every one of these is a **proposal**, never a decision. Where the tool has an opinion the wording
+always reads "Proposed:"; where it does not, it says so outright. Neither is a classification. The classification chip stays
 **Unclassified** until a person acts. This cuts both ways: a real proposal must never be presented
 as though it had already been decided, and a declined proposal must never be quietly defaulted to
 "Passive" just because that reads as the safer of the two — an invented guess would be worse than
@@ -112,9 +119,9 @@ resolve as well — acknowledging is not a formality you can skip on the way to 
 out.
 
 Both the acknowledging and resolving user's name is recorded at the moment they act, not looked up
-later — so the record of who acted still reads correctly even if that person's account is later
-removed from the tool. That permanence is part of what makes the register usable as evidence: the
-audit trail does not go blank because an account was deleted.
+later, and never looked up again — so the record of who acted still reads correctly however that
+account changes afterwards: renamed, disabled, or stripped of every grant. That permanence is part
+of what makes the register usable as evidence.
 
 ## Breach episodes and Run history on the page
 
@@ -125,37 +132,44 @@ only the open ones — sorted with open episodes first, then everything else by 
 A resolved episode still appears here; only its state chip and its position further down the list
 say it is no longer live.
 
-**Run history** is a table of every recorded run, one column per run date (newest first) and one
-row per check, with the check's status (OK/WATCH/BREACH) in each cell — blank ("N/A") where a check
-could not be evaluated for that run because an input was genuinely missing (for example, no
+**Run history** is a table of every recorded run, one column per run (newest first, each headed
+with that run's NAV date) and one row per check, with the check's status (OK/WATCH/BREACH) in each cell — a grey **N/A** where a
+check could not be evaluated for that run because an input was genuinely missing (for example, no
 shareholder register loaded, so the two "Top 5 holders" liquidity scenarios could not run). Hover
 a column with an "incomplete" flag to see which inputs were missing and why. **Re-run checks now**
 sits above this table and triggers a fresh run, described above. The on-page table shows the most
-recent 52 runs; the evidence export below has no such limit and includes the full history.
+recent runs only (52 at the time of writing); the evidence export below has no such limit and
+includes the full history however far back it goes.
 
 ## The evidence export
 
 **Export evidence workbook** downloads an `.xlsx` file named
-`Breach register - {portfolio name} - {date}.xlsx`, built from exactly the same data as the two
-sections on the page — the whole register and the whole run history, with no cap on how far back it
-goes. It has two worksheets:
+`Breach register - {portfolio name} - {date}.xlsx`, where `{date}` is the day you downloaded it (in
+UTC), not the snapshot date — unlike the EMIR evidence export, which is named for its anchor date, covering the same two sections as the page —
+the whole register and the whole run history, with no cap on how far back it goes. It has two
+worksheets:
 
 - **Register** — one row per episode: the check, the subject, when it opened, its peak value,
   whether (and when) it cleared, its state and classification, who acknowledged it and when with
-  their note, who resolved it and when with their note.
+  their note, who resolved it and when with their note. It records what was *decided*, not what the
+  tool guessed: the proposed classification and its reason, the value at which the episode opened,
+  and any deadline are on the page but not in this sheet. Checks appear under their internal keys
+  (`issuer_10`, `liq_fixed`, `emir_credit`, …) rather than the page's labels.
 - **Run history** — one row per recorded run (its NAV date, when it ran, and what triggered it) and
   one column per check the tool has ever run for this portfolio, with the status in each cell —
   blank where a check was absent from that particular run.
 
 As above, the acknowledged-by and resolved-by names in the export are the names captured at the
-time of the act, so the file still shows who acted even for an account since deleted — worth
-knowing, because that permanence is exactly what makes this file usable as evidence for a regulator
-or an auditor.
+time of the act rather than looked up when the file is built, so the file still shows who acted
+whatever has happened to that account since — which is exactly what makes it usable as evidence for
+a regulator or an auditor.
 
 ## Access rights
 
 Viewing the Breaches page — the episode list and the run history — needs `settings/view` on the
 portfolio. Re-running the checks by hand, acknowledging, and resolving all need `settings/configure`.
-Downloading the evidence workbook needs its own `settings/export` grant, on top of the view access
-needed to see the page. See [Access rights](access-rights.md) for how these grants and domains work
+Downloading the evidence workbook needs `settings/export`. That grant already carries the right to
+view the domain — like every export, import and configure grant in the tool — so `settings/export`
+alone is enough to open the page and download the file; it does not have to be paired with a
+separate view grant. See [Access rights](access-rights.md) for how these grants and domains work
 across the tool.

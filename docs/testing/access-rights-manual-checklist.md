@@ -110,24 +110,51 @@ on A only):
       real figures. A realized column full of `0 €` is the specific failure
       this is looking for.
 
-## 4b. Breach register (~3 min)
+## 4b. Breach register (~8 min, most of it setup)
 
-- [ ] Breaches: an open episode shows **Proposed: Passive** (or Active) with
-      its reasoning, and the classification chip reads **Unclassified** until
-      someone acknowledges it — a proposal must never look like a decision.
-      Where the engine could not tell (the portfolio's first snapshot, a
-      subject with no instrument holdings, or an instrument whose quantity is
-      missing at one of the two snapshots), the episode instead reads
-      **"No proposal — {reason}"** — that must not look like a decision
-      either, and must not silently read as "Passive".
-- [ ] An episode whose check has cleared but which nobody has signed off reads
-      **"cleared on the data … awaiting sign-off"**, visibly different from a
-      resolved one.
+**Setup — these cannot be done as either fixture persona as provisioned.**
+The Breaches tab is gated on `settings/view` (`frontend/src/nav.ts`), and the
+script leaves the subject with nav + positions view only and the administrator
+with no grant on A. So, as the **administrator**: grant yourself
+**settings/view** and **settings/configure** on A, refresh, and open Breaches.
+Section 4's NAV Recap upload is a prerequisite — a portfolio with no imported
+snapshot has no runs and no episodes.
+
+> **If the register reads "No breaches recorded." after the import, the three
+> items below cannot be observed.** Record them as *not run* and say so. Do not
+> tick them: an empty register satisfies every one of them vacuously, which is
+> exactly the failure this section exists to catch.
+
+- [ ] Every open episode's classification chip reads **Unclassified**, and the
+      tool's own opinion is worded as a proposal beside it, never as a
+      decision. On a portfolio's **first** imported snapshot every episode
+      should read **"No proposal — {reason}"** (there is no earlier snapshot to
+      compare against) — check that this does not silently render as
+      "Proposed: Passive", and that the reason is shown.
+- [ ] *(Needs a second, later snapshot — skip and say so if you have only one.)*
+      Import another NAV Recap for a later date, press **Re-run checks now**,
+      and confirm episodes now read **Proposed: Active** or **Proposed:
+      Passive** with their reasoning — while the classification chip is still
+      **Unclassified**, because nobody has acknowledged anything.
+- [ ] *(Needs an episode that has cleared — skip and say so if none has.)* An
+      episode whose check has cleared but which nobody has signed off reads
+      **"cleared on the data since \<date\> — awaiting sign-off"**, visibly
+      different from a resolved one's green **Resolved**.
 - [ ] An open episode offers **Acknowledge** and no **Resolve** — the resolve
       control only appears once the episode is acknowledged, so the state
       machine is visible in the page and not only enforced by the server.
       (The server's own refusal of an out-of-order resolve is pinned by the
       Rust suite; it is not reachable from the UI.)
+- [ ] Acknowledge one episode: choosing no classification, or leaving the note
+      empty, is refused in the page with a readable message rather than posted
+      to the server. After acknowledging, the card names **you** and the time,
+      and a **Resolve** control appears.
+- [ ] **Known gap, worth confirming is still true.** Remove your
+      `settings/export` grant (keeping view) and press **Export evidence
+      workbook**. The control is a plain download link rendered unconditionally
+      (`BreachesPage.tsx`), so the denial arrives as a saved file containing a
+      403 body rather than as an on-screen error — unlike the EMIR export in
+      section 4, which surfaces it properly. Record what you actually see.
 
 ## 5. Account lifecycle UX (admin, ~4 min)
 

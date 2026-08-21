@@ -149,7 +149,8 @@ of the Bloomberg request workbook as soon as its country is known.
 - **Breach register** (Breaches page): every limit check the tool runs is
   recorded against the snapshot date it was struck on — concentration,
   liquidity scenarios, the VaR limit and the EMIR thresholds. Consecutive
-  breaches of the same check by the same issuer are grouped into one episode
+  breaches of the same check by the same subject — an issuer, a bank, a
+  liquidity scenario, an EMIR asset class — are grouped into one episode
   with its own timeline, classified active or passive (proposed from position
   changes, confirmed by a person), and closed out through acknowledge and
   resolve. A run is recorded on every import and can be re-run by hand;
