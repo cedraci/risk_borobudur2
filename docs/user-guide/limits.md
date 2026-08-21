@@ -10,6 +10,13 @@ is a read-only, point-in-time view.
 All three panels (Concentration, Liquidity, Rates) read from the same
 snapshot. If you cannot view positions for the selected portfolio at all, the
 whole page shows as unavailable; see [Access rights](access-rights.md).
+
+This page does not remember a check's history from one snapshot to the next —
+for that, see [Breaches](breaches.md): every check shown here (plus the VaR
+limit and the EMIR thresholds) is also recorded on every import into a
+persistent register, which groups consecutive breaches of the same check into
+a single episode and tracks it through acknowledgement and resolution.
+
 Several panels also draw on reference data, NAV history, or the shareholder
 register, each governed by its own access grant — where one of those is
 missing, the affected figures degrade to an explicit unavailable state rather

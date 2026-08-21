@@ -110,6 +110,25 @@ on A only):
       real figures. A realized column full of `0 €` is the specific failure
       this is looking for.
 
+## 4b. Breach register (~3 min)
+
+- [ ] Breaches: an open episode shows **Proposed: Passive** (or Active) with
+      its reasoning, and the classification chip reads **Unclassified** until
+      someone acknowledges it — a proposal must never look like a decision.
+      Where the engine could not tell (the portfolio's first snapshot, a
+      subject with no instrument holdings, or an instrument whose quantity is
+      missing at one of the two snapshots), the episode instead reads
+      **"No proposal — {reason}"** — that must not look like a decision
+      either, and must not silently read as "Passive".
+- [ ] An episode whose check has cleared but which nobody has signed off reads
+      **"cleared on the data … awaiting sign-off"**, visibly different from a
+      resolved one.
+- [ ] An open episode offers **Acknowledge** and no **Resolve** — the resolve
+      control only appears once the episode is acknowledged, so the state
+      machine is visible in the page and not only enforced by the server.
+      (The server's own refusal of an out-of-order resolve is pinned by the
+      Rust suite; it is not reachable from the UI.)
+
 ## 5. Account lifecycle UX (admin, ~4 min)
 
 - [ ] Create a throwaway user: the **generated password card** appears

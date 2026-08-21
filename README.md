@@ -146,6 +146,14 @@ of the Bloomberg request workbook as soon as its country is known.
   disputes), and exports the full calculation as an `.xlsx` evidence file
   (`EMIR - seuils - {portfolio name} - {anchor}.xlsx`) for archiving per the
   EMIR procedure.
+- **Breach register** (Breaches page): every limit check the tool runs is
+  recorded against the snapshot date it was struck on — concentration,
+  liquidity scenarios, the VaR limit and the EMIR thresholds. Consecutive
+  breaches of the same check by the same issuer are grouped into one episode
+  with its own timeline, classified active or passive (proposed from position
+  changes, confirmed by a person), and closed out through acknowledge and
+  resolve. A run is recorded on every import and can be re-run by hand;
+  runs are immutable. Exports to `.xlsx` as evidence.
 - **NAV sensitivity per +100bp**: signed as profit and loss, `-100 × Σ DV01 ÷ AUM`
   at the snapshot's own NAV date. Negative means net assets fall if yields rise
   100bp (the book is long rates); positive means they rise. It covers the cash
