@@ -306,6 +306,58 @@ async fn an_episode_must_be_classified_before_it_can_be_resolved() {
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY,
         "a resolved episode must not be resolvable a second time");
 
+    // Another fund's episode is not writable through this fund's grant. Every
+    // assertion above is settled inside portfolio 1, so without this the
+    // `AND portfolio_id = $2` in `breach_acknowledge`/`breach_resolve` could
+    // be deleted with the suite still green — and a sign-off written onto a
+    // fund the signer was never authorized for is worse than a read of one.
+    let other_pid: i64 = sqlx::query_scalar(
+        "INSERT INTO portfolios (name, kind) VALUES ($1,'ucits') RETURNING id")
+        .bind("Other").fetch_one(&pool).await.unwrap();
+    let other_run: i64 = sqlx::query_scalar(
+        "INSERT INTO limit_check_runs (portfolio_id, nav_date, triggered_by)
+         VALUES ($1, $2, 'import') RETURNING id")
+        .bind(other_pid).bind(run.nav_date)
+        .fetch_one(&pool).await.unwrap();
+    // Two episodes, because each route's own state predicate would otherwise
+    // refuse the request for the wrong reason and prove nothing: `resolve`
+    // rejects anything not already `acknowledged`, so only an acknowledged
+    // episode can show that the portfolio predicate is what stopped it.
+    let mut other = Vec::new();
+    for (subject, state, classification) in [
+        ("OTHER FUND OPEN", "open", "unclassified"),
+        ("OTHER FUND ACKNOWLEDGED", "acknowledged", "passive"),
+    ] {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO limit_breaches
+                 (portfolio_id, check_key, subject, opened_run_id, opened_nav_date, state, classification)
+             VALUES ($1, 'issuer_10', $2, $3, $4, $5, $6)
+             RETURNING id")
+            .bind(other_pid).bind(subject).bind(other_run).bind(run.nav_date)
+            .bind(state).bind(classification)
+            .fetch_one(&pool).await.unwrap();
+        other.push((id, state, classification));
+    }
+
+    for ((id, _, _), (route, body)) in other.iter().zip([
+        ("acknowledge", r#"{"classification":"active","note":"not mine to sign"}"#),
+        ("resolve", r#"{"note":"not mine to close"}"#),
+    ]) {
+        let res = desktop.clone().oneshot(
+            Request::post(format!("/api/portfolios/1/breaches/{id}/{route}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body)).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY,
+            "{route} must not reach an episode of another fund");
+    }
+    for (id, state, classification) in &other {
+        let untouched: (String, String) = sqlx::query_as(
+            "SELECT state, classification FROM limit_breaches WHERE id = $1")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(untouched, (state.to_string(), classification.to_string()),
+            "the other fund's episode {id} must be exactly as it was");
+    }
+
     pool.close().await;
     edb.stop().await;
 }
@@ -364,6 +416,35 @@ async fn a_manual_rerun_records_a_second_run_for_the_same_date() {
     assert_eq!(open_after.len(), 1,
         "a re-run of a still-breaching check must not open a duplicate episode: {open_after:?}");
     assert_eq!(open_after[0].id, open[0].id, "the same episode, not a new one");
+
+    // A back-dated re-run is refused. Honouring one would compute findings
+    // from an earlier day's holdings and then close every live episode absent
+    // from them — `transitions` cannot tell a back-dated run from a fund that
+    // has cleared — writing `closed_nav_date` and a `cleared` event onto an
+    // episode that never cleared.
+    let res = desktop.clone().oneshot(
+        Request::post("/api/portfolios/1/limit-runs")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"date":"2000-01-01"}"#)).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "the register is not backfillable through the re-run endpoint");
+
+    assert_eq!(scoped.runs_for(&view, 50).await.unwrap().len(), 2,
+        "a refused re-run must not record a run");
+    let after_refusal = scoped.breaches_for(&view, Some("open")).await.unwrap();
+    assert_eq!(after_refusal.len(), 1, "the live episode must survive a refused re-run");
+    assert_eq!(after_refusal[0].id, open[0].id);
+    assert_eq!(after_refusal[0].closed_nav_date, None,
+        "nothing may have been marked cleared by a request that was refused");
+
+    // The same date, stated explicitly, is accepted — the field lets a caller
+    // say which date it believes it is re-checking, and that is all.
+    let today = runs_after[0].0.nav_date;
+    let res = desktop.clone().oneshot(
+        Request::post("/api/portfolios/1/limit-runs")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"date":"{today}"}}"#))).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 
     pool.close().await;
     edb.stop().await;

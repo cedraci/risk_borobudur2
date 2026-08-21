@@ -500,7 +500,9 @@ pub async fn resolve(
 
 #[derive(serde::Deserialize)]
 pub struct RerunBody {
-    /// Defaults to the latest snapshot date.
+    /// Optional, and when given it must name the latest snapshot date — the
+    /// caller stating which date it believes it is re-checking, not choosing
+    /// one. Defaults to that same date.
     #[serde(default)]
     pub date: Option<NaiveDate>,
 }
@@ -519,11 +521,22 @@ pub async fn rerun(
     let _configure = scoped.authorize::<Settings, Configure>(pid)?;
     super::portfolios::ensure(&scoped, pid, true).await?;
     let view = scoped.authorize::<Settings, View>(pid)?;
-    let date = match b.date {
-        Some(d) => d,
-        None => scoped.latest_position_date(&view, pid).await?
-            .ok_or_else(|| AppError::Unprocessable("no snapshot imported yet".into()))?,
-    };
+    // Only ever the latest snapshot. A run for an earlier date would compute
+    // findings from that day's holdings and then close every live episode
+    // absent from them — `analytics::breach::transitions` cannot tell a
+    // back-dated run from a fund that has cleared — stamping `closed_nav_date`
+    // and a `cleared` event on episodes that never cleared. The design puts
+    // retrospective backfill out of scope for exactly this reason, so a date
+    // that is not the latest is refused rather than honoured.
+    let latest = scoped.latest_position_date(&view, pid).await?
+        .ok_or_else(|| AppError::Unprocessable("no snapshot imported yet".into()))?;
+    if let Some(d) = b.date
+        && d != latest
+    {
+        return Err(AppError::Unprocessable(format!(
+            "a re-run re-checks the latest snapshot ({latest}); {d} would back-date the register")));
+    }
+    let date = latest;
     let run_id = crate::recorder::record(&st, pid, date, crate::recorder::Trigger::Manual {
         actor_user_id: (ctx.principal_id != 0).then_some(ctx.principal_id),
         actor_label: ctx.display_name.clone(),
