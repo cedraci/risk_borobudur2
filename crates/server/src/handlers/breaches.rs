@@ -482,9 +482,12 @@ impl DetailGate {
     /// where several apply, the narrowest grant is the informative one.
     fn reason_for(&self, check_key: &str) -> Option<&str> {
         let (pos, nav, sh) = Self::domains_for(check_key);
-        None.or_else(|| if sh { self.shareholders.as_deref() } else { None })
-            .or_else(|| if nav { self.nav.as_deref() } else { None })
-            .or_else(|| if pos { self.positions.as_deref() } else { None })
+        fn pick(needed: bool, d: &Option<String>) -> Option<&str> {
+            if needed { d.as_deref() } else { None }
+        }
+        pick(sh, &self.shareholders)
+            .or(pick(nav, &self.nav))
+            .or(pick(pos, &self.positions))
     }
 
     /// One recorded check result. `limit_value` survives a denial — it is the
