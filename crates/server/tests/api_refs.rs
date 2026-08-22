@@ -117,9 +117,22 @@ async fn refs_editor_flow() {
     let cash = rows.iter().find(|r| r["asset_type"] == "Cash Acc").unwrap();
     assert_eq!(cash["effective_issuer_group"], "CBLU");
 
-    // set an issuer-group override on a fund code
+    // Set an issuer-group override on a fund code (`LU1112771255` is a
+    // `Fonds` — see the `effective_days` 7.0 assertion further down).
+    //
+    // I4 (whole-branch review): `fund_20` is a per-TARGET-FUND limit, so
+    // `analytics::effective_issuer_group` never regroups a `Fonds` row. This
+    // route used to apply the override unconditionally and echo it back as
+    // "effective", so an analyst merging two share classes of one target UCITS
+    // got visual confirmation of a regrouping that `fund_20` and the breach
+    // register both ignored. The value the Reference page shows must be the
+    // value the check uses, and where the override does nothing the page must
+    // say so rather than leave the user to notice.
     let helium = rows.iter().find(|r| r["code"] == "LU1112771255").unwrap();
+    assert_eq!(helium["asset_type"], "Fonds");
     assert_eq!(helium["issuer_group_override"], serde_json::Value::Null);
+    assert_eq!(helium["issuer_group_override_inert"], false, "no override is set yet");
+    let before = helium["effective_issuer_group"].clone();
     let (st, _) = put_json(&app, "/api/refs/LU1112771255", serde_json::json!({
         "issuer_group": "HELIUM GROUP", "liquidity_days": 30,
         "bond_coupon_pct": null, "bond_maturity": null, "bond_coupon_freq": null
@@ -127,8 +140,37 @@ async fn refs_editor_flow() {
     assert_eq!(st, StatusCode::OK);
     let (_, rows2) = get_json(&app, "/api/refs").await;
     let helium2 = rows2.as_array().unwrap().iter().find(|r| r["code"] == "LU1112771255").unwrap();
-    assert_eq!(helium2["effective_issuer_group"], "HELIUM GROUP");
-    assert_eq!(helium2["effective_days"], 30.0);
+    assert_eq!(helium2["issuer_group_override"], "HELIUM GROUP", "the override is stored...");
+    assert_eq!(helium2["issuer_group_override_inert"], true, "...and reported as inert");
+    assert_eq!(helium2["effective_issuer_group"], before,
+        "a Fonds row is never regrouped, so the effective group must not move");
+    assert_eq!(helium2["effective_days"], 30.0, "the liquidity override is unaffected");
+
+    // The check itself is the arbiter, and it agrees: no `fund_20` row is
+    // named after the override. Without this the two surfaces could drift
+    // apart again with the assertions above still green.
+    let (st, con) = get_json(&app, "/api/portfolios/1/metrics/concentration").await;
+    assert_eq!(st, StatusCode::OK);
+    let fund = con["checks"].as_array().unwrap().iter()
+        .find(|c| c["check"] == "fund_20").expect("the fund_20 check");
+    let groups: Vec<&str> = fund["rows"].as_array().unwrap().iter()
+        .filter_map(|r| r["group"].as_str()).collect();
+    assert!(!groups.is_empty(), "the fixture holds funds, or this proves nothing");
+    assert!(!groups.contains(&"HELIUM GROUP"),
+        "the Reference page must not show a group the check does not use: {groups:?}");
+    assert!(groups.iter().any(|g| Some(*g) == before.as_str()),
+        "the check uses the effective group the page shows: {groups:?} vs {before}");
+
+    // An override on a non-`Fonds` instrument still applies, and is not inert.
+    let (st, _) = put_json(&app, "/api/refs/US105756CL22", serde_json::json!({
+        "issuer_group": "BOND ISSUER GROUP", "liquidity_days": null,
+        "bond_coupon_pct": null, "bond_maturity": null, "bond_coupon_freq": null
+    })).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, rows2b) = get_json(&app, "/api/refs").await;
+    let bond2 = rows2b.as_array().unwrap().iter().find(|r| r["code"] == "US105756CL22").unwrap();
+    assert_eq!(bond2["effective_issuer_group"], "BOND ISSUER GROUP");
+    assert_eq!(bond2["issuer_group_override_inert"], false);
 
     // revert with nulls
     let (st, _) = put_json(&app, "/api/refs/LU1112771255", serde_json::json!({

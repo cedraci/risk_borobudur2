@@ -24,7 +24,7 @@ A domain is a category of data. Every permission you are given is for one domain
 | Shareholders | The shareholder register and subscription/redemption flows, used for redemption stress testing. |
 | Market data | Market-sourced analytics such as bond futures' CTD (cheapest-to-deliver) data. |
 | Reference | Shared instrument data, the same for every portfolio: classifications (country, sector, industry, issuer group), issuer groups, liquidity overrides, bond statics, futures contract specifications and FX rates. Also whether a portfolio exists at all — creating, renaming and archiving one. |
-| Settings | One portfolio's own configuration: its VaR confidence, horizon, window and limit, its redemption stress and liquidity parameters, its depositary code mapping, its monthly EMIR KPI records, and its import log. |
+| Settings | One portfolio's own configuration: its VaR confidence, horizon, window and limit, its redemption stress and liquidity parameters, its depositary code mapping, its monthly EMIR KPI records, its import log, and its limit-breach register (runs, episodes, acknowledge/resolve, and the evidence export — see [Breaches](breaches.md)). |
 
 > **Why Reference and Settings are separate.** They used to be one domain, and that made a
 > fleet-wide "configure reference data" grant quietly powerful: it carried the authority to move

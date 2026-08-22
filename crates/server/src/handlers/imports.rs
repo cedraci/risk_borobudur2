@@ -190,6 +190,20 @@ async fn import_one(
                     "import_id": outcome.import_id, "filename": filename,
                     "kind": kind_label(id.kind), "duplicate": outcome.duplicate,
                 })).await;
+            // The register run is best-effort: an import that imported is an
+            // import, and failing the user's upload to protect the register
+            // would be the wrong trade. Logged loudly instead.
+            if !outcome.duplicate {
+                for d in batch.snapshots.iter().map(|s| s.nav_date).collect::<std::collections::BTreeSet<_>>() {
+                    if let Err(e) = crate::recorder::record(st, target.id, d, crate::recorder::Trigger::Import {
+                        import_id: outcome.import_id,
+                        actor_user_id: (ctx.principal_id != 0).then_some(ctx.principal_id),
+                        actor_label: ctx.display_name.clone(),
+                    }).await {
+                        tracing::error!("breach register run failed for portfolio {} on {d}: {e:#}", target.id);
+                    }
+                }
+            }
             r.outcome = Some(outcome);
         }
         Err(e) => r.error = Some(e.to_string()),

@@ -257,6 +257,11 @@ export interface Backtest {
 export interface RefRow {
   code: string; name: string; asset_type: string;
   effective_issuer_group: string; issuer_group_override: string | null;
+  // True when an override is set on a row the concentration checks never
+  // apply it to (a `Fonds` row: `fund_20` is a per-target-fund limit, so the
+  // group is deliberately ignored there). The editor shows the typed value
+  // either way, so without this an inert override looks like it took.
+  issuer_group_override_inert?: boolean;
   effective_days: number; days_override: number | null;
   adv_30d: number | null; adv_asof: string | null; adv_eligible: boolean | null;
   market_place_name: string | null;
@@ -538,6 +543,83 @@ export const ADMIN_ROLES: { value: string; label: string }[] = [
   { value: "operations", label: "Operations" },
   { value: "auditor", label: "Auditor" },
 ];
+
+// ---- Breach register (crates/server/src/handlers/breaches.rs, `/api/portfolios/{id}/{limit-runs,breaches}`) ----
+
+/** The server re-authorizes each recorded payload against the domain it was
+ * computed from — a run's `detail` is another domain's analytics, not Settings
+ * data (see `DetailGate` in `handlers/breaches.rs`). Where the reader lacks
+ * that grant the figure is withheld and this marker carries the reason, so the
+ * page can say why rather than showing a bare dash. */
+export type PayloadStatus =
+  | { status: "available" }
+  | { status: "unavailable"; reason: string };
+
+export interface CheckResult {
+  check_key: string; scope_label: string;
+  limit_value: number | null; observed_value: number | null;
+  status: "ok" | "watch" | "breach";
+  detail: unknown;
+  // `observed_value` and `detail` are withheld together when this is
+  // unavailable; `status` and `limit_value` are Settings data and survive.
+  payload_status?: PayloadStatus;
+}
+export interface LimitRun {
+  id: number; nav_date: string; run_at: string;
+  triggered_by: "import" | "manual"; import_id: number | null;
+  inputs_complete: boolean; input_notes: Record<string, string>;
+  results: CheckResult[];
+}
+export interface BreachEpisode {
+  id: number; check_key: string; subject: string;
+  opened_nav_date: string; opened_value: number | null;
+  peak_value: number | null; peak_nav_date: string | null;
+  closed_nav_date: string | null;
+  state: "open" | "acknowledged" | "resolved";
+  classification: "unclassified" | "active" | "passive";
+  proposed_classification: "active" | "passive" | null;
+  proposal_reason: string | null;
+  // `opened_value`/`peak_value`/`peak_nav_date` are withheld together when
+  // `values_status` is unavailable; `proposal_reason` when `proposal_status`
+  // is. Optional so an older server (or a fixture predating the gate) still
+  // types — absent means available.
+  values_status?: PayloadStatus;
+  proposal_status?: PayloadStatus;
+  acknowledged_at: string | null; acknowledgement_note: string | null;
+  // Who acted, captured on the event at the moment of the act (not a live
+  // join to `users`, so a later account deletion never erases who decided).
+  acknowledged_by_label: string | null;
+  deadline_date: string | null;
+  resolved_at: string | null; resolution_note: string | null;
+  resolved_by_label: string | null;
+}
+export interface BreachEvent {
+  at: string; actor_label: string; event: string; detail: unknown;
+}
+
+export const getLimitRuns = (pid: number, limit = 52) =>
+  req<{ runs: LimitRun[] }>(`/api/portfolios/${pid}/limit-runs?limit=${limit}`);
+export const getBreaches = (pid: number, state?: string) =>
+  req<{ breaches: BreachEpisode[] }>(`/api/portfolios/${pid}/breaches${state ? `?state=${state}` : ""}`);
+export const getBreach = (pid: number, bid: number) =>
+  req<{ breach: BreachEpisode; events: BreachEvent[] }>(`/api/portfolios/${pid}/breaches/${bid}`);
+export const acknowledgeBreach = (
+  pid: number, bid: number, body: { classification: string; note: string; deadline_date?: string },
+) => req<void>(`/api/portfolios/${pid}/breaches/${bid}/acknowledge`, {
+  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+});
+export const resolveBreach = (pid: number, bid: number, note: string) =>
+  req<void>(`/api/portfolios/${pid}/breaches/${bid}/resolve`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ note }),
+  });
+// The server resolves the latest snapshot itself and 422s any other date (a
+// back-dated run would close live episodes that never cleared) — this never
+// sends a date, always the literal empty body.
+export const rerunLimitChecks = (pid: number) =>
+  req<{ run_id: number; nav_date: string }>(`/api/portfolios/${pid}/limit-runs`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+export const breachExportUrl = (pid: number) => `/api/portfolios/${pid}/breaches/export`;
 
 export interface AuditRow {
   id: number; at: string; actor_label: string; action: string;

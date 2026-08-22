@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod recorder;
 pub mod routes;
 pub mod startup;
 pub mod state;

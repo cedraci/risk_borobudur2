@@ -118,6 +118,19 @@ const CASES: &[Case] = &[
     r("/api/portfolios/{pid}/settings", Domain::Settings, Action::View),
     r("/api/portfolios/{pid}/imports", Domain::Settings, Action::View),
     r("/api/portfolios/{pid}/futures-analytics", Domain::MarketData, Action::View),
+    r("/api/portfolios/{pid}/limit-runs", Domain::Settings, Action::View),
+    r("/api/portfolios/{pid}/breaches", Domain::Settings, Action::View),
+    r("/api/portfolios/{pid}/breaches/export", Domain::Settings, Action::Export),
+    // `GET /api/portfolios/{pid}/breaches/{bid}` is NOT in this table. The
+    // exact-grant case below (`the_exact_grant_never_401s_403s_or_404s`)
+    // asserts that a 404 never comes back, but this file's `app()` seeds no
+    // breach episodes at all — any concrete `bid` here would 404 for the
+    // right reason (no such episode) and fail that assertion for the wrong
+    // one. Its authorization contract (no cookie / wrong domain / wrong
+    // portfolio / exact grant) is pinned instead in
+    // `api_breach_register.rs::episode_route_authorization`, against a
+    // real episode.
+
     // Writes. Every mutating portfolio-scoped route in `routes.rs` — the
     // half the matrix used to skip. A mis-declared write is both likelier
     // (they arrive one at a time) and more expensive than a mis-declared
@@ -136,6 +149,21 @@ const CASES: &[Case] = &[
            domain: Domain::Positions, action: Action::Import },
     Case { uri: "/api/portfolios/{pid}/futures-analytics", method: "POST", body: Some(Payload::Multipart),
            domain: Domain::MarketData, action: Action::Import },
+    // The three write routes Task 8 adds. Unlike the `breaches/{bid}` GET
+    // above, a missing episode (`bid=1`, never seeded by this file's `app()`)
+    // makes both `acknowledge` and `resolve` return 422 (no such open/
+    // acknowledged breach), never 404 — same for `limit-runs` with no
+    // snapshot imported yet (422 "no snapshot imported yet"). That keeps
+    // `the_exact_grant_never_401s_403s_or_404s` honest: the handler really is
+    // reached, not merely routed to.
+    Case { uri: "/api/portfolios/{pid}/limit-runs", method: "POST", body: Some(Payload::Json("{}")),
+           domain: Domain::Settings, action: Action::Configure },
+    Case { uri: "/api/portfolios/{pid}/breaches/1/acknowledge", method: "POST",
+           body: Some(Payload::Json(r#"{"classification":"passive","note":"x"}"#)),
+           domain: Domain::Settings, action: Action::Configure },
+    Case { uri: "/api/portfolios/{pid}/breaches/1/resolve", method: "POST",
+           body: Some(Payload::Json(r#"{"note":"x"}"#)),
+           domain: Domain::Settings, action: Action::Configure },
 ];
 
 /// Instance-wide routes (`.protected_global`). Their contract differs from

@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::state::AppState;
-use analytics::{concentration, default_issuer_group, ConPosition};
+use analytics::{concentration, ConPosition};
 use axum::extract::{Path, Query, State};
 use axum::{Extension, Json};
 use chrono::NaiveDate;
@@ -44,7 +44,7 @@ async fn snapshot(scoped: &Scoped<'_>, a: &db::auth::Access<Positions, View>, q:
     Ok((dates, date, rows, refs))
 }
 
-fn ref_map(refs: &[db::repo::InstrumentRef]) -> HashMap<&str, &db::repo::InstrumentRef> {
+pub(crate) fn ref_map(refs: &[db::repo::InstrumentRef]) -> HashMap<&str, &db::repo::InstrumentRef> {
     refs.iter().map(|r| (r.code.as_str(), r)).collect()
 }
 
@@ -56,19 +56,10 @@ pub async fn concentration_h(
     super::portfolios::ensure(&scoped, pid, false).await?;
     let (dates, date, rows, refs) = snapshot(&scoped, &a, &q).await?;
     let by = ref_map(&refs);
-    let cons: Vec<ConPosition> = rows.iter().filter_map(|p| {
-        let w = p.weight?;
-        let name = p.name.clone().unwrap_or_default();
-        // fund_20 is per target fund: overrides don't regroup Fonds rows
-        let group = if p.asset_type == "Fonds" {
-            default_issuer_group(&p.asset_type, &name)
-        } else {
-            by.get(p.isin.as_str())
-                .and_then(|r| r.issuer_group.clone())
-                .unwrap_or_else(|| default_issuer_group(&p.asset_type, &name))
-        };
-        Some(ConPosition { asset_type: p.asset_type.clone(), group, weight: w })
-    }).collect();
+    // The grouping rule lives in `breaches::subject_group` (via
+    // `con_positions`), shared with the recorder: the grouping a check is
+    // computed on must be the grouping the register records.
+    let cons: Vec<ConPosition> = super::breaches::con_positions(&rows, &by);
     // Ruling 2 (Task 9 review, Task 11): a denied Reference read must not
     // silently drop the issuer-group/liquidity overrides that feed the
     // group/fund/deposit checks above — that would hide a real 5/10/40
@@ -138,6 +129,139 @@ fn build_positions(
                 &settings.liquidity_default_days, &p.asset_type, None),
         })
     }).collect()
+}
+
+/// Inputs the liquidity scenario math needs, gathered once by the caller —
+/// the live handler after its own authorization/degradation decisions, or
+/// the breach register's `compute` under the system context. This function
+/// has no notion of authorization: denial-stamping (the `"unavailable"`
+/// override when Reference is denied) stays in `liquidity_h`, which calls
+/// this and then post-processes its result.
+pub(crate) struct LiquidityScenarioInputs<'a> {
+    pub rows: &'a [db::repo::PositionRecord],
+    pub by: &'a HashMap<&'a str, &'a db::repo::InstrumentRef>,
+    pub settings: &'a db::settings::AppSettings,
+    pub asof: chrono::NaiveDate,
+    pub nav: f64,
+    pub register: &'a [db::repo::Shareholder],
+    /// Reason shown when `top5`/`hybrid_top5` cannot be evaluated. Both
+    /// callers agree on WHEN that happens — an empty `register` means the
+    /// requirement is unknown, never 0% — and derive it here from
+    /// `register.is_empty()`; they differ only on WHY the register is
+    /// empty, which is all this string carries. `liquidity_h` passes the
+    /// caller's denial reason when a Shareholders grant was refused; the
+    /// breach register, running under the system context where no denial is
+    /// possible, always passes "no shareholder register".
+    pub top5_unavailable_reason: &'a str,
+}
+
+pub(crate) struct LiquidityAssembly {
+    pub scenarios: Vec<serde_json::Value>,
+    pub normal: Vec<analytics::Capacity>,
+    pub stressed: Vec<analytics::Capacity>,
+    pub coupon_gaps: Vec<analytics::CouponGap>,
+    pub negative_eur: f64,
+}
+
+/// The scenario math lifted out of `liquidity_h`, shared with the breach
+/// register's `compute`: the capacities and waterfall a scenario is judged
+/// on must be the same whether a person is looking at the live page or the
+/// register is recording it — a transcribed copy that drifts would make the
+/// register disagree with the live page it is supposed to evidence.
+///
+/// What this does NOT make identical is which NAV the two feed it (M2).
+/// `liquidity_h` uses `aum_for(date)`, an exact match, and returns the empty
+/// shape with `nav_status: "no NAV data"` and no scenarios when there is none.
+/// `compute` takes the latest NAV at or before `nav_date`, so a routine
+/// one-business-day depositary lag does not blank out every scenario on every
+/// run, and stamps `nav_basis_date` into each recorded `detail`. On a date
+/// with a position snapshot but no NAV row the two therefore disagree: the
+/// register asserts a liquidity verdict the live page declines to give. The
+/// register's `nav_basis_date` is what makes that legible rather than
+/// mysterious; closing the gap properly means deciding whether the live page
+/// should carry the same fallback, which is a product call, not a refactor.
+pub(crate) fn liquidity_assembly(i: &LiquidityScenarioInputs) -> LiquidityAssembly {
+    let horizon = i.settings.liquidity_horizon_days;
+    let positions = build_positions(i.rows, i.by, i.settings, i.asof);
+    let cap_at = |stress: f64| -> Vec<analytics::Capacity> {
+        positions.iter().map(|p| analytics::capacity(p, i.settings.participation_rate, stress)).collect()
+    };
+    let normal = cap_at(1.0);
+    let stressed = cap_at(i.settings.adv_stress_factor);
+
+    let negative_eur: f64 = i.rows.iter().filter_map(|p| p.valuation_eur).filter(|v| *v < 0.0).sum();
+
+    // Coupon and redemption inflows, from the depositary's own schedule. See
+    // `liquidity_h`'s original comment: a missing fx rate is never defaulted
+    // to parity, the bond is skipped and surfaced as a gap instead.
+    let mut coupon_inputs: Vec<analytics::CouponInput> = Vec::new();
+    let mut fx_gaps: Vec<analytics::CouponGap> = Vec::new();
+    for p in i.rows.iter().filter(|p| p.asset_type == "Obligation") {
+        let Some(r) = i.by.get(p.isin.as_str()) else { continue };
+        let Some(fx_rate) = p.fx_rate else {
+            fx_gaps.push(analytics::CouponGap { code: p.isin.clone(), reason: "no fx rate" });
+            continue;
+        };
+        coupon_inputs.push(analytics::CouponInput {
+            code: p.isin.clone(),
+            quantity: p.quantity.unwrap_or(0.0),
+            coupon_pct: r.bond_coupon_pct,
+            coupon_type: r.bond_coupon_pct.map(|_| "FIX".to_string()),
+            next_coupon: r.bond_next_coupon,
+            maturity: r.bond_maturity,
+            freq: r.bond_coupon_freq,
+            accrued_eur: p.accrued_interest,
+            fx_rate,
+        });
+    }
+    let mut coupons = analytics::bond_inflows(&coupon_inputs, i.asof, horizon);
+    coupons.gaps.extend(fx_gaps);
+
+    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity]| -> serde_json::Value {
+        let Some(pct) = required_pct else {
+            return serde_json::json!({
+                "key": key, "status": "unavailable", "reason": i.top5_unavailable_reason,
+            });
+        };
+        let required = pct * i.nav;
+        let w = analytics::waterfall(caps, &coupons.inflows, negative_eur, required, horizon);
+        let status = match w.days {
+            Some(d) if d <= i.settings.settlement_deadline_days => "ok",
+            _ => "breach",
+        };
+        let curve: Vec<serde_json::Value> = (1..=horizon).map(|d| serde_json::json!({
+            "day": d,
+            "available_eur": analytics::available(caps, &coupons.inflows, negative_eur, d),
+        })).collect();
+        serde_json::json!({
+            "key": key,
+            "required_eur": required,
+            "required_pct": pct,
+            "register_count": i.register.len().min(5),
+            "status": status,
+            "waterfall": w,
+            "slice_days": analytics::slice_days(caps, required, i.nav),
+            "residual": analytics::residual(caps, required, i.nav, w.days.unwrap_or(horizon)),
+            "curve": curve,
+        })
+    };
+
+    // An empty register makes the top-5 redemption requirement UNKNOWN, not
+    // zero: "if the five largest investors all redeemed at once, could the
+    // fund meet it?" has no honest answer when nobody has loaded who they
+    // are. Derived here rather than passed in so the rule has one home —
+    // two copies of it in the callers could drift apart.
+    let top5 = (!i.register.is_empty())
+        .then(|| i.register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0);
+    let fixed = Some(i.settings.redemption_shock);
+    let scenarios = vec![
+        scenario("top5", top5, &normal),
+        scenario("fixed", fixed, &normal),
+        scenario("hybrid_top5", top5, &stressed),
+        scenario("hybrid_fixed", fixed, &stressed),
+    ];
+
+    LiquidityAssembly { scenarios, normal, stressed, coupon_gaps: coupons.gaps, negative_eur }
 }
 
 pub async fn liquidity_h(
@@ -217,46 +341,7 @@ pub async fn liquidity_h(
         })));
     };
 
-    let positions = build_positions(&rows, &by, &settings, asof);
-    let cap_at = |stress: f64| -> Vec<analytics::Capacity> {
-        positions.iter().map(|p| analytics::capacity(p, settings.participation_rate, stress)).collect()
-    };
-    let normal = cap_at(1.0);
-    let stressed = cap_at(settings.adv_stress_factor);
-
-    let negative_eur: f64 = rows.iter().filter_map(|p| p.valuation_eur).filter(|v| *v < 0.0).sum();
     let negative_memo: f64 = rows.iter().filter_map(|p| p.weight).filter(|w| *w < 0.0).sum();
-
-    // Coupon and redemption inflows, from the depositary's own schedule.
-    // CACEIS derives fx_rate from market-value-EUR / market-value-local, so
-    // it is NULL when the local market value is missing. A missing rate is
-    // never defaulted to parity (that would silently convert a non-EUR
-    // coupon at 1.0, a unit assumption on a cash inflow); the bond is
-    // skipped and surfaced in the coverage block instead.
-    let mut coupon_inputs: Vec<analytics::CouponInput> = Vec::new();
-    let mut fx_gaps: Vec<analytics::CouponGap> = Vec::new();
-    for p in rows.iter().filter(|p| p.asset_type == "Obligation") {
-        let Some(r) = by.get(p.isin.as_str()) else { continue };
-        let Some(fx_rate) = p.fx_rate else {
-            fx_gaps.push(analytics::CouponGap { code: p.isin.clone(), reason: "no fx rate" });
-            continue;
-        };
-        coupon_inputs.push(analytics::CouponInput {
-            code: p.isin.clone(),
-            quantity: p.quantity.unwrap_or(0.0),
-            coupon_pct: r.bond_coupon_pct,
-            // Only a fixed coupon reaches instrument_refs at all, so its
-            // presence is the FIX gate the parser already applied.
-            coupon_type: r.bond_coupon_pct.map(|_| "FIX".to_string()),
-            next_coupon: r.bond_next_coupon,
-            maturity: r.bond_maturity,
-            freq: r.bond_coupon_freq,
-            accrued_eur: p.accrued_interest,
-            fx_rate,
-        });
-    }
-    let mut coupons = analytics::bond_inflows(&coupon_inputs, asof, horizon);
-    coupons.gaps.extend(fx_gaps);
 
     // Shareholders is a secondary domain here too — see the routes.rs
     // comment on this route: it degrades the top-5 scenario to
@@ -271,84 +356,50 @@ pub async fn liquidity_h(
             Ok(sv) => (scoped.shareholders_for(&sv).await?, None),
             Err(denied) => (Vec::new(), Some(denied.reason())),
         };
-    let top5_pct: f64 = register.iter().take(5).map(|s| s.pct_of_nav).sum::<f64>() / 100.0;
     let top5_unavailable_reason = shareholders_denied_reason
         .clone()
         .unwrap_or_else(|| "no shareholder register".to_string());
+    // The capacities/waterfall/scenario math lives in `liquidity_assembly`,
+    // shared with the breach register's `compute` — see its doc comment.
+    let assembly = liquidity_assembly(&LiquidityScenarioInputs {
+        rows: &rows, by: &by, settings: &settings, asof, nav,
+        register: &register, top5_unavailable_reason: &top5_unavailable_reason,
+    });
+    let mut scenarios = assembly.scenarios;
+    let normal = assembly.normal;
+    let stressed = assembly.stressed;
 
-    // `unavailable_reason` is `Option<&str>` rather than a bare `&str`: the
-    // "fixed"/"hybrid_fixed" scenarios pass `None` because their
-    // `required_pct` is always `Some` (the redemption shock always has a
-    // configured value) and the `None` branch below is therefore
-    // unreachable for them — an empty-string sentinel there could have
-    // silently shipped `reason: ""` if that ever stopped being true. `.expect`
-    // makes an actual regression fail loudly instead of shipping a blank
-    // reason.
-    //
     // CRITICAL residual (Task 9 review round 2): `caps` (`normal`/`stressed`)
     // are built from `positions`, which is built from `by` — the same
     // Reference-degraded map `issuer_overrides` warns about. Every scenario
-    // below reads `caps`, so with Reference denied EVERY scenario's
+    // above reads `caps`, so with Reference denied EVERY scenario's
     // "ok"/"breach" verdict, `waterfall`, `slice_days` and `residual` are
     // computed on the default-days fallback, not the fund's real liquidity —
     // exactly the breach-reads-as-ok risk `issuer_overrides` exists to flag.
     // A sibling marker is not a suppression: the computed fields must
     // themselves read `unavailable`/`null` (mirrors what `concentration_h`
-    // now does to `checks`), checked here, uniformly, for every key —
-    // including `top5`/`hybrid_top5` when the register happens to be loaded
-    // even though Reference is denied.
-    let scenario = |key: &str, required_pct: Option<f64>, caps: &[analytics::Capacity], unavailable_reason: Option<&str>| -> serde_json::Value {
-        let Some(pct) = required_pct else {
-            return serde_json::json!({
-                "key": key, "status": "unavailable",
-                "reason": unavailable_reason.expect("only top5/hybrid_top5 can be unavailable, and both pass a reason"),
-            });
-        };
-        let required = pct * nav;
-        if let Some(denied) = &reference_denied {
-            return serde_json::json!({
-                "key": key,
-                "required_eur": required,
-                "required_pct": pct,
-                "register_count": register.len().min(5),
-                "status": "unavailable",
-                "reason": denied.reason(),
-                "waterfall": serde_json::Value::Null,
-                "slice_days": serde_json::Value::Null,
-                "residual": serde_json::Value::Null,
-                "curve": serde_json::Value::Null,
-            });
+    // now does to `checks`), stamped here, uniformly, for every key that
+    // `liquidity_assembly` did not already mark `unavailable` on its own
+    // account (an empty register) — including `top5`/`hybrid_top5` when the
+    // register happens to be loaded even though Reference is denied.
+    if let Some(denied) = &reference_denied {
+        for v in scenarios.iter_mut() {
+            if v.get("status").and_then(|s| s.as_str()) != Some("unavailable") {
+                *v = serde_json::json!({
+                    "key": v["key"],
+                    "required_eur": v["required_eur"],
+                    "required_pct": v["required_pct"],
+                    "register_count": v["register_count"],
+                    "status": "unavailable",
+                    "reason": denied.reason(),
+                    "waterfall": serde_json::Value::Null,
+                    "slice_days": serde_json::Value::Null,
+                    "residual": serde_json::Value::Null,
+                    "curve": serde_json::Value::Null,
+                });
+            }
         }
-        let w = analytics::waterfall(caps, &coupons.inflows, negative_eur, required, horizon);
-        let status = match w.days {
-            Some(d) if d <= settings.settlement_deadline_days => "ok",
-            _ => "breach",
-        };
-        let curve: Vec<serde_json::Value> = (1..=horizon).map(|d| serde_json::json!({
-            "day": d,
-            "available_eur": analytics::available(caps, &coupons.inflows, negative_eur, d),
-        })).collect();
-        serde_json::json!({
-            "key": key,
-            "required_eur": required,
-            "required_pct": pct,
-            "register_count": register.len().min(5),
-            "status": status,
-            "waterfall": w,
-            "slice_days": analytics::slice_days(caps, required, nav),
-            "residual": analytics::residual(caps, required, nav, w.days.unwrap_or(horizon)),
-            "curve": curve,
-        })
-    };
-
-    let top5 = (!register.is_empty()).then_some(top5_pct);
-    let fixed = Some(settings.redemption_shock);
-    let scenarios = vec![
-        scenario("top5", top5, &normal, Some(&top5_unavailable_reason)),
-        scenario("fixed", fixed, &normal, None),
-        scenario("hybrid_top5", top5, &stressed, Some(&top5_unavailable_reason)),
-        scenario("hybrid_fixed", fixed, &stressed, None),
-    ];
+    }
 
     let measured_eur: f64 = normal.iter().filter(|c| c.measured).map(|c| c.valuation_eur).sum();
     let fallbacks: Vec<serde_json::Value> = normal.iter()
@@ -363,7 +414,7 @@ pub async fn liquidity_h(
         "coverage": {
             "adv_pct_of_nav": if nav > 0.0 { measured_eur / nav } else { 0.0 },
             "fallbacks": fallbacks,
-            "coupon_gaps": coupons.gaps,
+            "coupon_gaps": assembly.coupon_gaps,
             "register": {
                 "count": register.len(),
                 "as_of": register.iter().map(|s| s.as_of).min(),
@@ -378,7 +429,7 @@ pub async fn liquidity_h(
         },
         "scenarios": scenarios,
         "negative_memo": negative_memo,
-        "negative_memo_eur": negative_eur,
+        "negative_memo_eur": assembly.negative_eur,
         "issuer_overrides": issuer_overrides,
         "nav_status": nav_status,
     })))

@@ -16,6 +16,14 @@ missing, the affected figures degrade to an explicit unavailable state rather
 than silently showing an incomplete result. Those cases are called out in
 each section below.
 
+This page does not remember a check's history from one snapshot to the next —
+for that, see [Breaches](breaches.md): every check shown here (plus the VaR
+limit and the EMIR thresholds) is also recorded on every import into a
+persistent register, which groups consecutive breaches of the same check *by
+the same subject* — one issuer, one bank, one EMIR asset class — into a single
+episode and tracks it through acknowledgement and resolution. Two issuers over
+the same 10% limit are two episodes, not one.
+
 ## Snapshot selector
 
 A single dropdown, labelled **Snapshot**, lists every date for which the

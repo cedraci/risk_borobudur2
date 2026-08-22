@@ -279,9 +279,8 @@ pub async fn export(
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
-    h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
-        &format!("attachment; filename=\"EMIR - seuils - {} - {}.xlsx\"", portfolio.name, a.anchor))
-        .map_err(anyhow::Error::from)?);
+    h.insert(header::CONTENT_DISPOSITION, super::download::attachment(
+        &format!("EMIR - seuils - {} - {}.xlsx", portfolio.name, a.anchor)));
     crate::audit::record(&st, &ctx, "export", Some(Domain::Positions), Some(pid),
         serde_json::json!({"kind": "emir_evidence", "anchor": a.anchor, "portfolio": portfolio.name})).await;
     Ok((StatusCode::OK, h, bytes))

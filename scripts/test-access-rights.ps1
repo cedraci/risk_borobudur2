@@ -338,6 +338,12 @@ if ($r.Status -eq 200) {
 }
 $r = Invoke-Api -Method GET -Path "/api/portfolios/$pidB/settings" -Cookie $sub
 Check "B's settings stay 403 (settings/configure was A-only)" ($r.Status -eq 403) "got $($r.Status)"
+
+$r = Invoke-Api -Method GET -Path "/api/portfolios/$pidA/breaches" -Cookie $sub
+Check 'settings/configure (implying view) reaches the breach register' ($r.Status -eq 200) "got $($r.Status)"
+$r = Invoke-Api -Method GET -Path "/api/portfolios/$pidB/breaches" -Cookie $sub
+Check "B's register stays 403 (the settings grant was A-only)" ($r.Status -eq 403) "got $($r.Status)"
+
 $null = Invoke-Api -Method DELETE -Path "/api/admin/users/$subjectId/grants" -Cookie $adm `
     -Body (New-Grant 'settings' 'configure' $pidA)
 

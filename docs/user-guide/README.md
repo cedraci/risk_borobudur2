@@ -17,6 +17,7 @@ cross-cutting chapters on getting started and access rights.
 | [Risk](risk.md) | Volatility, drawdown and related risk statistics. |
 | [VaR / ES](var-es.md) | Value-at-Risk and Expected Shortfall (three methods), UCITS monitoring, and VaR back-testing. |
 | [Limits](limits.md) | UCITS concentration checks, liquidity bucketing and redemption stress, bond analytics (YTM, duration, DV01) and NAV rate sensitivity. |
+| [Breaches](breaches.md) | The persistent breach register: runs, episodes, proposed classifications, acknowledge/resolve, and the evidence export. |
 | [Derivatives](derivatives-emir.md) | Notional exposure by underlying and category, and EMIR clearing-threshold monitoring with the evidence export. |
 | [Data](data.md) | All imports (NAV Recap, CACEIS CSV, CTD analytics, Bloomberg classifications), futures contract confirmation, reference data, portfolio management, and the shareholder register. |
 | [Administration](administration.md) | Server mode only: users, enrolment, roles, grants, sessions, and the audit log. |

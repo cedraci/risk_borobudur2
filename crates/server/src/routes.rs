@@ -136,6 +136,21 @@ pub fn router(state: AppState) -> Router {
         .protected("/api/portfolios/{id}/emir/export", get(handlers::emir::export), Domain::Positions, Action::Export)
         .protected("/api/portfolios/{id}/futures-analytics", get(handlers::futures::list_ctd), Domain::MarketData, Action::View)
         .protected("/api/portfolios/{id}/futures-analytics", axum::routing::post(handlers::futures::upload_ctd), Domain::MarketData, Action::Import)
+        .protected("/api/portfolios/{id}/limit-runs", get(handlers::breaches::runs_list), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/limit-runs", axum::routing::post(handlers::breaches::rerun), Domain::Settings, Action::Configure)
+        .protected("/api/portfolios/{id}/breaches", get(handlers::breaches::register_list), Domain::Settings, Action::View)
+        // Declared before `/breaches/{bid}`, per the task brief's route-
+        // ordering note: a literal segment should be registered ahead of a
+        // same-position `{param}` route, in case it is ever needed.
+        // `api_breach_register.rs::the_evidence_export_returns_an_xlsx` pins
+        // this route resolving correctly in its current (literal-first)
+        // position; it does not exercise the reverse order, so it is not
+        // evidence either way about what would happen if the two were
+        // swapped.
+        .protected("/api/portfolios/{id}/breaches/export", get(handlers::breaches::export), Domain::Settings, Action::Export)
+        .protected("/api/portfolios/{id}/breaches/{bid}", get(handlers::breaches::episode_get), Domain::Settings, Action::View)
+        .protected("/api/portfolios/{id}/breaches/{bid}/acknowledge", axum::routing::post(handlers::breaches::acknowledge), Domain::Settings, Action::Configure)
+        .protected("/api/portfolios/{id}/breaches/{bid}/resolve", axum::routing::post(handlers::breaches::resolve), Domain::Settings, Action::Configure)
         .layer(axum::extract::DefaultBodyLimit::max(20 * 1024 * 1024))
         .fallback(crate::static_assets::static_handler);
     // Only mounted in server mode: desktop mode has no accounts, so there is

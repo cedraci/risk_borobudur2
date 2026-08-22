@@ -56,11 +56,14 @@ pub struct VarResponse {
     pub warnings: Vec<String>,
 }
 
-fn to_points(rows: &[db::repo::NavRow]) -> Vec<NavPoint> {
+pub(crate) fn to_points(rows: &[db::repo::NavRow]) -> Vec<NavPoint> {
     rows.iter().map(|r| NavPoint { date: r.date, value: r.nav }).collect()
 }
 
-fn var_block(rets: &[f64], confidence: f64, horizon: u32, window: u32, limit: f64, aum: Option<f64>, warnings: &mut Vec<String>) -> Option<VarBlock> {
+/// Historical/Gaussian/Cornish-Fisher VaR and ES for one window, shared with
+/// the breach register's `compute`: the same NAV-returns math a person sees
+/// on the live VaR page must be what the register records for `var_limit`.
+pub(crate) fn var_block(rets: &[f64], confidence: f64, horizon: u32, window: u32, limit: f64, aum: Option<f64>, warnings: &mut Vec<String>) -> Option<VarBlock> {
     let window_rets: &[f64] = if rets.len() > window as usize { &rets[rets.len() - window as usize..] } else { rets };
     if window_rets.len() < MIN_OBS {
         warnings.push(format!("VaR n/a: only {} observations (< {MIN_OBS})", window_rets.len()));

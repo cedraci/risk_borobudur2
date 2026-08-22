@@ -103,12 +103,76 @@ on A only):
       the red used for one anywhere on Limits/Derivatives.
 - [ ] Derivatives / EMIR: clearing-obligation verdicts show a grey
       **N/A** with the reason named above the table (reference denied), and
-      the evidence export button produces an explicit error — never a
-      silently degraded file.
+      the evidence export never produces a silently degraded file. Note the
+      known gap: the export control is an unguarded download link
+      (`DerivativesPage.tsx`), so a denial arrives as a saved file containing
+      a 403 body rather than as an on-screen error. Record what you see; see
+      the matching item in section 4b.
 - [ ] P&L: the **Realized and Unrealized columns are blank** (dashes), with
       the reason named above the table. Total and "of which FX" still show
       real figures. A realized column full of `0 €` is the specific failure
       this is looking for.
+
+## 4b. Breach register (~8 min, most of it setup)
+
+**Setup — these cannot be done as either fixture persona as provisioned.**
+The Breaches tab is gated on `settings/view` (`frontend/src/nav.ts`), and the
+script leaves the subject with nav + positions view only and the administrator
+with no grant on A. So, as the **administrator**: grant yourself
+**settings/view** and **settings/configure** on A, refresh, and open Breaches.
+Section 4's NAV Recap upload is a prerequisite — a portfolio with no imported
+snapshot has no runs and no episodes.
+
+> **If the register reads "No breaches in the register." after the import,
+> every item below that needs an episode cannot be observed** — that is all of
+> them except the last. Record those as *not run* and say so. Do not tick them:
+> an empty register satisfies every one of them vacuously, which is exactly the
+> failure this section exists to catch.
+
+- [ ] Every open episode's classification chip reads **Unclassified**, and the
+      tool's own opinion is worded as a proposal beside it, never as a
+      decision. On a portfolio's **first** imported snapshot every episode
+      should read **"No proposal — {reason}"** (there is no earlier snapshot to
+      compare against) — check that this does not silently render as
+      "Proposed: Passive", and that the reason is shown.
+- [ ] *(Needs a second, later snapshot — skip and say so if you have only one.)*
+      Import another NAV Recap for a later date. A proposal is computed once,
+      when an episode opens, and never recomputed — so episodes carried over
+      from the first snapshot keep their original "No proposal" wording, and
+      that is correct, not a bug. What to check is an episode that opens **for
+      the first time on this second snapshot**: it should read **Proposed:
+      Active** or **Proposed: Passive** with its reasoning, while its
+      classification chip is still **Unclassified**, because nobody has
+      acknowledged anything.
+- [ ] *(Needs an episode that has cleared — skip and say so if none has.)* An
+      episode whose check has cleared but which nobody has signed off reads
+      **"cleared on the data since \<date\> — awaiting sign-off"**, visibly
+      different from a resolved one's green **Resolved**.
+- [ ] An open episode offers **Acknowledge** and no **Resolve** — the resolve
+      control only appears once the episode is acknowledged, so the state
+      machine is visible in the page and not only enforced by the server.
+      (The server's own refusal of an out-of-order resolve is pinned by the
+      Rust suite; it is not reachable from the UI.)
+- [ ] Acknowledge one episode: choosing no classification, or leaving the note
+      empty, is refused in the page with a readable message rather than posted
+      to the server. After acknowledging, the card names **you** and the time,
+      and a **Resolve** control appears.
+- [ ] **A denial must not look like a finding.** With view but no configure,
+      acknowledge or press **Re-run checks now**: the refusal must read in the
+      neutral grey **N/A — {reason}** treatment, never in the red used for an
+      open breach. This is the branch's hard rule (section 4 states it for
+      Limits and Derivatives) and it applies here too.
+- [ ] **Known gap, worth confirming is still true.** This one needs no
+      episode. Holding no `settings/export` grant — which is the state the
+      setup above leaves you in, since it granted only view and configure —
+      press **Export evidence workbook**. The control is a plain download link
+      rendered unconditionally (`BreachesPage.tsx`), so the denial is expected
+      to arrive as a saved file containing a 403 body rather than as an
+      on-screen error. This is an app-wide gap, not specific to this page —
+      the EMIR export (`DerivativesPage.tsx`) and the Bloomberg exports are the
+      same unguarded `<a href download>`, and section 4's EMIR item asks for an
+      on-screen error the code does not in fact produce either. Record what you
+      actually see, on both pages.
 
 ## 5. Account lifecycle UX (admin, ~4 min)
 
